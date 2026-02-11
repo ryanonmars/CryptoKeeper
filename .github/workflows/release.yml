@@ -36,18 +36,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Prepare asset
+      - name: Prepare asset (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path cryptokeeper.exe -DestinationPath ${{ github.workspace }}/${{ matrix.asset_name }}.zip
+
+      - name: Prepare asset (Unix)
+        if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cd target/${{ matrix.target }}/release
-            zip ${{ matrix.asset_name }}.zip cryptokeeper.exe
-            mv ${{ matrix.asset_name }}.zip ${{ github.workspace }}/
-          else
-            cd target/${{ matrix.target }}/release
-            zip ${{ matrix.asset_name }}.zip cryptokeeper
-            mv ${{ matrix.asset_name }}.zip ${{ github.workspace }}/
-          fi
+          cd target/${{ matrix.target }}/release
+          zip ${{ matrix.asset_name }}.zip cryptokeeper
+          mv ${{ matrix.asset_name }}.zip ${{ github.workspace }}/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
