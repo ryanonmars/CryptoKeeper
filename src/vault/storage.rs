@@ -255,6 +255,7 @@ mod tests {
             secret: "0xdeadbeef".to_string(),
             secret_type: SecretType::PrivateKey,
             network: "Ethereum".to_string(),
+            public_address: None,
             notes: "Test note".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

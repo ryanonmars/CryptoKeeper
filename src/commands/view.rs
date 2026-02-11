@@ -15,6 +15,9 @@ pub fn run(name: &str) -> Result<()> {
     println!("  {} {}", "Name:".bold(), entry.name.cyan());
     println!("  {} {}", "Type:".bold(), entry.secret_type);
     println!("  {} {}", "Network:".bold(), entry.network);
+    if let Some(ref addr) = entry.public_address {
+        println!("  {} {}", "Public address:".bold(), addr);
+    }
     if !entry.notes.is_empty() {
         println!("  {} {}", "Notes:".bold(), entry.notes);
     }

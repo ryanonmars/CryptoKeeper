@@ -89,6 +89,23 @@ pub fn run(name: &str) -> Result<()> {
         .interact_text()
         .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
+    let new_public_address = if new_type == SecretType::PrivateKey {
+        let current = entry.public_address.as_deref().unwrap_or("");
+        let addr: String = Input::new()
+            .with_prompt(format!("Public address [{}]", if current.is_empty() { "(none)" } else { current }))
+            .default(entry.public_address.clone().unwrap_or_default())
+            .interact_text()
+            .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        let trimmed = addr.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    } else {
+        None
+    };
+
     // Notes
     let new_notes: String = Input::new()
         .with_prompt(format!(
@@ -110,6 +127,7 @@ pub fn run(name: &str) -> Result<()> {
         entry.secret = secret.to_string();
     }
     entry.network = new_network.trim().to_string();
+    entry.public_address = new_public_address;
     entry.notes = new_notes.trim().to_string();
     entry.updated_at = Utc::now();
 

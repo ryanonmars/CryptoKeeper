@@ -24,6 +24,8 @@ pub struct Entry {
     pub secret: String,
     pub secret_type: SecretType,
     pub network: String,
+    #[serde(default)]
+    pub public_address: Option<String>,
     pub notes: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -42,6 +44,7 @@ impl fmt::Debug for Entry {
             .field("secret", &"[REDACTED]")
             .field("secret_type", &self.secret_type)
             .field("network", &self.network)
+            .field("public_address", &self.public_address)
             .field("notes", &self.notes)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -54,6 +57,8 @@ pub struct EntryMeta {
     pub name: String,
     pub network: String,
     pub secret_type: SecretType,
+    #[serde(default)]
+    pub public_address: Option<String>,
     pub notes: String,
 }
 
@@ -101,6 +106,7 @@ impl VaultData {
                 name: e.name.clone(),
                 network: e.network.clone(),
                 secret_type: e.secret_type.clone(),
+                public_address: e.public_address.clone(),
                 notes: e.notes.clone(),
             })
             .collect()

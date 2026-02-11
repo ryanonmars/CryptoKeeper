@@ -81,6 +81,23 @@ pub fn run() -> Result<()> {
         network_options[net_idx].to_string()
     };
 
+    let public_address = match secret_type {
+        SecretType::PrivateKey => {
+            let addr: String = Input::new()
+                .with_prompt("Public address (optional, press Enter to skip)")
+                .default(String::new())
+                .interact_text()
+                .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            let trimmed = addr.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        SecretType::SeedPhrase => None,
+    };
+
     // Notes (optional)
     let notes: String = Input::new()
         .with_prompt("Notes (optional, press Enter to skip)")
@@ -94,6 +111,7 @@ pub fn run() -> Result<()> {
         secret: secret.to_string(),
         secret_type,
         network,
+        public_address,
         notes: notes.trim().to_string(),
         created_at: now,
         updated_at: now,
