@@ -19,15 +19,16 @@ pub fn run() -> Result<()> {
 
     println!();
     println!(
-        "  {:<28} {:<12} {:<14} {}",
+        "  {:<4}{:<28} {:<12} {:<14} {}",
+        "#".bold(),
         "NAME".bold(),
         "NETWORK".bold(),
         "TYPE".bold(),
         "ADDRESS".bold()
     );
-    println!("  {}", "─".repeat(80).dimmed());
+    println!("  {}", "─".repeat(84).dimmed());
 
-    for entry in &meta {
+    for (i, entry) in meta.iter().enumerate() {
         let type_str = match entry.secret_type {
             SecretType::PrivateKey => "Private Key".yellow(),
             SecretType::SeedPhrase => "Seed Phrase".magenta(),
@@ -38,7 +39,8 @@ pub fn run() -> Result<()> {
             .map(|s| if s.len() > 20 { format!("{}…", &s[..19]) } else { s.to_string() })
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  {:<28} {:<12} {:<14} {}",
+            "  {:<4}{:<28} {:<12} {:<14} {}",
+            format!("{}", i + 1).dimmed(),
             entry.name.cyan(),
             entry.network,
             type_str,

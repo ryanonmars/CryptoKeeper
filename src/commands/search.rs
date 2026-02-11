@@ -10,7 +10,8 @@ pub fn run(query: &str) -> Result<()> {
     let query_lower = query.to_lowercase();
     let matches: Vec<_> = meta
         .iter()
-        .filter(|e| {
+        .enumerate()
+        .filter(|(_, e)| {
             e.name.to_lowercase().contains(&query_lower)
                 || e.network.to_lowercase().contains(&query_lower)
                 || e.notes.to_lowercase().contains(&query_lower)
@@ -29,15 +30,16 @@ pub fn run(query: &str) -> Result<()> {
     );
     println!();
     println!(
-        "  {:<28} {:<12} {:<14} {}",
+        "  {:<4}{:<28} {:<12} {:<14} {}",
+        "#".bold(),
         "NAME".bold(),
         "NETWORK".bold(),
         "TYPE".bold(),
         "ADDRESS".bold()
     );
-    println!("  {}", "─".repeat(80).dimmed());
+    println!("  {}", "─".repeat(84).dimmed());
 
-    for entry in &matches {
+    for (i, entry) in &matches {
         let type_str = match entry.secret_type {
             SecretType::PrivateKey => "Private Key".yellow(),
             SecretType::SeedPhrase => "Seed Phrase".magenta(),
@@ -48,7 +50,8 @@ pub fn run(query: &str) -> Result<()> {
             .map(|s| if s.len() > 20 { format!("{}…", &s[..19]) } else { s.to_string() })
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  {:<28} {:<12} {:<14} {}",
+            "  {:<4}{:<28} {:<12} {:<14} {}",
+            format!("{}", i + 1).dimmed(),
             entry.name.cyan(),
             entry.network,
             type_str,

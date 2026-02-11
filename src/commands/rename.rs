@@ -9,16 +9,15 @@ pub fn run(old_name: &str, new_name: &str) -> Result<()> {
 
     let new_name = new_name.trim().to_string();
 
-    if !vault.has_entry(old_name) {
-        return Err(CryptoKeeperError::EntryNotFound(old_name.to_string()));
-    }
+    let resolved_old = vault
+        .resolve_entry_name(old_name)
+        .ok_or_else(|| CryptoKeeperError::EntryNotFound(old_name.to_string()))?;
 
     if vault.has_entry(&new_name) {
         return Err(CryptoKeeperError::EntryAlreadyExists(new_name));
     }
 
-    let entry = vault.find_entry_mut(old_name).unwrap();
-    let old = entry.name.clone();
+    let entry = vault.find_entry_mut_by_id(old_name).unwrap();
     entry.name = new_name.clone();
     entry.updated_at = Utc::now();
 
@@ -29,7 +28,7 @@ pub fn run(old_name: &str, new_name: &str) -> Result<()> {
     println!(
         "{} Renamed '{}' → '{}'",
         "✓".green().bold(),
-        old.dimmed(),
+        resolved_old.dimmed(),
         new_name.cyan()
     );
 

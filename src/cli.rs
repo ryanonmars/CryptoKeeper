@@ -24,19 +24,19 @@ pub enum Commands {
 
     /// View entry details and optionally reveal the secret
     View {
-        /// Name of the entry to view
+        /// Name or index number of the entry
         name: String,
     },
 
     /// Edit an existing entry's fields
     Edit {
-        /// Name of the entry to edit
+        /// Name or index number of the entry
         name: String,
     },
 
     /// Rename an entry
     Rename {
-        /// Current name of the entry
+        /// Current name or index number of the entry
         old_name: String,
         /// New name for the entry
         new_name: String,
@@ -44,13 +44,13 @@ pub enum Commands {
 
     /// Delete an entry (with confirmation)
     Delete {
-        /// Name of the entry to delete
+        /// Name or index number of the entry
         name: String,
     },
 
     /// Copy a secret to the clipboard (auto-clears after 10 seconds)
     Copy {
-        /// Name of the entry to copy
+        /// Name or index number of the entry
         name: String,
     },
 

@@ -14,7 +14,7 @@ pub enum CryptoKeeperError {
     #[error("Invalid vault file — corrupted or wrong format.")]
     InvalidVaultFormat,
 
-    #[error("Entry '{0}' not found.")]
+    #[error("Entry '{0}' not found. Use `keeper list` to see entries with their index numbers.")]
     EntryNotFound(String),
 
     #[error("Entry '{0}' already exists.")]

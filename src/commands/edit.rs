@@ -11,7 +11,7 @@ pub fn run(name: &str) -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
 
     let entry = vault
-        .find_entry_mut(name)
+        .find_entry_mut_by_id(name)
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
 
     println!();
@@ -33,7 +33,7 @@ pub fn run(name: &str) -> Result<()> {
     }
 
     // Re-fetch the entry after borrow checker satisfaction
-    let entry = vault.find_entry_mut(name).unwrap();
+    let entry = vault.find_entry_mut_by_id(name).unwrap();
 
     // Secret type
     let current_type_idx = match entry.secret_type {

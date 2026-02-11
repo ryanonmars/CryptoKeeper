@@ -7,14 +7,14 @@ use crate::vault::storage;
 pub fn run(name: &str) -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
 
-    if !vault.has_entry(name) {
-        return Err(CryptoKeeperError::EntryNotFound(name.to_string()));
-    }
+    let resolved_name = vault
+        .resolve_entry_name(name)
+        .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
 
     let confirm = Confirm::new()
         .with_prompt(format!(
             "Are you sure you want to delete '{}'? This cannot be undone",
-            name
+            resolved_name
         ))
         .default(false)
         .interact()
@@ -24,7 +24,7 @@ pub fn run(name: &str) -> Result<()> {
         return Err(CryptoKeeperError::Cancelled);
     }
 
-    vault.remove_entry(name);
+    vault.remove_entry_by_id(name);
 
     eprintln!("Saving vault...");
     storage::save_vault(&vault, password.as_bytes())?;
@@ -33,7 +33,7 @@ pub fn run(name: &str) -> Result<()> {
     println!(
         "{} Entry '{}' deleted.",
         "✓".green().bold(),
-        name.cyan()
+        resolved_name.cyan()
     );
 
     Ok(())

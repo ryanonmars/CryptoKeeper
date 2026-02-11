@@ -10,7 +10,7 @@ pub fn run(name: &str) -> Result<()> {
     let (vault, _password) = storage::prompt_and_unlock()?;
 
     let entry = vault
-        .find_entry(name)
+        .find_entry_by_id(name)
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
 
     clipboard::copy_and_clear(&entry.secret, CLEAR_AFTER_SECS)?;

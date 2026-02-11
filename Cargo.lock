@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "cryptokeeper"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arboard",
  "argon2",
