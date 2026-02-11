@@ -5,9 +5,9 @@ use crate::vault::model::SecretType;
 use crate::vault::storage;
 
 pub fn run() -> Result<()> {
-    let (vault, _password) = storage::prompt_and_unlock()?;
+    let meta = storage::read_vault_metadata()?;
 
-    if vault.entries.is_empty() {
+    if meta.is_empty() {
         println!();
         println!("{}", "No entries stored yet.".dimmed());
         println!(
@@ -26,7 +26,7 @@ pub fn run() -> Result<()> {
     );
     println!("  {}", "─".repeat(60).dimmed());
 
-    for entry in &vault.entries {
+    for entry in &meta {
         let type_str = match entry.secret_type {
             SecretType::PrivateKey => "Private Key".yellow(),
             SecretType::SeedPhrase => "Seed Phrase".magenta(),
@@ -42,7 +42,7 @@ pub fn run() -> Result<()> {
     println!();
     println!(
         "  {} total entries",
-        vault.entries.len().to_string().bold()
+        meta.len().to_string().bold()
     );
 
     Ok(())

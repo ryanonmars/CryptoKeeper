@@ -50,6 +50,14 @@ impl fmt::Debug for Entry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntryMeta {
+    pub name: String,
+    pub network: String,
+    pub secret_type: SecretType,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultData {
     pub entries: Vec<Entry>,
     pub version: u32,
@@ -85,14 +93,28 @@ impl VaultData {
     pub fn has_entry(&self, name: &str) -> bool {
         self.find_entry(name).is_some()
     }
+
+    pub fn metadata(&self) -> Vec<EntryMeta> {
+        self.entries
+            .iter()
+            .map(|e| EntryMeta {
+                name: e.name.clone(),
+                network: e.network.clone(),
+                secret_type: e.secret_type.clone(),
+                notes: e.notes.clone(),
+            })
+            .collect()
+    }
 }
 
 pub struct VaultHeader;
 
 impl VaultHeader {
     pub const MAGIC: &'static [u8; 4] = b"CKPR";
-    /// 4 (magic) + 4 (version) + 32 (salt) + 4 (m_cost) + 4 (t_cost) + 4 (p_cost) + 24 (nonce) + 4 (ct_len) = 80
-    pub const HEADER_SIZE: usize = 80;
+    pub const FORMAT_VERSION_V1: u32 = 1;
+    pub const FORMAT_VERSION_V2: u32 = 2;
+    /// V1: 4 (magic) + 4 (version) + 32 (salt) + 4 (m_cost) + 4 (t_cost) + 4 (p_cost) + 24 (nonce) + 4 (ct_len) = 80
+    pub const HEADER_SIZE_V1: usize = 80;
 }
 
 pub struct BackupHeader;

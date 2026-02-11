@@ -5,11 +5,10 @@ use crate::vault::model::SecretType;
 use crate::vault::storage;
 
 pub fn run(query: &str) -> Result<()> {
-    let (vault, _password) = storage::prompt_and_unlock()?;
+    let meta = storage::read_vault_metadata()?;
 
     let query_lower = query.to_lowercase();
-    let matches: Vec<_> = vault
-        .entries
+    let matches: Vec<_> = meta
         .iter()
         .filter(|e| {
             e.name.to_lowercase().contains(&query_lower)

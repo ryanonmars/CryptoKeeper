@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::{cipher, kdf};
 use crate::error::{CryptoKeeperError, Result};
-use crate::vault::model::{BackupHeader, VaultData, VaultHeader};
+use crate::vault::model::{BackupHeader, EntryMeta, VaultData, VaultHeader};
 
 /// Get the vault directory path, respecting CRYPTOKEEPER_VAULT_DIR env var.
 pub fn vault_dir() -> PathBuf {
@@ -64,6 +64,37 @@ fn set_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read entry metadata (names, network, type, notes) without password. Returns empty for v1 vaults.
+pub fn read_metadata(path: &Path) -> Result<Vec<EntryMeta>> {
+    let data = fs::read(path)?;
+    if data.len() < 12 {
+        return Ok(Vec::new());
+    }
+    if &data[0..4] != VaultHeader::MAGIC {
+        return Ok(Vec::new());
+    }
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    if version != VaultHeader::FORMAT_VERSION_V2 {
+        return Ok(Vec::new());
+    }
+    let meta_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+    if data.len() < 12 + meta_len {
+        return Ok(Vec::new());
+    }
+    let meta_json = std::str::from_utf8(&data[12..12 + meta_len]).map_err(|_| CryptoKeeperError::InvalidVaultFormat)?;
+    let meta: Vec<EntryMeta> = serde_json::from_str(meta_json).map_err(|_| CryptoKeeperError::InvalidVaultFormat)?;
+    Ok(meta)
+}
+
+/// Read vault metadata without password. Returns empty list if vault doesn't exist or is v1.
+pub fn read_vault_metadata() -> Result<Vec<EntryMeta>> {
+    let path = vault_path();
+    if !path.exists() {
+        return Err(CryptoKeeperError::VaultNotFound);
+    }
+    read_metadata(&path)
+}
+
 /// Encrypt and write vault data to disk atomically.
 pub fn write_vault(vault: &VaultData, password: &[u8], path: &Path) -> Result<()> {
     write_encrypted_file(vault, password, path, VaultHeader::MAGIC)
@@ -95,9 +126,20 @@ fn write_encrypted_file(
     let ciphertext = cipher::encrypt(&*key, &nonce, &plaintext)?;
     let ct_len = ciphertext.len() as u32;
 
-    let mut data = Vec::with_capacity(VaultHeader::HEADER_SIZE + ciphertext.len());
+    let mut data = Vec::new();
     data.extend_from_slice(magic);
-    data.extend_from_slice(&1u32.to_le_bytes()); // format version
+
+    if magic == VaultHeader::MAGIC {
+        let meta = vault.metadata();
+        let meta_json = serde_json::to_vec(&meta)?;
+        let meta_len = meta_json.len() as u32;
+        data.extend_from_slice(&VaultHeader::FORMAT_VERSION_V2.to_le_bytes());
+        data.extend_from_slice(&meta_len.to_le_bytes());
+        data.extend_from_slice(&meta_json);
+    } else {
+        data.extend_from_slice(&VaultHeader::FORMAT_VERSION_V1.to_le_bytes());
+    }
+
     data.extend_from_slice(&salt);
     data.extend_from_slice(&kdf::DEFAULT_M_COST.to_le_bytes());
     data.extend_from_slice(&kdf::DEFAULT_T_COST.to_le_bytes());
@@ -106,7 +148,6 @@ fn write_encrypted_file(
     data.extend_from_slice(&ct_len.to_le_bytes());
     data.extend_from_slice(&ciphertext);
 
-    // Atomic write: write to temp file then rename
     let temp_path = path.with_extension("tmp");
     fs::write(&temp_path, &data)?;
     set_file_permissions(&temp_path)?;
@@ -128,43 +169,47 @@ pub fn read_backup(password: &[u8], path: &Path) -> Result<VaultData> {
 fn read_encrypted_file(password: &[u8], path: &Path, expected_magic: &[u8; 4]) -> Result<VaultData> {
     let data = fs::read(path)?;
 
-    if data.len() < VaultHeader::HEADER_SIZE {
+    if data.len() < VaultHeader::HEADER_SIZE_V1 {
         return Err(CryptoKeeperError::InvalidVaultFormat);
     }
 
-    // Parse header
     let magic = &data[0..4];
     if magic != expected_magic {
         return Err(CryptoKeeperError::InvalidVaultFormat);
     }
 
-    let _version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let (salt_offset, ct_offset) = if version == VaultHeader::FORMAT_VERSION_V2 {
+        let meta_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        (12 + meta_len, 12 + meta_len + 32 + 4 + 4 + 4 + 24 + 4)
+    } else {
+        (8, VaultHeader::HEADER_SIZE_V1)
+    };
 
-    let mut salt = [0u8; 32];
-    salt.copy_from_slice(&data[8..40]);
-
-    let m_cost = u32::from_le_bytes(data[40..44].try_into().unwrap());
-    let t_cost = u32::from_le_bytes(data[44..48].try_into().unwrap());
-    let p_cost = u32::from_le_bytes(data[48..52].try_into().unwrap());
-
-    let mut nonce = [0u8; 24];
-    nonce.copy_from_slice(&data[52..76]);
-
-    let ct_len = u32::from_le_bytes(data[76..80].try_into().unwrap()) as usize;
-
-    if data.len() < VaultHeader::HEADER_SIZE + ct_len {
+    if data.len() < ct_offset {
         return Err(CryptoKeeperError::InvalidVaultFormat);
     }
 
-    let ciphertext = &data[80..80 + ct_len];
+    let mut salt = [0u8; 32];
+    salt.copy_from_slice(&data[salt_offset..salt_offset + 32]);
 
-    // Derive key
+    let m_cost = u32::from_le_bytes(data[salt_offset + 32..salt_offset + 36].try_into().unwrap());
+    let t_cost = u32::from_le_bytes(data[salt_offset + 36..salt_offset + 40].try_into().unwrap());
+    let p_cost = u32::from_le_bytes(data[salt_offset + 40..salt_offset + 44].try_into().unwrap());
+
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&data[salt_offset + 44..salt_offset + 68]);
+
+    let ct_len = u32::from_le_bytes(data[salt_offset + 68..salt_offset + 72].try_into().unwrap()) as usize;
+
+    if data.len() < ct_offset + ct_len {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+
+    let ciphertext = &data[ct_offset..ct_offset + ct_len];
+
     let key = kdf::derive_key(password, &salt, m_cost, t_cost, p_cost)?;
-
-    // Decrypt
     let plaintext = cipher::decrypt(&*key, &nonce, ciphertext)?;
-
-    // Deserialize
     let vault: VaultData = serde_json::from_slice(&plaintext)?;
 
     Ok(vault)
