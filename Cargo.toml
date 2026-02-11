@@ -20,9 +20,5 @@ rand = "0.8"
 thiserror = "1"
 libc = "0.2"
 
-[[bin]]
-name = "keeper"
-path = "src/main.rs"
-
 [dev-dependencies]
 tempfile = "3"
