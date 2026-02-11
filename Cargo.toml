@@ -1,0 +1,28 @@
+[package]
+name = "cryptokeeper"
+version = "0.1.0"
+edition = "2021"
+description = "CLI encrypted storage manager for cryptocurrency private keys and seed phrases"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+arboard = "3"
+rpassword = "7"
+dialoguer = "0.11"
+colored = "2"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+thiserror = "1"
+libc = "0.2"
+
+[[bin]]
+name = "keeper"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
