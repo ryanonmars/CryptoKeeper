@@ -4,6 +4,8 @@ use dialoguer::{Input, Select};
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
+use crate::ui::theme::heading;
 use crate::vault::model::SecretType;
 use crate::vault::storage;
 
@@ -15,7 +17,7 @@ pub fn run(name: &str) -> Result<()> {
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
 
     println!();
-    println!("{}", "Edit entry (press Enter to keep current value)".bold());
+    println!("  {}", heading("Edit entry (press Enter to keep current value)"));
     println!();
 
     // Name
@@ -134,12 +136,10 @@ pub fn run(name: &str) -> Result<()> {
     eprintln!("Saving vault...");
     storage::save_vault(&vault, password.as_bytes())?;
 
-    println!();
-    println!(
-        "{} Entry '{}' updated successfully.",
-        "✓".green().bold(),
+    print_success(&format!(
+        "Entry '{}' updated successfully.",
         new_name.cyan()
-    );
+    ));
 
     Ok(())
 }

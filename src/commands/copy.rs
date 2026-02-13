@@ -2,6 +2,7 @@ use colored::Colorize;
 
 use crate::clipboard;
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
 use crate::vault::storage;
 
 const CLEAR_AFTER_SECS: u64 = 10;
@@ -15,12 +16,10 @@ pub fn run(name: &str) -> Result<()> {
 
     clipboard::copy_and_clear(&entry.secret, CLEAR_AFTER_SECS)?;
 
-    println!();
-    println!(
-        "{} Secret for '{}' copied to clipboard.",
-        "✓".green().bold(),
+    print_success(&format!(
+        "Secret for '{}' copied to clipboard.",
         entry.name.cyan()
-    );
+    ));
     println!(
         "{}",
         format!("  Clipboard will be cleared in {CLEAR_AFTER_SECS} seconds.").dimmed()

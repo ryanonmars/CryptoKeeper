@@ -3,11 +3,10 @@ mod clipboard;
 mod commands;
 mod crypto;
 mod error;
-mod terminal;
+mod ui;
 mod vault;
 
 use clap::Parser;
-use colored::Colorize;
 
 use cli::{Cli, Commands};
 use crypto::secure;
@@ -15,7 +14,7 @@ use crypto::secure;
 fn main() {
     secure::harden_process();
 
-    let _ = terminal::setup_app_theme(true);
+    ui::setup_app_theme(true);
 
     let cli = Cli::parse();
 
@@ -38,7 +37,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{} {}", "Error:".red().bold(), e);
+        ui::borders::print_error(&e.to_string());
         std::process::exit(1);
     }
 }

@@ -2,6 +2,8 @@ use colored::Colorize;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_box;
+use crate::ui::theme::heading;
 use crate::vault::model::VaultData;
 use crate::vault::storage;
 
@@ -12,7 +14,7 @@ pub fn run() -> Result<()> {
         ));
     }
 
-    println!("{}", "Initializing new CryptoKeeper vault...".bold());
+    println!("{}", heading("Initializing new CryptoKeeper vault..."));
     println!();
 
     let password = Zeroizing::new(
@@ -39,17 +41,20 @@ pub fn run() -> Result<()> {
     eprintln!("Encrypting vault...");
     storage::save_vault(&vault, password.as_bytes())?;
 
+    let lines = vec![
+        format!("{}", "Vault created successfully!".green().bold()),
+        format!(
+            "Location: {}",
+            storage::vault_path().display().to_string().cyan()
+        ),
+        String::new(),
+        format!(
+            "{}",
+            "Use `keeper add` to store your first key or phrase.".dimmed()
+        ),
+    ];
     println!();
-    println!("{}", "Vault created successfully!".green().bold());
-    println!(
-        "Location: {}",
-        storage::vault_path().display().to_string().cyan()
-    );
-    println!();
-    println!(
-        "{}",
-        "Use `keeper add` to store your first key or phrase.".dimmed()
-    );
+    print_box(Some("Vault Initialized"), &lines);
 
     Ok(())
 }

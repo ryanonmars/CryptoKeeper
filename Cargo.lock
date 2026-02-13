@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "cryptokeeper"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "arboard",
  "argon2",
@@ -363,6 +363,7 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "console",
  "dialoguer",
  "libc",
  "rand",
@@ -371,6 +372,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "unicode-width",
  "zeroize",
 ]
 

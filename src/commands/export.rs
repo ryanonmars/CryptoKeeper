@@ -4,16 +4,18 @@ use colored::Colorize;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_box;
+use crate::ui::theme::heading;
 use crate::vault::storage;
 
 pub fn run(file: &str) -> Result<()> {
     let (vault, _password) = storage::prompt_and_unlock()?;
 
     println!();
-    println!("{}", "Export encrypted backup".bold());
+    println!("  {}", heading("Export encrypted backup"));
     println!(
         "{}",
-        "Choose a password for this backup (can differ from master password).".dimmed()
+        "  Choose a password for this backup (can differ from master password).".dimmed()
     );
     println!();
 
@@ -37,16 +39,19 @@ pub fn run(file: &str) -> Result<()> {
     eprintln!("Encrypting backup...");
     storage::write_backup(&vault, export_password.as_bytes(), path)?;
 
+    let lines = vec![
+        format!(
+            "{} Backup exported to '{}'",
+            "✓".green().bold(),
+            file.cyan()
+        ),
+        format!(
+            "{} entries exported.",
+            vault.entries.len().to_string().bold()
+        ),
+    ];
     println!();
-    println!(
-        "{} Backup exported to '{}'",
-        "✓".green().bold(),
-        file.cyan()
-    );
-    println!(
-        "  {} entries exported.",
-        vault.entries.len().to_string().bold()
-    );
+    print_box(Some("Export Complete"), &lines);
 
     Ok(())
 }

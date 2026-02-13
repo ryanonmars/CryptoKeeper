@@ -2,6 +2,7 @@ use chrono::Utc;
 use colored::Colorize;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
 use crate::vault::storage;
 
 pub fn run(old_name: &str, new_name: &str) -> Result<()> {
@@ -24,13 +25,11 @@ pub fn run(old_name: &str, new_name: &str) -> Result<()> {
     eprintln!("Saving vault...");
     storage::save_vault(&vault, password.as_bytes())?;
 
-    println!();
-    println!(
-        "{} Renamed '{}' → '{}'",
-        "✓".green().bold(),
+    print_success(&format!(
+        "Renamed '{}' → '{}'",
         resolved_old.dimmed(),
         new_name.cyan()
-    );
+    ));
 
     Ok(())
 }

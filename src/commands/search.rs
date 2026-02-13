@@ -1,6 +1,7 @@
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::{print_table_box, truncate_display};
 use crate::vault::model::SecretType;
 use crate::vault::storage;
 
@@ -22,44 +23,44 @@ pub fn run(query: &str) -> Result<()> {
         return Err(CryptoKeeperError::NoSearchResults(query.to_string()));
     }
 
-    println!();
-    println!(
-        "  Search results for '{}' ({} found):",
-        query.cyan(),
-        matches.len()
-    );
-    println!();
-    println!(
-        "  {:<4}{:<28} {:<12} {:<14} {}",
-        "#".bold(),
-        "NAME".bold(),
-        "NETWORK".bold(),
-        "TYPE".bold(),
-        "ADDRESS".bold()
-    );
-    println!("  {}", "─".repeat(84).dimmed());
+    let headers = &["#", "NAME", "NETWORK", "TYPE", "ADDRESS"];
+    let rows: Vec<Vec<String>> = matches
+        .iter()
+        .map(|(i, entry)| {
+            let type_str = match entry.secret_type {
+                SecretType::PrivateKey => "Private Key".to_string(),
+                SecretType::SeedPhrase => "Seed Phrase".to_string(),
+            };
+            let addr = entry
+                .public_address
+                .as_deref()
+                .map(|s| truncate_display(s, 20))
+                .unwrap_or_else(|| "-".to_string());
+            vec![
+                format!("{}", i + 1),
+                entry.name.clone(),
+                entry.network.clone(),
+                type_str,
+                addr,
+            ]
+        })
+        .collect();
 
-    for (i, entry) in &matches {
-        let type_str = match entry.secret_type {
-            SecretType::PrivateKey => "Private Key".yellow(),
-            SecretType::SeedPhrase => "Seed Phrase".magenta(),
-        };
-        let addr = entry
-            .public_address
-            .as_deref()
-            .map(|s| if s.len() > 20 { format!("{}…", &s[..19]) } else { s.to_string() })
-            .unwrap_or_else(|| "-".to_string());
-        println!(
-            "  {:<4}{:<28} {:<12} {:<14} {}",
-            format!("{}", i + 1).dimmed(),
-            entry.name.cyan(),
-            entry.network,
-            type_str,
-            addr.dimmed()
-        );
-    }
+    let col_styles: Vec<fn(&str) -> ColoredString> = vec![
+        |s| s.dimmed(),
+        |s| s.cyan(),
+        |s| s.normal(),
+        |s| match s {
+            "Private Key" => s.yellow(),
+            "Seed Phrase" => s.magenta(),
+            _ => s.normal(),
+        },
+        |s| s.dimmed(),
+    ];
 
+    let title = format!("Search: '{}' ({} found)", query, matches.len());
     println!();
+    print_table_box(Some(&title), headers, &rows, &col_styles);
 
     Ok(())
 }

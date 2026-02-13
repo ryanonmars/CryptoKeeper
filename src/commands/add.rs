@@ -4,6 +4,8 @@ use dialoguer::{Input, Select};
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
+use crate::ui::theme::heading;
 use crate::vault::model::{Entry, SecretType};
 use crate::vault::storage;
 
@@ -11,7 +13,7 @@ pub fn run() -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
 
     println!();
-    println!("{}", "Add a new entry".bold());
+    println!("  {}", heading("Add a new entry"));
     println!();
 
     // Name
@@ -122,12 +124,10 @@ pub fn run() -> Result<()> {
     eprintln!("Saving vault...");
     storage::save_vault(&vault, password.as_bytes())?;
 
-    println!();
-    println!(
-        "{} Entry '{}' stored successfully.",
-        "✓".green().bold(),
+    print_success(&format!(
+        "Entry '{}' stored successfully.",
         name.cyan()
-    );
+    ));
 
     Ok(())
 }

@@ -2,6 +2,7 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
 use crate::vault::storage;
 
 pub fn run(name: &str) -> Result<()> {
@@ -29,12 +30,7 @@ pub fn run(name: &str) -> Result<()> {
     eprintln!("Saving vault...");
     storage::save_vault(&vault, password.as_bytes())?;
 
-    println!();
-    println!(
-        "{} Entry '{}' deleted.",
-        "✓".green().bold(),
-        resolved_name.cyan()
-    );
+    print_success(&format!("Entry '{}' deleted.", resolved_name.cyan()));
 
     Ok(())
 }

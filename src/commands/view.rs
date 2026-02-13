@@ -2,6 +2,7 @@ use colored::Colorize;
 use dialoguer::Confirm;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_box;
 use crate::vault::storage;
 
 pub fn run(name: &str) -> Result<()> {
@@ -11,29 +12,32 @@ pub fn run(name: &str) -> Result<()> {
         .find_entry_by_id(name)
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
 
-    println!();
-    println!("  {} {}", "Name:".bold(), entry.name.cyan());
-    println!("  {} {}", "Type:".bold(), entry.secret_type);
-    println!("  {} {}", "Network:".bold(), entry.network);
+    let mut lines = vec![
+        format!("{:<16} {}", "Name:".bold(), entry.name.cyan()),
+        format!("{:<16} {}", "Type:".bold(), entry.secret_type),
+        format!("{:<16} {}", "Network:".bold(), entry.network),
+    ];
     if let Some(ref addr) = entry.public_address {
-        println!("  {} {}", "Public address:".bold(), addr);
+        lines.push(format!("{:<16} {}", "Public address:".bold(), addr));
     }
     if !entry.notes.is_empty() {
-        println!("  {} {}", "Notes:".bold(), entry.notes);
+        lines.push(format!("{:<16} {}", "Notes:".bold(), entry.notes));
     }
-    println!(
-        "  {} {}",
+    lines.push(format!(
+        "{:<16} {}",
         "Created:".bold(),
         entry.created_at.format("%Y-%m-%d %H:%M:%S UTC")
-    );
-    println!(
-        "  {} {}",
+    ));
+    lines.push(format!(
+        "{:<16} {}",
         "Updated:".bold(),
         entry.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
-    );
-    println!("  {} {}", "Secret:".bold(), "••••••••".dimmed());
+    ));
+    lines.push(format!("{:<16} {}", "Secret:".bold(), "••••••••".dimmed()));
 
     println!();
+    print_box(Some("Entry Details"), &lines);
+
     let reveal = Confirm::new()
         .with_prompt("Reveal secret?")
         .default(false)

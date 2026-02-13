@@ -5,6 +5,7 @@ use dialoguer::Select;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_box;
 use crate::vault::storage;
 
 pub fn run(file: &str) -> Result<()> {
@@ -88,13 +89,16 @@ pub fn run(file: &str) -> Result<()> {
         storage::save_vault(&vault, vault_password.as_bytes())?;
     }
 
+    let lines = vec![
+        format!(
+            "{} {} imported, {} skipped.",
+            "✓".green().bold(),
+            imported.to_string().bold(),
+            skipped.to_string().bold()
+        ),
+    ];
     println!();
-    println!(
-        "{} Import complete: {} imported, {} skipped.",
-        "✓".green().bold(),
-        imported.to_string().bold(),
-        skipped.to_string().bold()
-    );
+    print_box(Some("Import Complete"), &lines);
 
     Ok(())
 }

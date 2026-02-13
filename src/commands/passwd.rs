@@ -1,14 +1,15 @@
-use colored::Colorize;
 use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
+use crate::ui::borders::print_success;
+use crate::ui::theme::heading;
 use crate::vault::storage;
 
 pub fn run() -> Result<()> {
     let (vault, _old_password) = storage::prompt_and_unlock()?;
 
     println!();
-    println!("{}", "Change master password".bold());
+    println!("  {}", heading("Change master password"));
     println!();
 
     let new_password = Zeroizing::new(
@@ -30,11 +31,7 @@ pub fn run() -> Result<()> {
     eprintln!("Re-encrypting vault with new password...");
     storage::save_vault(&vault, new_password.as_bytes())?;
 
-    println!();
-    println!(
-        "{} Master password changed successfully.",
-        "✓".green().bold()
-    );
+    print_success("Master password changed successfully.");
 
     Ok(())
 }
