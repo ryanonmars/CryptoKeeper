@@ -3,6 +3,7 @@ mod clipboard;
 mod commands;
 mod crypto;
 mod error;
+mod terminal;
 mod vault;
 
 use clap::Parser;
@@ -12,8 +13,9 @@ use cli::{Cli, Commands};
 use crypto::secure;
 
 fn main() {
-    // Harden the process (disable core dumps, ptrace)
     secure::harden_process();
+
+    let _ = terminal::setup_app_theme(true);
 
     let cli = Cli::parse();
 
