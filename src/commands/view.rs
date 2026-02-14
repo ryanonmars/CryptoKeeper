@@ -3,6 +3,7 @@ use dialoguer::Confirm;
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
+use crate::vault::model::SecretType;
 use crate::vault::storage;
 
 pub fn run(name: &str) -> Result<()> {
@@ -15,10 +16,20 @@ pub fn run(name: &str) -> Result<()> {
     let mut lines = vec![
         format!("{:<16} {}", "Name:".bold(), entry.name.cyan()),
         format!("{:<16} {}", "Type:".bold(), entry.secret_type),
-        format!("{:<16} {}", "Network:".bold(), entry.network),
     ];
+    if !entry.network.is_empty() {
+        lines.push(format!("{:<16} {}", "Network:".bold(), entry.network));
+    }
     if let Some(ref addr) = entry.public_address {
         lines.push(format!("{:<16} {}", "Public address:".bold(), addr));
+    }
+    if entry.secret_type == SecretType::Password {
+        if let Some(ref uname) = entry.username {
+            lines.push(format!("{:<16} {}", "Username:".bold(), uname));
+        }
+        if let Some(ref url) = entry.url {
+            lines.push(format!("{:<16} {}", "URL:".bold(), url));
+        }
     }
     if !entry.notes.is_empty() {
         lines.push(format!("{:<16} {}", "Notes:".bold(), entry.notes));

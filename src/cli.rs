@@ -19,8 +19,12 @@ pub enum Commands {
     /// Store an existing private key or seed phrase
     Add,
 
-    /// List all stored entries
-    List,
+    /// List all stored entries (optionally filter by type: privatekey, seedphrase, password)
+    List {
+        /// Filter by entry type (e.g. "password", "privatekey", "seedphrase")
+        #[arg(name = "filter")]
+        filter: Option<String>,
+    },
 
     /// View entry details and optionally reveal the secret
     View {

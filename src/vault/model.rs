@@ -7,6 +7,7 @@ use zeroize::Zeroize;
 pub enum SecretType {
     PrivateKey,
     SeedPhrase,
+    Password,
 }
 
 impl fmt::Display for SecretType {
@@ -14,6 +15,7 @@ impl fmt::Display for SecretType {
         match self {
             SecretType::PrivateKey => write!(f, "Private Key"),
             SecretType::SeedPhrase => write!(f, "Seed Phrase"),
+            SecretType::Password => write!(f, "Password"),
         }
     }
 }
@@ -26,6 +28,10 @@ pub struct Entry {
     pub network: String,
     #[serde(default)]
     pub public_address: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
     pub notes: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -45,6 +51,8 @@ impl fmt::Debug for Entry {
             .field("secret_type", &self.secret_type)
             .field("network", &self.network)
             .field("public_address", &self.public_address)
+            .field("username", &self.username)
+            .field("url", &self.url)
             .field("notes", &self.notes)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -59,6 +67,10 @@ pub struct EntryMeta {
     pub secret_type: SecretType,
     #[serde(default)]
     pub public_address: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
     pub notes: String,
 }
 
@@ -130,6 +142,8 @@ impl VaultData {
                 network: e.network.clone(),
                 secret_type: e.secret_type.clone(),
                 public_address: e.public_address.clone(),
+                username: e.username.clone(),
+                url: e.url.clone(),
                 notes: e.notes.clone(),
             })
             .collect()
@@ -164,6 +178,8 @@ mod tests {
             secret_type: SecretType::PrivateKey,
             network: "Ethereum".to_string(),
             public_address: None,
+            username: None,
+            url: None,
             notes: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

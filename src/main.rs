@@ -21,7 +21,7 @@ fn main() {
     let result = match cli.command {
         Commands::Init => commands::init::run(),
         Commands::Add => commands::add::run(),
-        Commands::List => commands::list::run(),
+        Commands::List { ref filter } => commands::list::run(filter.as_deref()),
         Commands::View { ref name } => commands::view::run(name),
         Commands::Edit { ref name } => commands::edit::run(name),
         Commands::Rename {
