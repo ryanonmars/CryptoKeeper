@@ -1,8 +1,5 @@
 use colored::Colorize;
 use dialoguer::{Input, Select};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{Config, EditMode, Editor};
 use zeroize::Zeroizing;
 
 use crate::commands;
@@ -12,6 +9,8 @@ use crate::ui;
 use crate::ui::borders::{print_error, print_success};
 use crate::vault::model::VaultData;
 use crate::vault::storage;
+
+mod input;
 
 /// Cached session state for the REPL — avoids Argon2 re-derivation on every command.
 struct Session {
@@ -103,57 +102,62 @@ pub fn run() -> Result<()> {
     ));
     println!();
 
-    // Set up rustyline editor (no completer — we use dialoguer menus instead)
-    let config = Config::builder()
-        .edit_mode(EditMode::Emacs)
-        .build();
-
-    let mut rl: Editor<(), DefaultHistory> = Editor::with_config(config).map_err(|e| {
-        CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
-    })?;
+    let mut command_input = input::CommandInput::new(MENU_COMMANDS.to_vec());
+    
+    crossterm::terminal::enable_raw_mode()
+        .map_err(|e| CryptoKeeperError::Io(e))?;
 
     // Main REPL loop
     loop {
-        let readline = rl.readline("cryptokeeper> ");
-        match readline {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() || line == "/" {
-                    // Show interactive command menu
-                    match select_command() {
-                        Ok(cmd) => {
-                            let result = dispatch(&mut session, &cmd);
-                            handle_result(result);
-                        }
-                        Err(CryptoKeeperError::Cancelled) => {}
-                        Err(e) => print_error(&e.to_string()),
-                    }
-                    println!();
-                    continue;
-                }
-
-                rl.add_history_entry(line).ok();
-
-                let result = dispatch(&mut session, line);
-                handle_result(result);
-                println!();
-            }
-            Err(ReadlineError::Interrupted) => {
-                // Ctrl+C: ignore, don't exit
-                println!("{}", "  (Use /quit or Ctrl+D to exit)".dimmed());
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                // Ctrl+D: exit
+        let readline = command_input.read_line("cryptokeeper> ");
+        
+        let line = match readline {
+            Ok(Some(line)) => line,
+            Ok(None) => {
+                crossterm::terminal::disable_raw_mode()
+                    .map_err(|e| CryptoKeeperError::Io(e))?;
                 println!("Goodbye!");
                 break;
             }
             Err(e) => {
+                crossterm::terminal::disable_raw_mode()
+                    .map_err(|e| CryptoKeeperError::Io(e))?;
                 print_error(&format!("Input error: {e}"));
                 break;
             }
+        };
+
+        let line = line.trim();
+        if line.is_empty() || line == "/" {
+            crossterm::terminal::disable_raw_mode()
+                .map_err(|e| CryptoKeeperError::Io(e))?;
+            match select_command() {
+                Ok(cmd) => {
+                    let result = dispatch(&mut session, &cmd);
+                    handle_result(result);
+                }
+                Err(CryptoKeeperError::Cancelled) => {}
+                Err(e) => print_error(&e.to_string()),
+            }
+            println!();
+            crossterm::terminal::enable_raw_mode()
+                .map_err(|e| CryptoKeeperError::Io(e))?;
+            continue;
         }
+
+        crossterm::terminal::disable_raw_mode()
+            .map_err(|e| CryptoKeeperError::Io(e))?;
+        
+        let result = dispatch(&mut session, line);
+        handle_result(result);
+        println!();
+        
+        crossterm::terminal::enable_raw_mode()
+            .map_err(|e| CryptoKeeperError::Io(e))?;
     }
+
+    crossterm::terminal::disable_raw_mode()
+        .map_err(|e| CryptoKeeperError::Io(e))?;
 
     Ok(())
 }
