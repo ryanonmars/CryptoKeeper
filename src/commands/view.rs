@@ -3,12 +3,16 @@ use dialoguer::Confirm;
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
-use crate::vault::model::SecretType;
+use crate::vault::model::{SecretType, VaultData};
 use crate::vault::storage;
 
 pub fn run(name: &str) -> Result<()> {
     let (vault, _password) = storage::prompt_and_unlock()?;
+    run_with_vault(&vault, name)
+}
 
+/// Core view logic without prompt_and_unlock (for REPL mode).
+pub fn run_with_vault(vault: &VaultData, name: &str) -> Result<()> {
     let entry = vault
         .find_entry_by_id(name)
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;

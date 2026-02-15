@@ -6,11 +6,22 @@ use zeroize::Zeroizing;
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
+use crate::vault::model::VaultData;
 use crate::vault::storage;
 
 pub fn run(file: &str) -> Result<()> {
-    let (mut vault, vault_password) = storage::prompt_and_unlock()?;
+    let (mut vault, password) = storage::prompt_and_unlock()?;
+    let modified = run_with_vault(&mut vault, file)?;
+    if modified {
+        eprintln!("Saving vault...");
+        storage::save_vault(&vault, password.as_bytes())?;
+    }
+    Ok(())
+}
 
+/// Core import logic without prompt_and_unlock or save (for REPL mode).
+/// Returns true if the vault was modified and needs saving.
+pub fn run_with_vault(vault: &mut VaultData, file: &str) -> Result<bool> {
     let path = Path::new(file);
     if !path.exists() {
         return Err(CryptoKeeperError::Io(std::io::Error::new(
@@ -84,11 +95,6 @@ pub fn run(file: &str) -> Result<()> {
         }
     }
 
-    if imported > 0 {
-        eprintln!("Saving vault...");
-        storage::save_vault(&vault, vault_password.as_bytes())?;
-    }
-
     let lines = vec![
         format!(
             "{} {} imported, {} skipped.",
@@ -100,5 +106,5 @@ pub fn run(file: &str) -> Result<()> {
     println!();
     print_box(Some("Import Complete"), &lines);
 
-    Ok(())
+    Ok(imported > 0)
 }

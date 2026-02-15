@@ -7,7 +7,15 @@ use crate::vault::storage;
 
 pub fn run() -> Result<()> {
     let (vault, _old_password) = storage::prompt_and_unlock()?;
+    let new_password = prompt_new_password()?;
+    eprintln!("Re-encrypting vault with new password...");
+    storage::save_vault(&vault, new_password.as_bytes())?;
+    print_success("Master password changed successfully.");
+    Ok(())
+}
 
+/// Prompt for a new master password (for both CLI and REPL mode).
+pub fn prompt_new_password() -> Result<Zeroizing<String>> {
     println!();
     println!("  {}", heading("Change master password"));
     println!();
@@ -28,10 +36,5 @@ pub fn run() -> Result<()> {
         return Err(CryptoKeeperError::PasswordMismatch);
     }
 
-    eprintln!("Re-encrypting vault with new password...");
-    storage::save_vault(&vault, new_password.as_bytes())?;
-
-    print_success("Master password changed successfully.");
-
-    Ok(())
+    Ok(new_password)
 }

@@ -6,12 +6,19 @@ use zeroize::Zeroizing;
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_success;
 use crate::ui::theme::heading;
-use crate::vault::model::{Entry, SecretType};
+use crate::vault::model::{Entry, SecretType, VaultData};
 use crate::vault::storage;
 
 pub fn run() -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
+    run_with_vault(&mut vault)?;
+    eprintln!("Saving vault...");
+    storage::save_vault(&vault, password.as_bytes())?;
+    Ok(())
+}
 
+/// Core add logic without prompt_and_unlock or save (for REPL mode).
+pub fn run_with_vault(vault: &mut VaultData) -> Result<()> {
     println!();
     println!("  {}", heading("Add a new entry"));
     println!();
@@ -158,9 +165,6 @@ pub fn run() -> Result<()> {
     };
 
     vault.entries.push(entry);
-
-    eprintln!("Saving vault...");
-    storage::save_vault(&vault, password.as_bytes())?;
 
     print_success(&format!(
         "Entry '{}' stored successfully.",

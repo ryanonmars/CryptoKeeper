@@ -6,11 +6,16 @@ use zeroize::Zeroizing;
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
 use crate::ui::theme::heading;
+use crate::vault::model::VaultData;
 use crate::vault::storage;
 
 pub fn run(file: &str) -> Result<()> {
     let (vault, _password) = storage::prompt_and_unlock()?;
+    run_with_vault(&vault, file)
+}
 
+/// Core export logic without prompt_and_unlock (for REPL mode).
+pub fn run_with_vault(vault: &VaultData, file: &str) -> Result<()> {
     println!();
     println!("  {}", heading("Export encrypted backup"));
     println!(

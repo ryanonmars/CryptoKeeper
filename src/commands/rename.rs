@@ -3,11 +3,19 @@ use colored::Colorize;
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_success;
+use crate::vault::model::VaultData;
 use crate::vault::storage;
 
 pub fn run(old_name: &str, new_name: &str) -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
+    run_with_vault(&mut vault, old_name, new_name)?;
+    eprintln!("Saving vault...");
+    storage::save_vault(&vault, password.as_bytes())?;
+    Ok(())
+}
 
+/// Core rename logic without prompt_and_unlock or save (for REPL mode).
+pub fn run_with_vault(vault: &mut VaultData, old_name: &str, new_name: &str) -> Result<()> {
     let new_name = new_name.trim().to_string();
 
     let resolved_old = vault
@@ -21,9 +29,6 @@ pub fn run(old_name: &str, new_name: &str) -> Result<()> {
     let entry = vault.find_entry_mut_by_id(old_name).unwrap();
     entry.name = new_name.clone();
     entry.updated_at = Utc::now();
-
-    eprintln!("Saving vault...");
-    storage::save_vault(&vault, password.as_bytes())?;
 
     print_success(&format!(
         "Renamed '{}' → '{}'",

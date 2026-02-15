@@ -2,11 +2,21 @@ use colored::{ColoredString, Colorize};
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::{print_table_box, truncate_display};
-use crate::vault::model::SecretType;
+use crate::vault::model::{EntryMeta, SecretType, VaultData};
 use crate::vault::storage;
 
 pub fn run(query: &str) -> Result<()> {
     let meta = storage::read_vault_metadata()?;
+    run_with_meta(&meta, query)
+}
+
+/// Core search logic using pre-loaded metadata (for REPL mode).
+pub fn run_with_vault(vault: &VaultData, query: &str) -> Result<()> {
+    let meta = vault.metadata();
+    run_with_meta(&meta, query)
+}
+
+fn run_with_meta(meta: &[EntryMeta], query: &str) -> Result<()> {
 
     let query_lower = query.to_lowercase();
     let matches: Vec<_> = meta

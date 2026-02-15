@@ -241,6 +241,99 @@ pub fn save_vault(vault: &VaultData, password: &[u8]) -> Result<()> {
     write_vault(vault, password, &vault_path())
 }
 
+/// Unlock vault and return the derived key and salt for key caching (REPL mode).
+pub fn unlock_vault_returning_key(
+    password: &[u8],
+) -> Result<(VaultData, Zeroizing<[u8; 32]>, [u8; 32])> {
+    let path = vault_path();
+    let data = fs::read(&path)?;
+
+    if data.len() < VaultHeader::HEADER_SIZE_V1 {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+
+    let magic = &data[0..4];
+    if magic != VaultHeader::MAGIC {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+
+    let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+    let salt_offset = if version == VaultHeader::FORMAT_VERSION_V2 {
+        let meta_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+        12 + meta_len
+    } else {
+        8
+    };
+
+    let ct_offset = salt_offset + 32 + 4 + 4 + 4 + 24 + 4;
+    if data.len() < ct_offset {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+
+    let mut salt = [0u8; 32];
+    salt.copy_from_slice(&data[salt_offset..salt_offset + 32]);
+
+    let m_cost = u32::from_le_bytes(data[salt_offset + 32..salt_offset + 36].try_into().unwrap());
+    let t_cost = u32::from_le_bytes(data[salt_offset + 36..salt_offset + 40].try_into().unwrap());
+    let p_cost = u32::from_le_bytes(data[salt_offset + 40..salt_offset + 44].try_into().unwrap());
+
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&data[salt_offset + 44..salt_offset + 68]);
+
+    let ct_len =
+        u32::from_le_bytes(data[salt_offset + 68..salt_offset + 72].try_into().unwrap()) as usize;
+
+    if data.len() < ct_offset + ct_len {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+
+    let ciphertext = &data[ct_offset..ct_offset + ct_len];
+
+    let key = kdf::derive_key(password, &salt, m_cost, t_cost, p_cost)?;
+    let plaintext = cipher::decrypt(&*key, &nonce, ciphertext)?;
+    let vault: VaultData = serde_json::from_slice(&plaintext)?;
+
+    Ok((vault, key, salt))
+}
+
+/// Save vault using a pre-derived key (skips Argon2 derivation for REPL mode).
+pub fn save_vault_with_key(
+    vault: &VaultData,
+    key: &[u8; 32],
+    salt: &[u8; 32],
+) -> Result<()> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(vault)?);
+
+    let nonce = cipher::generate_nonce();
+    let ciphertext = cipher::encrypt(key, &nonce, &plaintext)?;
+    let ct_len = ciphertext.len() as u32;
+
+    let meta = vault.metadata();
+    let meta_json = serde_json::to_vec(&meta)?;
+    let meta_len = meta_json.len() as u32;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(VaultHeader::MAGIC);
+    data.extend_from_slice(&VaultHeader::FORMAT_VERSION_V2.to_le_bytes());
+    data.extend_from_slice(&meta_len.to_le_bytes());
+    data.extend_from_slice(&meta_json);
+    data.extend_from_slice(salt);
+    data.extend_from_slice(&kdf::DEFAULT_M_COST.to_le_bytes());
+    data.extend_from_slice(&kdf::DEFAULT_T_COST.to_le_bytes());
+    data.extend_from_slice(&kdf::DEFAULT_P_COST.to_le_bytes());
+    data.extend_from_slice(&nonce);
+    data.extend_from_slice(&ct_len.to_le_bytes());
+    data.extend_from_slice(&ciphertext);
+
+    let path = vault_path();
+    let temp_path = path.with_extension("tmp");
+    fs::write(&temp_path, &data)?;
+    set_file_permissions(&temp_path)?;
+    fs::rename(&temp_path, path)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

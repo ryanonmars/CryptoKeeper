@@ -106,6 +106,26 @@ pub fn run(filter: Option<&str>) -> Result<()> {
     }
 }
 
+/// List entries from a cached vault (for REPL mode — no disk read needed).
+pub fn run_with_vault(vault: &crate::vault::model::VaultData, filter: Option<&str>) -> Result<()> {
+    if let Some(f) = filter {
+        if parse_type_filter(f).is_none() {
+            eprintln!(
+                "{}",
+                format!(
+                    "Unknown filter '{}'. Valid filters: privatekey, seedphrase, password",
+                    f
+                )
+                .red()
+            );
+            return Ok(());
+        }
+    }
+
+    let meta = vault.metadata();
+    print_meta_table(&meta, filter)
+}
+
 fn filter_meta(meta: &[EntryMeta], filter: Option<&str>) -> Vec<(usize, EntryMeta)> {
     let type_filter = filter.and_then(parse_type_filter);
     meta.iter()
@@ -121,7 +141,10 @@ fn filter_meta(meta: &[EntryMeta], filter: Option<&str>) -> Vec<(usize, EntryMet
 
 fn print_table(filter: Option<&str>) -> Result<()> {
     let meta = storage::read_vault_metadata()?;
+    print_meta_table(&meta, filter)
+}
 
+fn print_meta_table(meta: &[EntryMeta], filter: Option<&str>) -> Result<()> {
     if meta.is_empty() {
         println!();
         println!("{}", "No entries stored yet.".dimmed());
@@ -132,7 +155,7 @@ fn print_table(filter: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
-    let filtered = filter_meta(&meta, filter);
+    let filtered = filter_meta(meta, filter);
 
     if filtered.is_empty() {
         println!();

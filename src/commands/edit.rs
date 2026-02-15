@@ -6,12 +6,19 @@ use zeroize::Zeroizing;
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_success;
 use crate::ui::theme::heading;
-use crate::vault::model::SecretType;
+use crate::vault::model::{SecretType, VaultData};
 use crate::vault::storage;
 
 pub fn run(name: &str) -> Result<()> {
     let (mut vault, password) = storage::prompt_and_unlock()?;
+    run_with_vault(&mut vault, name)?;
+    eprintln!("Saving vault...");
+    storage::save_vault(&vault, password.as_bytes())?;
+    Ok(())
+}
 
+/// Core edit logic without prompt_and_unlock or save (for REPL mode).
+pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
     let entry = vault
         .find_entry_mut_by_id(name)
         .ok_or_else(|| CryptoKeeperError::EntryNotFound(name.to_string()))?;
@@ -191,9 +198,6 @@ pub fn run(name: &str) -> Result<()> {
     entry.url = new_url;
     entry.notes = new_notes.trim().to_string();
     entry.updated_at = Utc::now();
-
-    eprintln!("Saving vault...");
-    storage::save_vault(&vault, password.as_bytes())?;
 
     print_success(&format!(
         "Entry '{}' updated successfully.",
