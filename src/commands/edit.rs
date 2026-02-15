@@ -50,13 +50,17 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
         SecretType::SeedPhrase => 1,
         SecretType::Password => 2,
     };
-    let type_options = &["Private Key", "Seed Phrase", "Password"];
+    let type_options = &["Private Key", "Seed Phrase", "Password", "Exit"];
     let type_idx = Select::new()
         .with_prompt(format!("Secret type [{}]", entry.secret_type))
         .items(type_options)
         .default(current_type_idx)
         .interact()
         .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    if type_idx == 3 {
+        return Err(CryptoKeeperError::Cancelled);
+    }
 
     let new_type = match type_idx {
         0 => SecretType::PrivateKey,

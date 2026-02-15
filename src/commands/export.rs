@@ -15,7 +15,7 @@ pub fn run(file: &str) -> Result<()> {
 }
 
 /// Core export logic without prompt_and_unlock (for REPL mode).
-pub fn run_with_vault(vault: &VaultData, file: &str) -> Result<()> {
+pub fn run_with_vault(vault: &VaultData, directory: &str) -> Result<()> {
     println!();
     println!("  {}", heading("Export encrypted backup"));
     println!(
@@ -40,15 +40,30 @@ pub fn run_with_vault(vault: &VaultData, file: &str) -> Result<()> {
         return Err(CryptoKeeperError::PasswordMismatch);
     }
 
-    let path = Path::new(file);
+    let directory = directory.trim_matches(|c| c == '\'' || c == '"');
+    let dir_path = Path::new(directory);
+    
+    if !dir_path.exists() {
+        std::fs::create_dir_all(dir_path).map_err(CryptoKeeperError::Io)?;
+    }
+    
+    if !dir_path.is_dir() {
+        return Err(CryptoKeeperError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("'{}' is not a directory", directory)
+        )));
+    }
+    
+    let file_path = dir_path.join("backup.ck");
+    
     eprintln!("Encrypting backup...");
-    storage::write_backup(&vault, export_password.as_bytes(), path)?;
+    storage::write_backup(&vault, export_password.as_bytes(), &file_path)?;
 
     let lines = vec![
         format!(
             "{} Backup exported to '{}'",
             "✓".green().bold(),
-            file.cyan()
+            file_path.display().to_string().cyan()
         ),
         format!(
             "{} entries exported.",

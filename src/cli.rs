@@ -64,10 +64,10 @@ pub enum Commands {
         query: String,
     },
 
-    /// Export vault as an encrypted backup
+    /// Export vault as an encrypted backup (creates backup.ck in the specified directory)
     Export {
-        /// Output file path
-        file: String,
+        /// Directory path where backup.ck will be created
+        directory: String,
     },
 
     /// Import entries from an encrypted backup

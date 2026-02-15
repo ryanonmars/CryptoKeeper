@@ -199,12 +199,14 @@ fn select_entry(vault: &VaultData) -> Result<String> {
         return Err(CryptoKeeperError::Cancelled);
     }
 
-    let items: Vec<String> = vault
+    let mut items: Vec<String> = vault
         .entries
         .iter()
         .enumerate()
         .map(|(i, e)| format!("{}. {}", i + 1, e.name))
         .collect();
+    
+    items.push("Exit".to_string());
 
     let idx = Select::new()
         .with_prompt("Select an entry")
@@ -214,6 +216,7 @@ fn select_entry(vault: &VaultData) -> Result<String> {
         .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     match idx {
+        Some(i) if i >= vault.entries.len() => Err(CryptoKeeperError::Cancelled),
         Some(i) => Ok((i + 1).to_string()),
         None => Err(CryptoKeeperError::Cancelled),
     }
@@ -325,12 +328,12 @@ fn dispatch(session: &mut Session, line: &str) -> Result<()> {
             commands::search::run_with_vault(&session.vault, &query)
         }
         "export" => {
-            let file = if args.is_empty() {
-                prompt_input("Export file path")?
+            let directory = if args.is_empty() {
+                prompt_input("Export directory path")?
             } else {
                 args.join(" ")
             };
-            commands::export::run_with_vault(&session.vault, &file)
+            commands::export::run_with_vault(&session.vault, &directory)
         }
         "import" => {
             let file = if args.is_empty() {
@@ -429,7 +432,7 @@ fn print_help() {
     println!("    {}    Delete an entry", "/delete [name|#]".cyan());
     println!("    {}      Copy secret to clipboard (auto-clears 10s)", "/copy [name|#]".cyan());
     println!("    {}   Search entries", "/search [query]".cyan());
-    println!("    {}    Export encrypted backup", "/export [file]".cyan());
+    println!("    {}    Export encrypted backup (creates backup.ck)", "/export [directory]".cyan());
     println!("    {}    Import from encrypted backup", "/import [file]".cyan());
     println!("    {}            Change master password", "/passwd".cyan());
     println!("    {}              Show this help", "/help".cyan());

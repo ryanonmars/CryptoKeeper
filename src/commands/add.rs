@@ -39,13 +39,17 @@ pub fn run_with_vault(vault: &mut VaultData) -> Result<()> {
     }
 
     // Secret type
-    let type_options = &["Private Key", "Seed Phrase", "Password"];
+    let type_options = &["Private Key", "Seed Phrase", "Password", "Exit"];
     let type_idx = Select::new()
         .with_prompt("Secret type")
         .items(type_options)
         .default(0)
         .interact()
         .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+    if type_idx == 3 {
+        return Err(CryptoKeeperError::Cancelled);
+    }
 
     let secret_type = match type_idx {
         0 => SecretType::PrivateKey,
@@ -105,13 +109,17 @@ pub fn run_with_vault(vault: &mut VaultData) -> Result<()> {
         )
     } else {
         // PrivateKey / SeedPhrase: network + optional address
-        let network_options = &["Ethereum", "Bitcoin", "Solana", "Other"];
+        let network_options = &["Ethereum", "Bitcoin", "Solana", "Other", "Exit"];
         let net_idx = Select::new()
             .with_prompt("Network")
             .items(network_options)
             .default(0)
             .interact()
             .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        if net_idx == 4 {
+            return Err(CryptoKeeperError::Cancelled);
+        }
 
         let network = if net_idx == 3 {
             let custom: String = Input::new()

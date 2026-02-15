@@ -22,6 +22,7 @@ pub fn run(file: &str) -> Result<()> {
 /// Core import logic without prompt_and_unlock or save (for REPL mode).
 /// Returns true if the vault was modified and needs saving.
 pub fn run_with_vault(vault: &mut VaultData, file: &str) -> Result<bool> {
+    let file = file.trim_matches(|c| c == '\'' || c == '"');
     let path = Path::new(file);
     if !path.exists() {
         return Err(CryptoKeeperError::Io(std::io::Error::new(
@@ -50,7 +51,7 @@ pub fn run_with_vault(vault: &mut VaultData, file: &str) -> Result<bool> {
                 backup_entry.name.cyan()
             );
 
-            let options = &["Skip", "Rename imported entry", "Overwrite existing"];
+            let options = &["Skip", "Rename imported entry", "Overwrite existing", "Exit"];
             let choice = Select::new()
                 .with_prompt("How to resolve?")
                 .items(options)
@@ -85,8 +86,7 @@ pub fn run_with_vault(vault: &mut VaultData, file: &str) -> Result<bool> {
                     imported += 1;
                 }
                 _ => {
-                    skipped += 1;
-                    continue;
+                    return Err(CryptoKeeperError::Cancelled);
                 }
             }
         } else {

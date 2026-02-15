@@ -38,7 +38,7 @@ fn main() {
             Commands::Delete { ref name } => commands::delete::run(name),
             Commands::Copy { ref name } => commands::copy::run(name),
             Commands::Search { ref query } => commands::search::run(query),
-            Commands::Export { ref file } => commands::export::run(file),
+            Commands::Export { ref directory } => commands::export::run(directory),
             Commands::Import { ref file } => commands::import::run(file),
             Commands::Passwd => commands::passwd::run(),
         },

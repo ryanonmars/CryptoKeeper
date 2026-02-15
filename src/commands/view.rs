@@ -1,5 +1,5 @@
 use colored::Colorize;
-use dialoguer::Confirm;
+use dialoguer::{Confirm, Select};
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
@@ -63,6 +63,23 @@ pub fn run_with_vault(vault: &VaultData, name: &str) -> Result<()> {
         println!();
         println!("  {} {}", "Secret:".bold(), entry.secret.red());
         println!();
+        
+        let options = &["Clear screen and continue", "Keep visible"];
+        let clear_choice = Select::new()
+            .with_prompt("What would you like to do?")
+            .items(options)
+            .default(0)
+            .interact()
+            .map_err(|e| CryptoKeeperError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        
+        if clear_choice == 0 {
+            use crossterm::{execute, terminal::{Clear, ClearType}, cursor::MoveTo};
+            execute!(
+                std::io::stdout(),
+                Clear(ClearType::All),
+                MoveTo(0, 0)
+            ).map_err(CryptoKeeperError::Io)?;
+        }
     }
 
     Ok(())
