@@ -77,7 +77,7 @@ pub fn run() -> Result<()> {
 
     // Authenticate
     let password = Zeroizing::new(
-        rpassword::prompt_password("Master password: ").map_err(CryptoKeeperError::Io)?,
+        input::read_password_resize_aware("Master password: ").map_err(CryptoKeeperError::Io)?
     );
 
     if password.is_empty() {
@@ -102,8 +102,8 @@ pub fn run() -> Result<()> {
     ));
     println!();
 
-    let mut command_input = input::CommandInput::new(MENU_COMMANDS.to_vec());
-    
+    let mut command_input = input::CommandInput::new(MENU_COMMANDS.to_vec(), entry_count);
+
     crossterm::terminal::enable_raw_mode()
         .map_err(|e| CryptoKeeperError::Io(e))?;
 
@@ -133,7 +133,7 @@ pub fn run() -> Result<()> {
                 .map_err(|e| CryptoKeeperError::Io(e))?;
             match select_command() {
                 Ok(cmd) => {
-                    let result = dispatch(&mut session, &cmd);
+                    let result = dispatch(&mut session, &mut command_input, &cmd);
                     handle_result(result);
                 }
                 Err(CryptoKeeperError::Cancelled) => {}
@@ -148,7 +148,7 @@ pub fn run() -> Result<()> {
         crossterm::terminal::disable_raw_mode()
             .map_err(|e| CryptoKeeperError::Io(e))?;
         
-        let result = dispatch(&mut session, line);
+        let result = dispatch(&mut session, &mut command_input, line);
         handle_result(result);
         println!();
         
@@ -236,7 +236,7 @@ fn prompt_input(prompt: &str) -> Result<String> {
 }
 
 /// Parse and dispatch a REPL command.
-fn dispatch(session: &mut Session, line: &str) -> Result<()> {
+fn dispatch(session: &mut Session, command_input: &mut input::CommandInput, line: &str) -> Result<()> {
     // Parse: /command [args...]
     let line = if line.starts_with('/') {
         &line[1..]
@@ -263,6 +263,7 @@ fn dispatch(session: &mut Session, line: &str) -> Result<()> {
             commands::add::run_with_vault(&mut session.vault)?;
             eprintln!("Saving vault...");
             session.save()?;
+            command_input.set_entry_count(session.vault.entries.len());
             Ok(())
         }
         "view" | "v" => {
@@ -309,6 +310,7 @@ fn dispatch(session: &mut Session, line: &str) -> Result<()> {
             commands::delete::run_with_vault(&mut session.vault, &name)?;
             eprintln!("Saving vault...");
             session.save()?;
+            command_input.set_entry_count(session.vault.entries.len());
             Ok(())
         }
         "copy" | "cp" => {
@@ -345,6 +347,7 @@ fn dispatch(session: &mut Session, line: &str) -> Result<()> {
             if modified {
                 eprintln!("Saving vault...");
                 session.save()?;
+                command_input.set_entry_count(session.vault.entries.len());
             }
             Ok(())
         }
