@@ -1,5 +1,12 @@
 use colored::Colorize;
 use unicode_width::UnicodeWidthStr;
+use ratatui::{
+    layout::{Alignment, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+    Frame,
+};
 
 use super::get_terminal_width;
 use super::theme::dim_border;
@@ -153,7 +160,7 @@ fn print_narrow_header(width: usize) {
     );
 }
 
-/// Print a centered art line (no ANSI codes in input) within bordered row.
+/// Print a centered line (no ANSI codes in input) within bordered row.
 fn print_centered_art(line: &str, inner: usize) {
     let art_width = display_width(line);
     let left_pad = inner.saturating_sub(art_width) / 2;
@@ -192,4 +199,119 @@ fn print_centered_line(styled: &str, raw: &str, inner: usize) {
         " ".repeat(right_pad),
         dim_border("│")
     );
+}
+
+pub fn render_header(frame: &mut Frame, area: Rect) {
+    let width = area.width as usize;
+    
+    let content = if width >= 70 {
+        build_wide_header()
+    } else if width >= 50 {
+        build_medium_header()
+    } else {
+        build_narrow_header()
+    };
+    
+    frame.render_widget(content, area);
+}
+
+fn build_wide_header() -> Paragraph<'static> {
+    let crypto_lines = [
+        " ██████╗██████╗ ██╗   ██╗██████╗ ████████╗ ██████╗ ",
+        "██╔════╝██╔══██╗╚██╗ ██╔╝██╔══██╗╚══██╔══╝██╔═══██╗",
+        "██║     ██████╔╝ ╚████╔╝ ██████╔╝   ██║   ██║   ██║",
+        "██║     ██╔══██╗  ╚██╔╝  ██╔═══╝    ██║   ██║   ██║",
+        "╚██████╗██║  ██║   ██║   ██║        ██║   ╚██████╔╝",
+        " ╚═════╝╚═╝  ╚═╝   ╚═╝   ╚═╝        ╚═╝    ╚═════╝ ",
+    ];
+
+    let keeper_lines = [
+        "██╗  ██╗███████╗███████╗██████╗ ███████╗██████╗ ",
+        "██║ ██╔╝██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗",
+        "█████╔╝ █████╗  █████╗  ██████╔╝█████╗  ██████╔╝",
+        "██╔═██╗ ██╔══╝  ██╔══╝  ██╔═══╝ ██╔══╝  ██╔══██╗",
+        "██║  ██╗███████╗███████╗██║     ███████╗██║  ██║",
+        "╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚══════╝╚═╝  ╚═╝",
+    ];
+
+    let version_line = format!("v{}", VERSION);
+    let tagline = "Encrypted vault for crypto keys & seed phrases";
+    let info = format!("{} — {}", version_line, tagline);
+
+    let art_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default()
+        .fg(Color::DarkGray);
+
+    let mut lines = vec![Line::from("")];
+    
+    for line in &crypto_lines {
+        lines.push(Line::from(Span::styled(*line, art_style)));
+    }
+    
+    for line in &keeper_lines {
+        lines.push(Line::from(Span::styled(*line, art_style)));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(info, dim_style)));
+    lines.push(Line::from(""));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" CryptoKeeper ")
+        .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center)
+}
+
+fn build_medium_header() -> Paragraph<'static> {
+    let title = "CRYPTOKEEPER";
+    let version_line = format!("v{}", VERSION);
+    let tagline = "Encrypted vault for crypto keys";
+    let info = format!("{} — {}", version_line, tagline);
+
+    let title_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default()
+        .fg(Color::DarkGray);
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(title, title_style)),
+        Line::from(""),
+        Line::from(Span::styled(info, dim_style)),
+        Line::from(""),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center)
+}
+
+fn build_narrow_header() -> Paragraph<'static> {
+    let text = format!("CRYPTOKEEPER v{}", VERSION);
+    
+    let style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let lines = vec![Line::from(Span::styled(text, style))];
+
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center)
 }

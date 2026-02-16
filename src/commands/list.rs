@@ -107,6 +107,7 @@ pub fn run(filter: Option<&str>) -> Result<()> {
 }
 
 /// List entries from a cached vault (for REPL mode — no disk read needed).
+#[allow(dead_code)]
 pub fn run_with_vault(vault: &crate::vault::model::VaultData, filter: Option<&str>) -> Result<()> {
     if let Some(f) = filter {
         if parse_type_filter(f).is_none() {

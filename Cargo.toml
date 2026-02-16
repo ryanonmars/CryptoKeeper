@@ -23,6 +23,7 @@ console = "0.15"
 unicode-width = "0.2"
 rustyline = "15"
 crossterm = "0.28"
+ratatui = "0.28"
 
 [dev-dependencies]
 tempfile = "3"

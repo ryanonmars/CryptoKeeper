@@ -1,6 +1,7 @@
 pub mod borders;
 pub mod header;
 pub mod theme;
+pub mod terminal;
 
 use std::io::IsTerminal;
 

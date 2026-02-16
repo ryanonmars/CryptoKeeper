@@ -1,273 +1,168 @@
-use crossterm::{
-    cursor, event::{self, Event, KeyCode, KeyModifiers},
-    execute, queue,
-    style::{Color, Print, ResetColor, SetForegroundColor},
-    terminal::{Clear, ClearType},
+use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::{
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    widgets::{List, ListItem, Paragraph},
+    Frame,
 };
-use std::io::{self, Write};
-use std::time::Duration;
 
-use crate::ui;
+pub struct PasswordInput {
+    pub buffer: String,
+    pub prompt: String,
+}
 
-/// Read a password with resize handling
-pub fn read_password_resize_aware(prompt: &str) -> io::Result<String> {
-    let mut stdout = io::stdout();
-    let mut buffer = String::new();
-
-    crossterm::terminal::enable_raw_mode()?;
-
-    execute!(stdout, Print(prompt))?;
-    stdout.flush()?;
-
-    loop {
-        if event::poll(Duration::from_millis(200))? {
-            match event::read()? {
-                Event::Resize(_, _) => {
-                    crossterm::terminal::disable_raw_mode()?;
-                    ui::setup_app_theme(true);
-                    crossterm::terminal::enable_raw_mode()?;
-                    execute!(stdout, Print(prompt))?;
-                    execute!(stdout, Print("*".repeat(buffer.len())))?;
-                    stdout.flush()?;
-                    continue;
-                }
-                Event::Key(key_event) => {
-                    match key_event.code {
-                        KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            execute!(stdout, Print("\n"))?;
-                            crossterm::terminal::disable_raw_mode()?;
-                            return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
-                        }
-                        KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                            if buffer.is_empty() {
-                                execute!(stdout, Print("\n"))?;
-                                crossterm::terminal::disable_raw_mode()?;
-                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF"));
-                            }
-                        }
-                        KeyCode::Char(c) => {
-                            buffer.push(c);
-                            execute!(stdout, Print("*"))?;
-                            stdout.flush()?;
-                        }
-                        KeyCode::Backspace => {
-                            if !buffer.is_empty() {
-                                buffer.pop();
-                                execute!(
-                                    stdout,
-                                    cursor::MoveLeft(1),
-                                    Print(" "),
-                                    cursor::MoveLeft(1)
-                                )?;
-                                stdout.flush()?;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            execute!(stdout, Print("\n"))?;
-                            crossterm::terminal::disable_raw_mode()?;
-                            return Ok(buffer);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
+impl PasswordInput {
+    pub fn new(prompt: &str) -> Self {
+        Self {
+            buffer: String::new(),
+            prompt: prompt.to_string(),
         }
     }
+
+    pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> InputResult {
+        match key {
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                InputResult::Cancelled
+            }
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.buffer.is_empty() {
+                    InputResult::Cancelled
+                } else {
+                    InputResult::Continue
+                }
+            }
+            KeyCode::Char(c) => {
+                self.buffer.push(c);
+                InputResult::Continue
+            }
+            KeyCode::Backspace => {
+                self.buffer.pop();
+                InputResult::Continue
+            }
+            KeyCode::Enter => InputResult::Done(self.buffer.clone()),
+            _ => InputResult::Continue,
+        }
+    }
+
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let prompt_text = format!("{}{}", self.prompt, "*".repeat(self.buffer.len()));
+        let paragraph = Paragraph::new(prompt_text);
+        frame.render_widget(paragraph, area);
+    }
+}
+
+pub enum InputResult {
+    Continue,
+    Done(String),
+    Cancelled,
 }
 
 pub struct CommandInput {
+    pub buffer: String,
+    pub prompt: String,
     commands: Vec<(&'static str, &'static str)>,
-    completion_lines: usize,
-    display_upward: bool,
-    entry_count: usize,
+    pub show_completions: bool,
+    pub selected_completion: usize,
 }
 
 impl CommandInput {
-    pub fn new(commands: Vec<(&'static str, &'static str)>, entry_count: usize) -> Self {
+    pub fn new(commands: Vec<(&'static str, &'static str)>) -> Self {
         Self {
+            buffer: String::new(),
+            prompt: "cryptokeeper> ".to_string(),
             commands,
-            completion_lines: 0,
-            display_upward: false,
-            entry_count,
+            show_completions: false,
+            selected_completion: 0,
         }
     }
 
-    pub fn set_entry_count(&mut self, count: usize) {
-        self.entry_count = count;
-    }
-
-    fn redraw_screen_for_resize(&mut self) -> io::Result<()> {
-        use crate::ui::borders::print_success;
-        
-        self.completion_lines = 0;
-        
-        crossterm::terminal::disable_raw_mode()?;
-        
-        ui::setup_app_theme(true);
-        print_success(&format!(
-            "Vault unlocked ({} {})",
-            self.entry_count,
-            if self.entry_count == 1 { "entry" } else { "entries" }
-        ));
-        println!();
-        
-        crossterm::terminal::enable_raw_mode()?;
-        
-        Ok(())
-    }
-
-    pub fn read_line(&mut self, prompt: &str) -> io::Result<Option<String>> {
-        let mut stdout = io::stdout();
-        let mut buffer = String::new();
-        let mut show_completions = false;
-        let mut selected_completion = 0;
-
-        execute!(stdout, Print(prompt))?;
-        stdout.flush()?;
-
-        loop {
-            if event::poll(Duration::from_millis(200))? {
-                match event::read()? {
-                    Event::Resize(_, _) => {
-                        self.redraw_screen_for_resize()?;
-                        execute!(stdout, Print(prompt), Print(&buffer))?;
-                        stdout.flush()?;
-                        if show_completions {
-                            self.display_completions(&buffer, selected_completion)?;
-                        }
-                        continue;
-                    }
-                    Event::Key(key_event) => {
-                match key_event.code {
-                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if show_completions {
-                            self.clear_completions()?;
-                        }
-                        execute!(stdout, Print("\n"))?;
-                        return Ok(None);
-                    }
-                    KeyCode::Char('d') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        if buffer.is_empty() {
-                            if show_completions {
-                                self.clear_completions()?;
-                            }
-                            execute!(stdout, Print("\n"))?;
-                            return Ok(None);
-                        }
-                    }
-                    KeyCode::Char('/') => {
-                        if show_completions {
-                            self.clear_completions()?;
-                        }
-                        buffer.push('/');
-                        
-                        execute!(stdout, Clear(ClearType::CurrentLine), cursor::MoveToColumn(0))?;
-                        execute!(stdout, Print(prompt), Print(&buffer))?;
-                        stdout.flush()?;
-                        
-                        show_completions = true;
-                        selected_completion = 0;
-                        self.display_completions(&buffer, selected_completion)?;
-                    }
-                    KeyCode::Char(c) => {
-                        if show_completions {
-                            self.clear_completions()?;
-                        }
-                        buffer.push(c);
-                        
-                        execute!(stdout, Clear(ClearType::CurrentLine), cursor::MoveToColumn(0))?;
-                        execute!(stdout, Print(prompt), Print(&buffer))?;
-                        stdout.flush()?;
-                        
-                        if buffer.starts_with('/') {
-                            show_completions = true;
-                            selected_completion = 0;
-                            self.display_completions(&buffer, selected_completion)?;
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        if !buffer.is_empty() {
-                            if show_completions {
-                                self.clear_completions()?;
-                            }
-                            buffer.pop();
-                            
-                            execute!(stdout, Clear(ClearType::CurrentLine), cursor::MoveToColumn(0))?;
-                            execute!(stdout, Print(prompt), Print(&buffer))?;
-                            stdout.flush()?;
-                            
-                            if buffer.starts_with('/') {
-                                show_completions = true;
-                                selected_completion = 0;
-                                self.display_completions(&buffer, selected_completion)?;
-                            } else {
-                                show_completions = false;
-                            }
-                        }
-                    }
-                    KeyCode::Down if show_completions => {
-                        let matches = self.get_matching_commands(&buffer);
-                        if !matches.is_empty() {
-                            self.clear_completions()?;
-                            selected_completion = (selected_completion + 1) % matches.len();
-                            self.display_completions(&buffer, selected_completion)?;
-                        }
-                    }
-                    KeyCode::Up if show_completions => {
-                        let matches = self.get_matching_commands(&buffer);
-                        if !matches.is_empty() {
-                            self.clear_completions()?;
-                            selected_completion = if selected_completion == 0 {
-                                matches.len() - 1
-                            } else {
-                                selected_completion - 1
-                            };
-                            self.display_completions(&buffer, selected_completion)?;
-                        }
-                    }
-                    KeyCode::Tab if show_completions => {
-                        let matches = self.get_matching_commands(&buffer);
-                        if !matches.is_empty() && selected_completion < matches.len() {
-                            buffer = format!("/{}", matches[selected_completion].0);
-                            self.clear_completions()?;
-                            
-                            execute!(stdout, Clear(ClearType::CurrentLine), cursor::MoveToColumn(0))?;
-                            execute!(stdout, Print(prompt), Print(&buffer))?;
-                            stdout.flush()?;
-                        }
-                    }
-                    KeyCode::Enter => {
-                        if show_completions {
-                            let matches = self.get_matching_commands(&buffer);
-                            if !matches.is_empty() && selected_completion < matches.len() {
-                                buffer = format!("/{}", matches[selected_completion].0);
-                            }
-                            self.clear_completions()?;
-                        }
-                        
-                        execute!(stdout, Print("\n"))?;
-                        return Ok(Some(buffer));
-                    }
-                    KeyCode::Esc if show_completions => {
-                        self.clear_completions()?;
-                        show_completions = false;
-                    }
-                    _ => {}
-                }
-                    }
-                    _ => {}
+    pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> InputResult {
+        match key {
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                InputResult::Cancelled
+            }
+            KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.buffer.is_empty() {
+                    InputResult::Cancelled
+                } else {
+                    InputResult::Continue
                 }
             }
+            KeyCode::Char('/') => {
+                self.buffer.push('/');
+                self.show_completions = true;
+                self.selected_completion = 0;
+                InputResult::Continue
+            }
+            KeyCode::Char(c) => {
+                self.buffer.push(c);
+                if self.buffer.starts_with('/') {
+                    self.show_completions = true;
+                    self.selected_completion = 0;
+                }
+                InputResult::Continue
+            }
+            KeyCode::Backspace => {
+                self.buffer.pop();
+                if self.buffer.starts_with('/') {
+                    self.show_completions = true;
+                    self.selected_completion = 0;
+                } else {
+                    self.show_completions = false;
+                }
+                InputResult::Continue
+            }
+            KeyCode::Down if self.show_completions => {
+                let matches = self.get_matching_commands();
+                if !matches.is_empty() {
+                    self.selected_completion = (self.selected_completion + 1) % matches.len();
+                }
+                InputResult::Continue
+            }
+            KeyCode::Up if self.show_completions => {
+                let matches = self.get_matching_commands();
+                if !matches.is_empty() {
+                    self.selected_completion = if self.selected_completion == 0 {
+                        matches.len() - 1
+                    } else {
+                        self.selected_completion - 1
+                    };
+                }
+                InputResult::Continue
+            }
+            KeyCode::Tab if self.show_completions => {
+                let matches = self.get_matching_commands();
+                if !matches.is_empty() && self.selected_completion < matches.len() {
+                    self.buffer = format!("/{}", matches[self.selected_completion].0);
+                }
+                InputResult::Continue
+            }
+            KeyCode::Enter => {
+                if self.show_completions {
+                    let matches = self.get_matching_commands();
+                    if !matches.is_empty() && self.selected_completion < matches.len() {
+                        self.buffer = format!("/{}", matches[self.selected_completion].0);
+                    }
+                }
+                self.show_completions = false;
+                let result = self.buffer.clone();
+                self.buffer.clear();
+                InputResult::Done(result)
+            }
+            KeyCode::Esc if self.show_completions => {
+                self.show_completions = false;
+                InputResult::Continue
+            }
+            _ => InputResult::Continue,
         }
     }
 
-    fn get_matching_commands(&self, input: &str) -> Vec<(&'static str, &'static str)> {
-        if !input.starts_with('/') {
+    fn get_matching_commands(&self) -> Vec<(&'static str, &'static str)> {
+        if !self.buffer.starts_with('/') {
             return vec![];
         }
 
-        let prefix = &input[1..];
+        let prefix = &self.buffer[1..];
         self.commands
             .iter()
             .filter(|(cmd, _)| cmd.starts_with(prefix))
@@ -275,83 +170,53 @@ impl CommandInput {
             .collect()
     }
 
-    fn display_completions(&mut self, input: &str, selected: usize) -> io::Result<()> {
-        let matches = self.get_matching_commands(input);
-        if matches.is_empty() {
-            return Ok(());
-        }
+    pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(area);
 
-        let mut stdout = io::stdout();
-        
-        // If this is the first time showing completions, make room by printing newlines
-        if self.completion_lines == 0 {
-            for _ in 0..matches.len() {
-                execute!(stdout, Print("\n"))?;
-            }
-            // Move cursor back up to where we started
-            for _ in 0..matches.len() {
-                execute!(stdout, cursor::MoveToPreviousLine(1))?;
-            }
-        }
-        
-        self.completion_lines = matches.len();
-        self.display_upward = false;
-        
-        queue!(stdout, cursor::SavePosition)?;
-        
-        for (i, (cmd, desc)) in matches.iter().enumerate() {
-            queue!(stdout, cursor::MoveToNextLine(1), cursor::MoveToColumn(2))?;
-            
-            if i == selected {
-                queue!(
-                    stdout,
-                    SetForegroundColor(Color::Cyan),
-                    Print("▸ "),
-                    ResetColor,
-                )?;
-            } else {
-                queue!(stdout, Print("  "))?;
-            }
-            
-            queue!(
-                stdout,
-                SetForegroundColor(Color::Cyan),
-                Print(format!("/{:<10}", cmd)),
-                ResetColor,
-                Print(" "),
-                Print(desc),
-                Clear(ClearType::UntilNewLine),
-            )?;
-        }
-        
-        queue!(stdout, cursor::RestorePosition)?;
-        stdout.flush()?;
-        
-        Ok(())
-    }
+        let input_text = format!("{}{}", self.prompt, self.buffer);
+        let input_paragraph = Paragraph::new(input_text);
+        frame.render_widget(input_paragraph, chunks[0]);
 
-    fn clear_completions(&mut self) -> io::Result<()> {
-        if self.completion_lines == 0 {
-            return Ok(());
-        }
+        if self.show_completions {
+            let matches = self.get_matching_commands();
+            if !matches.is_empty() {
+                let items: Vec<ListItem> = matches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (cmd, desc))| {
+                        let prefix = if i == self.selected_completion {
+                            "▸ "
+                        } else {
+                            "  "
+                        };
+                        let content = format!("{}/{:<10} {}", prefix, cmd, desc);
+                        let style = if i == self.selected_completion {
+                            Style::default().fg(Color::Cyan)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(content).style(style)
+                    })
+                    .collect();
 
-        let mut stdout = io::stdout();
-        
-        queue!(stdout, cursor::SavePosition)?;
-        
-        for _ in 0..self.completion_lines {
-            queue!(
-                stdout,
-                cursor::MoveToNextLine(1),
-                Clear(ClearType::CurrentLine),
-            )?;
+                let list = List::new(items);
+                
+                let completion_height = matches.len().min(10) as u16;
+                let completion_area = Rect {
+                    x: chunks[1].x,
+                    y: chunks[1].y,
+                    width: chunks[1].width,
+                    height: completion_height,
+                };
+                
+                frame.render_widget(list, completion_area);
+            }
         }
-        
-        queue!(stdout, cursor::RestorePosition)?;
-        stdout.flush()?;
-        
-        self.completion_lines = 0;
-        
-        Ok(())
     }
 }
