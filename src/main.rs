@@ -45,7 +45,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        ui::borders::print_error(&e.to_string());
+        ui::borders::print_error(&e.to_string() as &str);
         std::process::exit(1);
     }
 }

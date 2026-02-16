@@ -3,6 +3,7 @@ use dialoguer::{Confirm, Select};
 
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::borders::print_box;
+use crate::ui::theme::clear_screen;
 use crate::vault::model::{SecretType, VaultData};
 use crate::vault::storage;
 

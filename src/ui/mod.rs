@@ -1,7 +1,11 @@
+pub mod app;
 pub mod borders;
 pub mod header;
+pub mod prompt;
+pub mod screens;
 pub mod theme;
 pub mod terminal;
+pub mod widgets;
 
 use std::io::IsTerminal;
 

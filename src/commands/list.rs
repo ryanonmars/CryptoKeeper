@@ -255,22 +255,22 @@ fn interactive_loop(filter: Option<&str>) -> Result<()> {
         match action_idx {
             0 => {
                 if let Err(e) = super::view::run(&index_str) {
-                    ui::borders::print_error(&e.to_string());
+                    ui::borders::print_error(&e.to_string() as &str);
                 }
             }
             1 => {
                 if let Err(e) = super::copy::run(&index_str) {
-                    ui::borders::print_error(&e.to_string());
+                    ui::borders::print_error(&e.to_string() as &str);
                 }
             }
             2 => {
                 if let Err(e) = super::edit::run(&index_str) {
-                    ui::borders::print_error(&e.to_string());
+                    ui::borders::print_error(&e.to_string() as &str);
                 }
             }
             3 => {
                 if let Err(e) = super::delete::run(&index_str) {
-                    ui::borders::print_error(&e.to_string());
+                    ui::borders::print_error(&e.to_string() as &str);
                 }
             }
             4 | _ => {}
