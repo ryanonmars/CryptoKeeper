@@ -6,7 +6,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, ListItem, Paragraph, Row, Table, Wrap},
 };
-use std::io;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -183,8 +182,9 @@ pub fn run() -> Result<()> {
                 _ => {
                     vec![
                         Constraint::Length(14),
-                        Constraint::Min(5),
+                        Constraint::Length(3),
                         Constraint::Length(if app_state.show_completions { 10 } else { 0 }),
+                        Constraint::Min(0),
                     ]
                 }
             };
@@ -195,10 +195,14 @@ pub fn run() -> Result<()> {
                 .split(area);
 
             render_header(frame, chunks[0]);
-            render_content(frame, chunks[1], &app_state);
             
-            if app_state.show_completions && chunks[2].height > 0 {
-                render_completions(frame, chunks[2], &app_state);
+            if matches!(&app_state.content, ContentView::Input { .. }) {
+                render_content(frame, chunks[1], &app_state);
+                if app_state.show_completions && chunks[2].height > 0 {
+                    render_completions(frame, chunks[2], &app_state);
+                }
+            } else {
+                render_content(frame, chunks[1], &app_state);
             }
         }).map_err(CryptoKeeperError::Io)?;
 
@@ -326,10 +330,8 @@ fn render_content(frame: &mut ratatui::Frame, area: Rect, app_state: &AppState) 
     match &app_state.content {
         ContentView::Input { buffer, prompt } => {
             let input_text = format!("{}{}", prompt, buffer);
-            let help_hint = "\nType a command or press / for menu\nTry: /list, /help, /add";
-            let full_text = format!("{}{}", input_text, help_hint);
             
-            let paragraph = Paragraph::new(full_text)
+            let paragraph = Paragraph::new(input_text)
                 .block(Block::default()
                     .borders(Borders::ALL)
                     .title(" Console ")
@@ -407,17 +409,32 @@ fn render_completions(frame: &mut ratatui::Frame, area: Rect, app_state: &AppSta
             return;
         }
 
-        let items: Vec<ListItem> = matches
+        let visible_height = area.height.saturating_sub(2).max(1) as usize;
+        let selected = app_state.selected_completion;
+        
+        let scroll_offset = if selected >= visible_height {
+            selected - visible_height + 1
+        } else {
+            0
+        };
+
+        let visible_matches: Vec<_> = matches
             .iter()
             .enumerate()
+            .skip(scroll_offset)
+            .take(visible_height)
+            .collect();
+
+        let items: Vec<ListItem> = visible_matches
+            .iter()
             .map(|(i, (cmd, desc))| {
-                let prefix = if i == app_state.selected_completion {
+                let prefix = if *i == selected {
                     "▸ "
                 } else {
                     "  "
                 };
                 let content = format!("{}/{:<10} {}", prefix, cmd, desc);
-                let style = if i == app_state.selected_completion {
+                let style = if *i == selected {
                     Style::default().fg(Color::Cyan)
                 } else {
                     Style::default()
@@ -426,10 +443,16 @@ fn render_completions(frame: &mut ratatui::Frame, area: Rect, app_state: &AppSta
             })
             .collect();
 
+        let title = if matches.len() > visible_height {
+            format!(" Commands ({}/{}) ", selected + 1, matches.len())
+        } else {
+            " Commands ".to_string()
+        };
+
         let list = ratatui::widgets::List::new(items)
             .block(Block::default()
                 .borders(Borders::ALL)
-                .title(" Commands ")
+                .title(title)
                 .border_style(Style::default().fg(Color::DarkGray)));
         
         frame.render_widget(list, area);
