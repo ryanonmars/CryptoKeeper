@@ -87,11 +87,6 @@ impl EntryTable {
             KeyCode::Char('/') => {
                 self.number_buffer.clear();
             }
-            KeyCode::Char(c) if !matches!(c, 'a' | 'v' | 'c' | 'e' | 'd' | 'q' | '?' | 's' | 'x' | 'i' | 'p') => {
-                self.number_buffer.clear();
-                self.filter.push(c);
-                self.selected = 0;
-            }
             KeyCode::Backspace => {
                 if !self.number_buffer.is_empty() {
                     self.number_buffer.pop();

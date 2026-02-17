@@ -7,24 +7,25 @@ use ratatui::{
 };
 
 pub struct MenuBar {
-    items: Vec<(char, &'static str)>,
+    items: Vec<(&'static str, &'static str)>,
 }
 
 impl MenuBar {
     pub fn new() -> Self {
         Self {
             items: vec![
-                ('A', "Add"),
-                ('V', "View"),
-                ('C', "Copy"),
-                ('E', "Edit"),
-                ('D', "Delete"),
-                ('S', "Search"),
-                ('X', "Export"),
-                ('I', "Import"),
-                ('P', "Passwd"),
-                ('?', "Help"),
-                ('Q', "Quit"),
+                ("⇧A", "Add"),
+                ("⇧V", "View"),
+                ("⇧C", "Copy"),
+                ("⇧E", "Edit"),
+                ("⇧D", "Delete"),
+                ("⇧F", "Find"),
+                ("⇧X", "Export"),
+                ("⇧I", "Import"),
+                ("⇧P", "Passwd"),
+                ("⇧S", "Settings"),
+                ("?", "Help"),
+                ("⇧Q", "Quit"),
             ],
         }
     }

@@ -473,24 +473,43 @@ impl App {
             _ => return Ok(()),
         };
 
-        // Shift+S for settings
-        if key == KeyCode::Char('S') && modifiers.contains(KeyModifiers::SHIFT) {
-            self.config = crate::config::load_config()?;
-            self.view = AppView::Settings(SettingsScreen::new(self.config.clone()));
+        // Enter works without modifier
+        if modifiers.is_empty() && key == KeyCode::Enter {
+            if let Some(idx) = selected_idx {
+                if let Some(entry) = self.session.as_ref()
+                    .and_then(|s| s.vault.entries.get(idx).cloned())
+                {
+                    if entry.has_secondary_password {
+                        self.pending_view_entry_idx = Some(idx);
+                        self.view = AppView::ViewPassword(
+                            ViewPasswordScreen::new("Enter Secondary Password"),
+                        );
+                    } else {
+                        self.view = AppView::ViewEntry(ViewEntryScreen::new(entry));
+                    }
+                }
+            }
             return Ok(());
         }
 
-        if modifiers.is_empty() {
+        // ? works without modifier
+        if modifiers.is_empty() && key == KeyCode::Char('?') {
+            self.view = AppView::Help;
+            return Ok(());
+        }
+
+        // Shift+key commands
+        if modifiers.contains(KeyModifiers::SHIFT) {
             match key {
-                KeyCode::Char('q') => {
+                KeyCode::Char('Q') => {
                     self.should_quit = true;
                     return Ok(());
                 }
-                KeyCode::Char('a') => {
+                KeyCode::Char('A') => {
                     self.view = AppView::AddEntry(AddEntryScreen::new());
                     return Ok(());
                 }
-                KeyCode::Char('v') | KeyCode::Enter => {
+                KeyCode::Char('V') => {
                     if let Some(idx) = selected_idx {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx).cloned())
@@ -507,7 +526,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('c') => {
+                KeyCode::Char('C') => {
                     if let Some(idx) = selected_idx {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx).cloned())
@@ -524,7 +543,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('e') => {
+                KeyCode::Char('E') => {
                     if let Some(idx) = selected_idx {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx).cloned())
@@ -534,7 +553,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('d') => {
+                KeyCode::Char('D') => {
                     if let Some(idx) = selected_idx {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx))
@@ -548,25 +567,26 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('?') => {
-                    self.view = AppView::Help;
-                    return Ok(());
-                }
-                KeyCode::Char('s') => {
+                KeyCode::Char('F') => {
                     self.view = AppView::Search(String::new());
                     return Ok(());
                 }
-                KeyCode::Char('x') => {
+                KeyCode::Char('S') => {
+                    self.config = crate::config::load_config()?;
+                    self.view = AppView::Settings(SettingsScreen::new(self.config.clone()));
+                    return Ok(());
+                }
+                KeyCode::Char('X') => {
                     let input = InputScreen::new("Export Vault", "Enter directory path:", false);
                     self.view = AppView::Input(input, InputPurpose::ExportPath);
                     return Ok(());
                 }
-                KeyCode::Char('i') => {
+                KeyCode::Char('I') => {
                     let input = InputScreen::new("Import Vault", "Enter backup file path:", false);
                     self.view = AppView::Input(input, InputPurpose::ImportPath);
                     return Ok(());
                 }
-                KeyCode::Char('p') => {
+                KeyCode::Char('P') => {
                     let input = InputScreen::new("Change Password", "Enter new master password:", true);
                     self.view = AppView::Input(input, InputPurpose::ChangePassword);
                     return Ok(());
@@ -988,18 +1008,18 @@ impl App {
                 "Commands:",
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )]),
-            Line::from("  a         Add new entry"),
-            Line::from("  v         View selected entry"),
-            Line::from("  c         Copy secret to clipboard"),
-            Line::from("  e         Edit selected entry"),
-            Line::from("  d         Delete selected entry"),
-            Line::from("  s         Search/filter entries"),
-            Line::from("  x         Export vault"),
-            Line::from("  i         Import vault"),
-            Line::from("  p         Change password"),
+            Line::from("  Shift+A   Add new entry"),
+            Line::from("  Shift+V   View selected entry"),
+            Line::from("  Shift+C   Copy secret to clipboard"),
+            Line::from("  Shift+E   Edit selected entry"),
+            Line::from("  Shift+D   Delete selected entry"),
+            Line::from("  Shift+F   Find/filter entries"),
+            Line::from("  Shift+X   Export vault"),
+            Line::from("  Shift+I   Import vault"),
+            Line::from("  Shift+P   Change password"),
             Line::from("  Shift+S   Settings"),
             Line::from("  ?         Show this help"),
-            Line::from("  q         Quit application"),
+            Line::from("  Shift+Q   Quit application"),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Global Shortcuts:",
@@ -1094,15 +1114,15 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Search Entries ")
+            .title(" Find Entries ")
             .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
             .border_style(Style::default().fg(Color::Cyan));
 
         let text = vec![
-            Line::from("Type to search entries by name or network:"),
+            Line::from("Type to find entries by name or network:"),
             Line::from(""),
             Line::from(vec![
-                Span::styled("Search: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Find: ", Style::default().fg(Color::Cyan)),
                 Span::styled(query, Style::default().fg(Color::Yellow)),
                 Span::styled("█", Style::default().fg(Color::Cyan)),
             ]),
