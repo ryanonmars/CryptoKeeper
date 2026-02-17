@@ -3,6 +3,7 @@ use ratatui::Frame;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
+use crate::config::model::Config;
 use crate::error::{CryptoKeeperError, Result};
 use crate::ui::terminal::Tui;
 use crate::vault::model::{Entry, VaultData};
@@ -10,7 +11,9 @@ use crate::vault::storage;
 
 use super::screens::{
     add_entry::AddEntryScreen, confirm::ConfirmScreen, edit_entry::EditEntryScreen,
-    input::InputScreen, login::LoginScreen, view_entry::ViewEntryScreen,
+    input::InputScreen, login::LoginScreen, settings::SettingsScreen,
+    view_entry::ViewEntryScreen, view_password::ViewPasswordScreen,
+    wizard::{WizardScreen, WizardAction},
 };
 use super::widgets::dashboard::Dashboard;
 
@@ -28,21 +31,29 @@ impl Session {
 }
 
 pub struct App {
+    config: Config,
     session: Option<Session>,
     view: AppView,
     should_quit: bool,
     clipboard_clear_time: Option<Instant>,
     pending_export_password: Option<String>,
     pending_new_password: Option<String>,
+    /// Entry index pending secondary password verification for view
+    pending_view_entry_idx: Option<usize>,
+    /// Entry index pending secondary password verification for copy
+    pending_copy_entry_idx: Option<usize>,
 }
 
 pub enum AppView {
+    Wizard(WizardScreen),
     Login(LoginScreen),
     Dashboard(Dashboard),
     AddEntry(AddEntryScreen),
     ViewEntry(ViewEntryScreen),
     EditEntry(EditEntryScreen),
     Confirm(ConfirmScreen),
+    Settings(SettingsScreen),
+    ViewPassword(ViewPasswordScreen),
     Message { title: String, message: String, is_error: bool },
     Help,
     CopyCountdown { entry_name: String, seconds_left: u8 },
@@ -62,20 +73,29 @@ pub enum InputPurpose {
 
 impl App {
     pub fn new() -> Result<Self> {
-        if !storage::vault_exists() {
+        let config = crate::config::load_config()?;
+
+        let view = if !config.first_run_complete && !storage::vault_exists() {
+            AppView::Wizard(WizardScreen::new())
+        } else if !storage::vault_exists() {
             return Err(CryptoKeeperError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "No vault found. Run `cryptokeeper init` to create one.",
             )));
-        }
+        } else {
+            AppView::Login(LoginScreen::new())
+        };
 
         Ok(Self {
+            config,
             session: None,
-            view: AppView::Login(LoginScreen::new()),
+            view,
             should_quit: false,
             clipboard_clear_time: None,
             pending_export_password: None,
             pending_new_password: None,
+            pending_view_entry_idx: None,
+            pending_copy_entry_idx: None,
         })
     }
 
@@ -120,32 +140,31 @@ impl App {
 
     fn render(&mut self, frame: &mut Frame) {
         match &mut self.view {
+            AppView::Wizard(wizard) => wizard.render(frame),
             AppView::Login(login) => login.render(frame),
             AppView::Dashboard(dashboard) => dashboard.render(frame),
             AppView::AddEntry(add_entry) => add_entry.render(frame),
             AppView::ViewEntry(view_entry) => view_entry.render(frame),
             AppView::EditEntry(edit_entry) => edit_entry.render(frame),
             AppView::Confirm(confirm) => confirm.render(frame),
+            AppView::Settings(settings) => settings.render(frame),
+            AppView::ViewPassword(vp) => vp.render(frame),
             AppView::Message { title, message, is_error } => {
                 let title = title.clone();
                 let message = message.clone();
                 let is_error = *is_error;
-                drop(self);
                 Self::render_message_static(frame, &title, &message, is_error);
             }
             AppView::Help => {
-                drop(self);
                 Self::render_help_static(frame);
             }
             AppView::CopyCountdown { entry_name, seconds_left } => {
                 let entry_name = entry_name.clone();
                 let seconds_left = *seconds_left;
-                drop(self);
                 Self::render_copy_countdown_static(frame, &entry_name, seconds_left);
             }
             AppView::Search(query) => {
                 let query = query.clone();
-                drop(self);
                 Self::render_search_static(frame, &query);
             }
             AppView::Input(input, _) => {
@@ -161,10 +180,17 @@ impl App {
         }
 
         match &mut self.view {
+            AppView::Wizard(_) => {
+                self.handle_wizard_input(key, modifiers)?;
+            }
             AppView::Login(login) => {
+                // F1 for recovery
+                if key == KeyCode::F(1) {
+                    self.start_recovery()?;
+                    return Ok(());
+                }
                 if let Some(password) = login.handle_key(key, modifiers) {
                     let password = password.clone();
-                    drop(login);
                     self.unlock_vault(password)?;
                 }
             }
@@ -183,9 +209,14 @@ impl App {
             AppView::Confirm(_) => {
                 self.handle_confirm_input(key, modifiers)?;
             }
+            AppView::Settings(_) => {
+                self.handle_settings_input(key, modifiers)?;
+            }
+            AppView::ViewPassword(_) => {
+                self.handle_view_password_input(key, modifiers)?;
+            }
             AppView::Message { .. } => {
                 if matches!(key, KeyCode::Enter | KeyCode::Esc) {
-                    // If we're showing a login error, return to login screen
                     if self.session.is_none() {
                         self.view = AppView::Login(LoginScreen::new());
                     } else {
@@ -244,6 +275,101 @@ impl App {
         Ok(())
     }
 
+    // ─── Wizard ──────────────────────────────────────────────────────
+
+    fn handle_wizard_input(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let action = match &mut self.view {
+            AppView::Wizard(wizard) => wizard.handle_key(key, modifiers),
+            _ => return Ok(()),
+        };
+
+        match action {
+            WizardAction::Complete(result) => {
+                // Create vault directory
+                storage::ensure_vault_dir()?;
+
+                // Create the vault
+                let vault = VaultData::new();
+                let password = Zeroizing::new(result.password);
+                storage::save_vault(&vault, password.as_bytes())?;
+
+                // Set up recovery if chosen
+                if let Some((question_index, answer)) = &result.recovery {
+                    let (vault_data, key, salt) =
+                        storage::unlock_vault_returning_key(password.as_bytes())?;
+
+                    let answer_salt = crate::crypto::kdf::generate_salt();
+                    let answer_hash =
+                        crate::crypto::recovery::hash_answer(answer, &answer_salt)?;
+                    let (blob, nonce, blob_salt) =
+                        crate::crypto::recovery::create_recovery_blob(&*key, answer)?;
+
+                    self.config.recovery = Some(crate::config::RecoveryConfig {
+                        question_index: *question_index,
+                        answer_hash,
+                        answer_salt: answer_salt.to_vec(),
+                        master_key_blob: blob,
+                        master_key_blob_nonce: nonce,
+                        master_key_blob_salt: blob_salt,
+                    });
+
+                    self.session = Some(Session {
+                        vault: vault_data,
+                        password: password.clone(),
+                        key,
+                        salt,
+                    });
+                } else {
+                    let (vault_data, key, salt) =
+                        storage::unlock_vault_returning_key(password.as_bytes())?;
+                    self.session = Some(Session {
+                        vault: vault_data,
+                        password: password.clone(),
+                        key,
+                        salt,
+                    });
+                }
+
+                // Save config
+                self.config.first_run_complete = true;
+                crate::config::save_config(&self.config)?;
+
+                self.return_to_dashboard();
+            }
+            WizardAction::Cancel => {
+                self.should_quit = true;
+            }
+            WizardAction::Continue => {}
+        }
+
+        Ok(())
+    }
+
+    // ─── Recovery ────────────────────────────────────────────────────
+
+    fn start_recovery(&mut self) -> Result<()> {
+        let config = crate::config::load_config()?;
+        if config.recovery.is_none() {
+            self.show_message(
+                "Recovery Not Available".into(),
+                "No recovery question has been configured.\nSet one up in Settings or during init.".into(),
+                true,
+            );
+            return Ok(());
+        }
+        // For TUI recovery, we show a message directing to CLI
+        // (Full TUI recovery requires multiple password prompts which
+        //  is complex in the single-event-loop model)
+        self.show_message(
+            "Password Recovery".into(),
+            "To recover your password, use the CLI command:\n\n  keeper recover\n\nThis will guide you through the recovery process.".into(),
+            false,
+        );
+        Ok(())
+    }
+
+    // ─── Login ───────────────────────────────────────────────────────
+
     fn unlock_vault(&mut self, password: Zeroizing<String>) -> Result<()> {
         match storage::unlock_vault_returning_key(password.as_bytes()) {
             Ok((vault, key, salt)) => {
@@ -257,17 +383,18 @@ impl App {
                 Ok(())
             }
             Err(e) => {
-                // Return to login screen on error so user can try again
                 self.view = AppView::Login(LoginScreen::new());
                 self.show_message(
                     "Login Failed".to_string(),
-                    format!("Failed to unlock vault: {}\n\nPress Enter to try again", e),
+                    format!("Failed to unlock vault: {}\n\nPress Enter to try again.\nPress F1 for password recovery.", e),
                     true,
                 );
                 Ok(())
             }
         }
     }
+
+    // ─── Dashboard ───────────────────────────────────────────────────
 
     fn handle_dashboard_input(
         &mut self,
@@ -278,6 +405,13 @@ impl App {
             AppView::Dashboard(d) => (d.selected_index(), true),
             _ => return Ok(()),
         };
+
+        // Shift+S for settings
+        if key == KeyCode::Char('S') && modifiers.contains(KeyModifiers::SHIFT) {
+            self.config = crate::config::load_config()?;
+            self.view = AppView::Settings(SettingsScreen::new(self.config.clone()));
+            return Ok(());
+        }
 
         if modifiers.is_empty() {
             match key {
@@ -294,7 +428,14 @@ impl App {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx).cloned())
                         {
-                            self.view = AppView::ViewEntry(ViewEntryScreen::new(entry));
+                            if entry.has_secondary_password {
+                                self.pending_view_entry_idx = Some(idx);
+                                self.view = AppView::ViewPassword(
+                                    ViewPasswordScreen::new("Enter Secondary Password"),
+                                );
+                            } else {
+                                self.view = AppView::ViewEntry(ViewEntryScreen::new(entry));
+                            }
                         }
                     }
                     return Ok(());
@@ -304,7 +445,14 @@ impl App {
                         if let Some(entry) = self.session.as_ref()
                             .and_then(|s| s.vault.entries.get(idx).cloned())
                         {
-                            self.copy_to_clipboard(&entry)?;
+                            if entry.has_secondary_password {
+                                self.pending_copy_entry_idx = Some(idx);
+                                self.view = AppView::ViewPassword(
+                                    ViewPasswordScreen::new("Enter Secondary Password to Copy"),
+                                );
+                            } else {
+                                self.copy_to_clipboard(&entry)?;
+                            }
                         }
                     }
                     return Ok(());
@@ -374,6 +522,111 @@ impl App {
         session.vault.entries.get(selected_idx).cloned()
     }
 
+    // ─── Settings ────────────────────────────────────────────────────
+
+    fn handle_settings_input(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let action = match &mut self.view {
+            AppView::Settings(settings) => settings.handle_key(key, modifiers),
+            _ => return Ok(()),
+        };
+
+        match action {
+            super::screens::settings::SettingsAction::Save(updated_config) => {
+                self.config = updated_config;
+                crate::config::save_config(&self.config)?;
+                self.return_to_dashboard();
+            }
+            super::screens::settings::SettingsAction::Cancel => {
+                self.return_to_dashboard();
+            }
+            super::screens::settings::SettingsAction::Continue => {}
+        }
+        Ok(())
+    }
+
+    // ─── View Password (secondary password gate) ─────────────────────
+
+    fn handle_view_password_input(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let action = match &mut self.view {
+            AppView::ViewPassword(vp) => vp.handle_key(key, modifiers),
+            _ => return Ok(()),
+        };
+
+        match action {
+            super::screens::view_password::ViewPasswordAction::Submit(view_pass) => {
+                // Try to unlock the entry's secret
+                if let Some(idx) = self.pending_view_entry_idx.take() {
+                    if let Some(entry) = self.session.as_ref()
+                        .and_then(|s| s.vault.entries.get(idx).cloned())
+                    {
+                        match self.decrypt_entry_secret(&entry, &view_pass) {
+                            Ok(decrypted_secret) => {
+                                let mut revealed_entry = entry.clone();
+                                revealed_entry.secret = (*decrypted_secret).clone();
+                                self.view = AppView::ViewEntry(ViewEntryScreen::new(revealed_entry));
+                            }
+                            Err(_) => {
+                                let mut vp = ViewPasswordScreen::new("Enter Secondary Password");
+                                vp.set_error("Incorrect password. Try again.");
+                                self.pending_view_entry_idx = Some(idx);
+                                self.view = AppView::ViewPassword(vp);
+                            }
+                        }
+                    } else {
+                        self.return_to_dashboard();
+                    }
+                } else if let Some(idx) = self.pending_copy_entry_idx.take() {
+                    if let Some(entry) = self.session.as_ref()
+                        .and_then(|s| s.vault.entries.get(idx).cloned())
+                    {
+                        match self.decrypt_entry_secret(&entry, &view_pass) {
+                            Ok(decrypted_secret) => {
+                                let mut copy_entry = entry.clone();
+                                copy_entry.secret = (*decrypted_secret).clone();
+                                self.copy_to_clipboard(&copy_entry)?;
+                            }
+                            Err(_) => {
+                                let mut vp = ViewPasswordScreen::new("Enter Secondary Password to Copy");
+                                vp.set_error("Incorrect password. Try again.");
+                                self.pending_copy_entry_idx = Some(idx);
+                                self.view = AppView::ViewPassword(vp);
+                            }
+                        }
+                    } else {
+                        self.return_to_dashboard();
+                    }
+                } else {
+                    self.return_to_dashboard();
+                }
+            }
+            super::screens::view_password::ViewPasswordAction::Cancel => {
+                self.pending_view_entry_idx = None;
+                self.pending_copy_entry_idx = None;
+                self.return_to_dashboard();
+            }
+            super::screens::view_password::ViewPasswordAction::Continue => {}
+        }
+        Ok(())
+    }
+
+    fn decrypt_entry_secret(&self, entry: &Entry, view_password: &str) -> Result<Zeroizing<String>> {
+        let wrapped = entry.entry_key_wrapped.as_ref()
+            .ok_or(CryptoKeeperError::SecondaryPasswordRequired)?;
+        let nonce = entry.entry_key_nonce.as_ref()
+            .ok_or(CryptoKeeperError::SecondaryPasswordRequired)?;
+        let salt = entry.entry_key_salt.as_ref()
+            .ok_or(CryptoKeeperError::SecondaryPasswordRequired)?;
+        let ct = entry.encrypted_secret.as_ref()
+            .ok_or(CryptoKeeperError::SecondaryPasswordRequired)?;
+        let ct_nonce = entry.encrypted_secret_nonce.as_ref()
+            .ok_or(CryptoKeeperError::SecondaryPasswordRequired)?;
+
+        let entry_key = crate::crypto::entry_key::unwrap_entry_key(wrapped, nonce, salt, view_password)?;
+        crate::crypto::entry_key::decrypt_secret(&entry_key, ct, ct_nonce)
+    }
+
+    // ─── Add Entry ───────────────────────────────────────────────────
+
     fn handle_add_entry_input(
         &mut self,
         key: KeyCode,
@@ -400,6 +653,8 @@ impl App {
         Ok(())
     }
 
+    // ─── View Entry ──────────────────────────────────────────────────
+
     fn handle_view_entry_input(
         &mut self,
         key: KeyCode,
@@ -416,18 +671,19 @@ impl App {
             }
             super::screens::view_entry::ViewEntryAction::Copy(secret) => {
                 use arboard::Clipboard;
+                let timeout = self.config.clipboard_timeout_secs;
                 if let Ok(mut clipboard) = Clipboard::new() {
                     let _ = clipboard.set_text(&secret);
-                    self.clipboard_clear_time = Some(Instant::now() + Duration::from_secs(10));
-                    
+                    self.clipboard_clear_time = Some(Instant::now() + Duration::from_secs(timeout));
+
                     let entry_name = match &self.view {
                         AppView::ViewEntry(v) => v.entry.name.clone(),
                         _ => String::new(),
                     };
-                    
+
                     self.view = AppView::CopyCountdown {
                         entry_name,
-                        seconds_left: 10,
+                        seconds_left: timeout as u8,
                     };
                 }
             }
@@ -435,6 +691,8 @@ impl App {
         }
         Ok(())
     }
+
+    // ─── Edit Entry ──────────────────────────────────────────────────
 
     fn handle_edit_entry_input(
         &mut self,
@@ -472,6 +730,8 @@ impl App {
         Ok(())
     }
 
+    // ─── Confirm ─────────────────────────────────────────────────────
+
     fn handle_confirm_input(
         &mut self,
         key: KeyCode,
@@ -504,14 +764,17 @@ impl App {
         Ok(())
     }
 
+    // ─── Clipboard ───────────────────────────────────────────────────
+
     fn copy_to_clipboard(&mut self, entry: &Entry) -> Result<()> {
         use arboard::Clipboard;
+        let timeout = self.config.clipboard_timeout_secs;
         if let Ok(mut clipboard) = Clipboard::new() {
             let _ = clipboard.set_text(&entry.secret);
-            self.clipboard_clear_time = Some(Instant::now() + Duration::from_secs(10));
+            self.clipboard_clear_time = Some(Instant::now() + Duration::from_secs(timeout));
             self.view = AppView::CopyCountdown {
                 entry_name: entry.name.clone(),
-                seconds_left: 10,
+                seconds_left: timeout as u8,
             };
         }
         Ok(())
@@ -524,6 +787,8 @@ impl App {
         }
         Ok(())
     }
+
+    // ─── Navigation ──────────────────────────────────────────────────
 
     fn return_to_dashboard(&mut self) {
         if let Some(session) = &self.session {
@@ -547,6 +812,8 @@ impl App {
         };
     }
 
+    // ─── Static Renderers ────────────────────────────────────────────
+
     fn render_message_static(frame: &mut Frame, title: &str, message: &str, is_error: bool) {
         use ratatui::{
             layout::{Constraint, Direction, Layout},
@@ -559,7 +826,7 @@ impl App {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(5), Constraint::Min(1)])
+            .constraints([Constraint::Min(1), Constraint::Length(7), Constraint::Min(1)])
             .split(area);
 
         let block = Block::default()
@@ -608,9 +875,10 @@ impl App {
             Line::from("  e         Edit selected entry"),
             Line::from("  d         Delete selected entry"),
             Line::from("  s         Search/filter entries"),
-            Line::from("  x         Export vault (use CLI)"),
-            Line::from("  i         Import vault (use CLI)"),
-            Line::from("  p         Change password (use CLI)"),
+            Line::from("  x         Export vault"),
+            Line::from("  i         Import vault"),
+            Line::from("  p         Change password"),
+            Line::from("  Shift+S   Settings"),
             Line::from("  ?         Show this help"),
             Line::from("  q         Quit application"),
             Line::from(""),
@@ -620,6 +888,7 @@ impl App {
             )]),
             Line::from("  Ctrl+C    Quit from anywhere"),
             Line::from("  Ctrl+Q    Quit from anywhere"),
+            Line::from("  F1        Password recovery (login screen)"),
             Line::from("  Esc       Go back/cancel"),
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -642,7 +911,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
-                Constraint::Length(26),
+                Constraint::Length(28),
                 Constraint::Min(1),
             ])
             .split(area);
@@ -730,10 +999,12 @@ impl App {
         frame.render_widget(paragraph, chunks[1]);
     }
 
+    // ─── Input Result Handler ────────────────────────────────────────
+
     fn handle_input_result(&mut self, result: super::screens::input::InputResult, purpose: InputPurpose) -> Result<()> {
         use super::screens::input::InputResult;
         use zeroize::Zeroizing;
-        
+
         match result {
             InputResult::Cancel => {
                 self.pending_export_password = None;
@@ -805,8 +1076,20 @@ impl App {
                                     let password = Zeroizing::new(new_pass);
                                     match crate::vault::storage::save_vault(&session.vault, password.as_bytes()) {
                                         Ok(_) => {
+                                            // Warn about recovery invalidation
+                                            let has_recovery = self.config.recovery.is_some();
                                             session.password = password.clone();
-                                            self.show_success("Master password changed successfully!".to_string());
+                                            if has_recovery {
+                                                self.config.recovery = None;
+                                                let _ = crate::config::save_config(&self.config);
+                                                self.show_message(
+                                                    "Password Changed".into(),
+                                                    "Master password changed successfully!\n\nNote: Your recovery question has been cleared.\nPlease set up a new one in Settings (Shift+S).".into(),
+                                                    false,
+                                                );
+                                            } else {
+                                                self.show_success("Master password changed successfully!".to_string());
+                                            }
                                         }
                                         Err(e) => {
                                             self.show_message("Password Change Error".to_string(), format!("Failed to change password: {}", e), true);

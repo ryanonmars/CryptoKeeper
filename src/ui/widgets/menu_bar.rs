@@ -23,6 +23,7 @@ impl MenuBar {
                 ('X', "Export"),
                 ('I', "Import"),
                 ('P', "Passwd"),
+                ('?', "Help"),
                 ('Q', "Quit"),
             ],
         }

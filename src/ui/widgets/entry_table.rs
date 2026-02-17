@@ -169,9 +169,12 @@ impl EntryTable {
                 })
                 .unwrap_or_else(|| String::from(""));
 
+            let lock_indicator = if entry.has_secondary_password { " [locked]" } else { "" };
+            let name_display = format!("{}{}", entry.name, lock_indicator);
+
             let cells = vec![
                 Cell::from(display_num.to_string()),
-                Cell::from(entry.name.clone()),
+                Cell::from(name_display),
                 Cell::from(entry.secret_type.to_string()),
                 Cell::from(entry.network.clone()),
                 Cell::from(address_display),

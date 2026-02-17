@@ -78,4 +78,24 @@ pub enum Commands {
 
     /// Change the master password
     Passwd,
+
+    /// Recover vault access using your recovery question
+    Recover,
+
+    /// View or change configuration settings
+    Config {
+        /// Display current configuration
+        #[arg(long)]
+        show: bool,
+
+        /// Set clipboard auto-clear timeout in seconds
+        #[arg(long)]
+        clipboard_timeout: Option<u64>,
+    },
+
+    /// Derive and save the public address for an entry from its private key or seed phrase
+    Derive {
+        /// Name or index number of the entry
+        name: String,
+    },
 }

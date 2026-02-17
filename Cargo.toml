@@ -4,6 +4,12 @@ version = "0.2.0"
 edition = "2021"
 description = "CLI encrypted storage manager for cryptocurrency private keys and seed phrases"
 
+[features]
+default = ["derive-eth", "derive-btc", "derive-sol"]
+derive-eth = ["dep:k256", "dep:sha3"]
+derive-btc = ["dep:bitcoin"]
+derive-sol = ["dep:ed25519-dalek", "dep:bs58"]
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 chacha20poly1305 = "0.10"
@@ -24,6 +30,17 @@ unicode-width = "0.2"
 rustyline = "15"
 crossterm = "0.28"
 ratatui = "0.28"
+
+# Address derivation (feature-gated)
+k256 = { version = "0.13", features = ["ecdsa"], optional = true }
+sha3 = { version = "0.10", optional = true }
+bitcoin = { version = "0.32", optional = true }
+ed25519-dalek = { version = "2", optional = true }
+bs58 = { version = "0.5", optional = true }
+bip39 = "2"
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

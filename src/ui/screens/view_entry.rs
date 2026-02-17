@@ -112,7 +112,9 @@ impl ViewEntryScreen {
         lines.push(Line::from(""));
         lines.push(Line::from(""));
 
-        let secret_display = if self.secret_revealed {
+        let secret_display = if self.entry.has_secondary_password && !self.secret_revealed {
+            "[Protected - secondary password required]".to_string()
+        } else if self.secret_revealed {
             self.entry.secret.clone()
         } else {
             "••••••••••••••••".to_string()

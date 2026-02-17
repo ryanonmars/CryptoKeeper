@@ -296,6 +296,40 @@ pub fn unlock_vault_returning_key(
     Ok((vault, key, salt))
 }
 
+/// Read vault using a pre-derived master key (for recovery flow).
+pub fn read_vault_with_key(key: &[u8; 32], raw_data: &[u8]) -> Result<VaultData> {
+    if raw_data.len() < VaultHeader::HEADER_SIZE_V1 {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+    let magic = &raw_data[0..4];
+    if magic != VaultHeader::MAGIC {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+    let version = u32::from_le_bytes(raw_data[4..8].try_into().unwrap());
+    let salt_offset = if version == VaultHeader::FORMAT_VERSION_V2 {
+        let meta_len = u32::from_le_bytes(raw_data[8..12].try_into().unwrap()) as usize;
+        12 + meta_len
+    } else {
+        8
+    };
+    let ct_offset = salt_offset + 32 + 4 + 4 + 4 + 24 + 4;
+    if raw_data.len() < ct_offset {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+    let mut nonce = [0u8; 24];
+    nonce.copy_from_slice(&raw_data[salt_offset + 44..salt_offset + 68]);
+    let ct_len =
+        u32::from_le_bytes(raw_data[salt_offset + 68..salt_offset + 72].try_into().unwrap())
+            as usize;
+    if raw_data.len() < ct_offset + ct_len {
+        return Err(CryptoKeeperError::InvalidVaultFormat);
+    }
+    let ciphertext = &raw_data[ct_offset..ct_offset + ct_len];
+    let plaintext = cipher::decrypt(key, &nonce, ciphertext)?;
+    let vault: VaultData = serde_json::from_slice(&plaintext)?;
+    Ok(vault)
+}
+
 /// Save vault using a pre-derived key (skips Argon2 derivation for REPL mode).
 pub fn save_vault_with_key(
     vault: &VaultData,
@@ -354,6 +388,12 @@ mod tests {
             notes: "Test note".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            has_secondary_password: false,
+            entry_key_wrapped: None,
+            entry_key_nonce: None,
+            entry_key_salt: None,
+            encrypted_secret: None,
+            encrypted_secret_nonce: None,
         });
         vault
     }

@@ -35,11 +35,31 @@ pub struct Entry {
     pub notes: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+
+    // Secondary password fields (all serde(default) for backward compat)
+    #[serde(default)]
+    pub has_secondary_password: bool,
+    #[serde(default)]
+    pub entry_key_wrapped: Option<Vec<u8>>,
+    #[serde(default)]
+    pub entry_key_nonce: Option<Vec<u8>>,
+    #[serde(default)]
+    pub entry_key_salt: Option<Vec<u8>>,
+    #[serde(default)]
+    pub encrypted_secret: Option<Vec<u8>>,
+    #[serde(default)]
+    pub encrypted_secret_nonce: Option<Vec<u8>>,
 }
 
 impl Drop for Entry {
     fn drop(&mut self) {
         self.secret.zeroize();
+        if let Some(ref mut wrapped) = self.entry_key_wrapped {
+            wrapped.zeroize();
+        }
+        if let Some(ref mut secret) = self.encrypted_secret {
+            secret.zeroize();
+        }
     }
 }
 
@@ -56,6 +76,7 @@ impl fmt::Debug for Entry {
             .field("notes", &self.notes)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
+            .field("has_secondary_password", &self.has_secondary_password)
             .finish()
     }
 }
@@ -72,6 +93,8 @@ pub struct EntryMeta {
     #[serde(default)]
     pub url: Option<String>,
     pub notes: String,
+    #[serde(default)]
+    pub has_secondary_password: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +168,7 @@ impl VaultData {
                 username: e.username.clone(),
                 url: e.url.clone(),
                 notes: e.notes.clone(),
+                has_secondary_password: e.has_secondary_password,
             })
             .collect()
     }
@@ -183,6 +207,12 @@ mod tests {
             notes: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            has_secondary_password: false,
+            entry_key_wrapped: None,
+            entry_key_nonce: None,
+            entry_key_salt: None,
+            encrypted_secret: None,
+            encrypted_secret_nonce: None,
         }
     }
 

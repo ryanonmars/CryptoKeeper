@@ -1,5 +1,11 @@
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::Frame;
+use ratatui::{
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
+    Frame,
+};
 use zeroize::Zeroizing;
 
 use crate::ui::widgets::password_field::{PasswordAction, PasswordField};
@@ -24,6 +30,19 @@ impl LoginScreen {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
-        self.password_field.render(frame, frame.area());
+        let area = frame.area();
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+
+        self.password_field.render(frame, chunks[0]);
+
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("F1", Style::default().fg(Color::Cyan)),
+            Span::styled(" Forgot password?", Style::default().fg(Color::DarkGray)),
+        ]))
+        .style(Style::default().bg(Color::Black));
+        frame.render_widget(hint, chunks[1]);
     }
 }

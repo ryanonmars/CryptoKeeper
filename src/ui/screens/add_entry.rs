@@ -258,6 +258,12 @@ impl AddEntryScreen {
             notes: self.notes.clone(),
             created_at: now,
             updated_at: now,
+            has_secondary_password: false,
+            entry_key_wrapped: None,
+            entry_key_nonce: None,
+            entry_key_salt: None,
+            encrypted_secret: None,
+            encrypted_secret_nonce: None,
         };
 
         AddEntryAction::Save(entry)

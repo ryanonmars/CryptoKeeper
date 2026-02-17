@@ -1,6 +1,7 @@
 mod cli;
 mod clipboard;
 mod commands;
+mod config;
 mod crypto;
 mod error;
 mod repl;
@@ -23,6 +24,17 @@ fn main() {
         ui::setup_app_theme(true);
     }
 
+    // Load config and set vault path env var if customized
+    if let Ok(cfg) = config::load_config() {
+        // Only override if user has a custom vault path (not the default)
+        let default_cfg = config::Config::default();
+        if cfg.vault_path != default_cfg.vault_path {
+            if let Some(parent) = std::path::Path::new(&cfg.vault_path).parent() {
+                std::env::set_var("CRYPTOKEEPER_VAULT_DIR", parent);
+            }
+        }
+    }
+
     let result = match cli.command {
         None => repl::run(),
         Some(cmd) => match cmd {
@@ -41,6 +53,12 @@ fn main() {
             Commands::Export { ref directory } => commands::export::run(directory),
             Commands::Import { ref file } => commands::import::run(file),
             Commands::Passwd => commands::passwd::run(),
+            Commands::Recover => commands::recover::run(),
+            Commands::Config {
+                show,
+                ref clipboard_timeout,
+            } => commands::config_cmd::run(show, *clipboard_timeout),
+            Commands::Derive { ref name } => commands::derive::run(name),
         },
     };
 

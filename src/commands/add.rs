@@ -170,6 +170,12 @@ pub fn run_with_vault(vault: &mut VaultData) -> Result<()> {
         notes: notes.trim().to_string(),
         created_at: now,
         updated_at: now,
+        has_secondary_password: false,
+        entry_key_wrapped: None,
+        entry_key_nonce: None,
+        entry_key_salt: None,
+        encrypted_secret: None,
+        encrypted_secret_nonce: None,
     };
 
     vault.entries.push(entry);

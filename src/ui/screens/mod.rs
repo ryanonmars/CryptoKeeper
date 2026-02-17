@@ -3,4 +3,7 @@ pub mod confirm;
 pub mod edit_entry;
 pub mod input;
 pub mod login;
+pub mod settings;
 pub mod view_entry;
+pub mod view_password;
+pub mod wizard;

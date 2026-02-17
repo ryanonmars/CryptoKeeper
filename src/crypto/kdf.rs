@@ -46,7 +46,7 @@ mod tests {
         // Use reduced params for test speed
         let key1 = derive_key(password, &salt, 1024, 1, 1).unwrap();
         let key2 = derive_key(password, &salt, 1024, 1, 1).unwrap();
-        assert_eq!(key1.as_ref(), key2.as_ref());
+        assert_eq!(&*key1, &*key2);
     }
 
     #[test]
@@ -54,7 +54,7 @@ mod tests {
         let salt = [42u8; 32];
         let key1 = derive_key(b"password1", &salt, 1024, 1, 1).unwrap();
         let key2 = derive_key(b"password2", &salt, 1024, 1, 1).unwrap();
-        assert_ne!(key1.as_ref(), key2.as_ref());
+        assert_ne!(&*key1, &*key2);
     }
 
     #[test]
@@ -64,7 +64,7 @@ mod tests {
         let salt2 = [2u8; 32];
         let key1 = derive_key(password, &salt1, 1024, 1, 1).unwrap();
         let key2 = derive_key(password, &salt2, 1024, 1, 1).unwrap();
-        assert_ne!(key1.as_ref(), key2.as_ref());
+        assert_ne!(&*key1, &*key2);
     }
 
     #[test]
