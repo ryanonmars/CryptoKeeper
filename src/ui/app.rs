@@ -11,7 +11,8 @@ use crate::vault::storage;
 
 use super::screens::{
     add_entry::AddEntryScreen, confirm::ConfirmScreen, edit_entry::EditEntryScreen,
-    input::InputScreen, login::LoginScreen, settings::SettingsScreen,
+    input::InputScreen, login::LoginScreen, recovery::RecoveryScreen,
+    recovery_setup::RecoverySetupScreen, settings::SettingsScreen,
     view_entry::ViewEntryScreen, view_password::ViewPasswordScreen,
     wizard::{WizardScreen, WizardAction},
 };
@@ -54,6 +55,8 @@ pub enum AppView {
     Confirm(ConfirmScreen),
     Settings(SettingsScreen),
     ViewPassword(ViewPasswordScreen),
+    Recovery(RecoveryScreen),
+    RecoverySetup(RecoverySetupScreen),
     Message { title: String, message: String, is_error: bool },
     Help,
     CopyCountdown { entry_name: String, seconds_left: u8 },
@@ -149,6 +152,8 @@ impl App {
             AppView::Confirm(confirm) => confirm.render(frame),
             AppView::Settings(settings) => settings.render(frame),
             AppView::ViewPassword(vp) => vp.render(frame),
+            AppView::Recovery(recovery) => recovery.render(frame),
+            AppView::RecoverySetup(setup) => setup.render(frame),
             AppView::Message { title, message, is_error } => {
                 let title = title.clone();
                 let message = message.clone();
@@ -214,6 +219,12 @@ impl App {
             }
             AppView::ViewPassword(_) => {
                 self.handle_view_password_input(key, modifiers)?;
+            }
+            AppView::Recovery(_) => {
+                self.handle_recovery_input(key, modifiers)?;
+            }
+            AppView::RecoverySetup(_) => {
+                self.handle_recovery_setup_input(key, modifiers)?;
             }
             AppView::Message { .. } => {
                 if matches!(key, KeyCode::Enter | KeyCode::Esc) {
@@ -349,22 +360,78 @@ impl App {
 
     fn start_recovery(&mut self) -> Result<()> {
         let config = crate::config::load_config()?;
-        if config.recovery.is_none() {
-            self.show_message(
-                "Recovery Not Available".into(),
-                "No recovery question has been configured.\nSet one up in Settings or during init.".into(),
-                true,
-            );
-            return Ok(());
+        match config.recovery {
+            Some(recovery_config) => {
+                self.view = AppView::Recovery(RecoveryScreen::new(recovery_config));
+            }
+            None => {
+                self.show_message(
+                    "Recovery Not Available".into(),
+                    "No recovery question has been configured.\nSet one up in Settings or during init.".into(),
+                    true,
+                );
+            }
         }
-        // For TUI recovery, we show a message directing to CLI
-        // (Full TUI recovery requires multiple password prompts which
-        //  is complex in the single-event-loop model)
-        self.show_message(
-            "Password Recovery".into(),
-            "To recover your password, use the CLI command:\n\n  keeper recover\n\nThis will guide you through the recovery process.".into(),
-            false,
-        );
+        Ok(())
+    }
+
+    fn handle_recovery_input(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let action = match &mut self.view {
+            AppView::Recovery(recovery) => recovery.handle_key(key, modifiers),
+            _ => return Ok(()),
+        };
+
+        match action {
+            super::screens::recovery::RecoveryAction::Complete { master_key, new_password } => {
+                // Verify we can decrypt the vault with the recovered key
+                let vault_path = storage::vault_path();
+                let data = std::fs::read(&vault_path)?;
+                match storage::read_vault_with_key(&*master_key, &data) {
+                    Ok(vault) => {
+                        // Re-encrypt vault with the new password
+                        storage::save_vault(&vault, new_password.as_bytes())?;
+
+                        // Re-derive key and salt for the new session
+                        let (vault_data, new_key, new_salt) =
+                            storage::unlock_vault_returning_key(new_password.as_bytes())?;
+
+                        // Update recovery config with the new master key
+                        let mut config = crate::config::load_config()?;
+                        if config.recovery.is_some() {
+                            // Password changed = recovery must be reset.
+                            // The recovery blob is encrypted under the old master key.
+                            config.recovery = None;
+                            crate::config::save_config(&config)?;
+                            self.config = config;
+                        }
+
+                        self.session = Some(Session {
+                            vault: vault_data,
+                            password: new_password,
+                            key: new_key,
+                            salt: new_salt,
+                        });
+
+                        self.show_message(
+                            "Recovery Successful".into(),
+                            "Master password changed successfully!\n\nNote: Your recovery question has been cleared.\nPlease set up a new one in Settings (Shift+S).".into(),
+                            false,
+                        );
+                    }
+                    Err(e) => {
+                        self.show_message(
+                            "Recovery Error".into(),
+                            format!("Failed to decrypt vault with recovered key: {}", e),
+                            true,
+                        );
+                    }
+                }
+            }
+            super::screens::recovery::RecoveryAction::Cancel => {
+                self.view = AppView::Login(LoginScreen::new());
+            }
+            super::screens::recovery::RecoveryAction::Continue => {}
+        }
         Ok(())
     }
 
@@ -539,7 +606,55 @@ impl App {
             super::screens::settings::SettingsAction::Cancel => {
                 self.return_to_dashboard();
             }
+            super::screens::settings::SettingsAction::SetupRecovery => {
+                self.view = AppView::RecoverySetup(RecoverySetupScreen::new());
+            }
             super::screens::settings::SettingsAction::Continue => {}
+        }
+        Ok(())
+    }
+
+    // ─── Recovery Setup (from Settings) ───────────────────────────────
+
+    fn handle_recovery_setup_input(&mut self, key: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        let action = match &mut self.view {
+            AppView::RecoverySetup(setup) => setup.handle_key(key, modifiers),
+            _ => return Ok(()),
+        };
+
+        match action {
+            super::screens::recovery_setup::RecoverySetupAction::Complete {
+                question_index,
+                answer,
+            } => {
+                if let Some(session) = &self.session {
+                    let master_key: &[u8; 32] = &*session.key;
+
+                    let answer_salt = crate::crypto::kdf::generate_salt();
+                    let answer_hash =
+                        crate::crypto::recovery::hash_answer(&answer, &answer_salt)?;
+                    let (blob, nonce, blob_salt) =
+                        crate::crypto::recovery::create_recovery_blob(master_key, &answer)?;
+
+                    self.config.recovery = Some(crate::config::RecoveryConfig {
+                        question_index,
+                        answer_hash,
+                        answer_salt: answer_salt.to_vec(),
+                        master_key_blob: blob,
+                        master_key_blob_nonce: nonce,
+                        master_key_blob_salt: blob_salt,
+                    });
+                    crate::config::save_config(&self.config)?;
+
+                    self.show_success("Recovery question configured successfully!".to_string());
+                }
+            }
+            super::screens::recovery_setup::RecoverySetupAction::Cancel => {
+                // Return to settings
+                self.config = crate::config::load_config()?;
+                self.view = AppView::Settings(SettingsScreen::new(self.config.clone()));
+            }
+            super::screens::recovery_setup::RecoverySetupAction::Continue => {}
         }
         Ok(())
     }
@@ -640,9 +755,13 @@ impl App {
         match action {
             super::screens::add_entry::AddEntryAction::Save(entry) => {
                 if let Some(session) = &mut self.session {
+                    let msg = match &entry.public_address {
+                        Some(addr) => format!("Entry added! Address: {}", addr),
+                        None => "Entry added successfully!".to_string(),
+                    };
                     session.vault.entries.push(entry);
                     session.save()?;
-                    self.show_success("Entry added successfully!".to_string());
+                    self.show_success(msg);
                 }
             }
             super::screens::add_entry::AddEntryAction::Cancel => {

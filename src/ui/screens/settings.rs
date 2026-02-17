@@ -24,6 +24,7 @@ pub enum SettingsAction {
     Continue,
     Save(Config),
     Cancel,
+    SetupRecovery,
 }
 
 pub struct SettingsScreen {
@@ -72,7 +73,7 @@ impl SettingsScreen {
                         self.edit_buffer = self.config.clipboard_timeout_secs.to_string();
                     }
                     SettingsField::RecoveryStatus => {
-                        // Recovery is managed through wizard/CLI, not editable here
+                        return SettingsAction::SetupRecovery;
                     }
                 }
                 SettingsAction::Continue
