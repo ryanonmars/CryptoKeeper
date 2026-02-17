@@ -211,14 +211,62 @@ fn derive_sol_from_seed(secret: &str) -> Result<String> {
         .map_err(|e| CryptoKeeperError::DerivationFailed(format!("Invalid mnemonic: {}", e)))?;
     let seed = mnemonic.to_seed("");
 
-    // Solana uses the first 32 bytes of the seed for the default derivation
-    // (Phantom and other wallets use m/44'/501'/0'/0' with BIP44-Ed25519,
-    //  but the simplest approach used by solana-keygen is the seed directly)
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(&seed[..32]);
+    // SLIP-10 / BIP44-Ed25519 derivation: m/44'/501'/0'/0'
+    // This matches Phantom, Solflare, and other standard Solana wallets.
+    let key_bytes = slip10_derive_ed25519(&seed, &[
+        0x8000002C, // 44'
+        0x800001F5, // 501'
+        0x80000000, // 0'
+        0x80000000, // 0'
+    ])?;
+
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let pubkey = signing_key.verifying_key();
     Ok(bs58::encode(pubkey.as_bytes()).into_string())
+}
+
+// ─── SLIP-10 Ed25519 derivation ──────────────────────────────────────
+
+/// SLIP-10 derivation for Ed25519 keys (hardened children only).
+/// Used by Phantom/Solflare for Solana BIP44 path m/44'/501'/0'/0'.
+#[cfg(feature = "derive-sol")]
+fn slip10_derive_ed25519(seed: &[u8], path: &[u32]) -> Result<[u8; 32]> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+
+    type HmacSha512 = Hmac<Sha512>;
+
+    // Master key derivation
+    let mut mac = HmacSha512::new_from_slice(b"ed25519 seed")
+        .map_err(|e| CryptoKeeperError::DerivationFailed(format!("HMAC error: {}", e)))?;
+    mac.update(seed);
+    let result = mac.finalize().into_bytes();
+
+    let mut key = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    key.copy_from_slice(&result[..32]);
+    chain_code.copy_from_slice(&result[32..]);
+
+    // Child key derivation (SLIP-10 Ed25519 only supports hardened)
+    for &index in path {
+        if index & 0x80000000 == 0 {
+            return Err(CryptoKeeperError::DerivationFailed(
+                "SLIP-10 Ed25519 only supports hardened derivation".into(),
+            ));
+        }
+
+        let mut mac = HmacSha512::new_from_slice(&chain_code)
+            .map_err(|e| CryptoKeeperError::DerivationFailed(format!("HMAC error: {}", e)))?;
+        mac.update(&[0x00]);
+        mac.update(&key);
+        mac.update(&index.to_be_bytes());
+
+        let result = mac.finalize().into_bytes();
+        key.copy_from_slice(&result[..32]);
+        chain_code.copy_from_slice(&result[32..]);
+    }
+
+    Ok(key)
 }
 
 // ─── BIP32 secp256k1 derivation ──────────────────────────────────────
@@ -339,6 +387,20 @@ mod tests {
         let addr = result.unwrap();
         // Verify it's valid base58
         assert!(bs58::decode(&addr).into_vec().is_ok());
+    }
+
+    #[cfg(feature = "derive-sol")]
+    #[test]
+    fn sol_seed_phantom_derivation() {
+        // Known test vector: standard BIP39 test mnemonic with Phantom-compatible
+        // SLIP-10 derivation at m/44'/501'/0'/0'
+        // Mnemonic: "abandon" x11 + "about"
+        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let result = derive_address(mnemonic, &SecretType::SeedPhrase, "Solana").unwrap();
+        assert!(result.is_some());
+        let addr = result.unwrap();
+        // This is the address Phantom derives for this mnemonic at account 0
+        assert_eq!(addr, "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk");
     }
 
     #[cfg(feature = "derive-btc")]
