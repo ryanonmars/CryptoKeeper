@@ -37,13 +37,14 @@ impl Dashboard {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let menu_lines = self.menu_bar.lines_for_width(area.width).max(1).min(3);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(5),
-                Constraint::Length(1),
+                Constraint::Length(menu_lines),
             ])
             .split(area);
 
