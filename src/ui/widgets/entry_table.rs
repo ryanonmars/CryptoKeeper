@@ -146,7 +146,7 @@ impl EntryTable {
             return;
         }
 
-        let header_cells = ["#", "Name", "Type", "Network", "Public Key/Address"]
+        let header_cells = ["#", "Name", "Type", "Network", "Public Address"]
             .iter()
             .map(|h| Cell::from(*h).style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
         let header = Row::new(header_cells).height(1);
@@ -156,8 +156,10 @@ impl EntryTable {
             let address_display = entry.public_address.as_ref()
                 .or(entry.username.as_ref())
                 .map(|s| {
-                    if s.len() > 30 {
-                        format!("{}...", &s[..27])
+                    if s.chars().count() > 11 {
+                        let chars: Vec<char> = s.chars().collect();
+                        let n = chars.len();
+                        format!("{}...{}", chars[..4].iter().collect::<String>(), chars[n - 4..].iter().collect::<String>())
                     } else {
                         s.clone()
                     }
