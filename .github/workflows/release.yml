@@ -114,6 +114,9 @@ jobs:
             version "${VER}"
             license "MIT"
 
+            url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-linux-x86_64.zip"
+            sha256 "${SHA_LINUX}"
+
             on_macos do
               on_intel do
                 url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-macos-x86_64.zip"
@@ -124,19 +127,10 @@ jobs:
                 url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-macos-aarch64.zip"
                 sha256 "${SHA_MACOS_ARM}"
               end
-
-              def install
-                bin.install "cryptokeeper"
-              end
             end
 
-            on_linux do
-              url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-linux-x86_64.zip"
-              sha256 "${SHA_LINUX}"
-
-              def install
-                bin.install "cryptokeeper"
-              end
+            def install
+              bin.install "cryptokeeper"
             end
 
             test do
