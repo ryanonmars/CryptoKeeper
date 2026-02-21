@@ -1,6 +1,6 @@
 [package]
 name = "cryptokeeper"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "CLI encrypted storage manager for cryptocurrency private keys and seed phrases"
 
