@@ -41,16 +41,14 @@ jobs:
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
-          Copy-Item cryptokeeper.exe keeper.exe
-          Compress-Archive -Path cryptokeeper.exe, keeper.exe -DestinationPath ${{ github.workspace }}/${{ matrix.asset_name }}.zip
+          Compress-Archive -Path cryptokeeper.exe -DestinationPath ${{ github.workspace }}/${{ matrix.asset_name }}.zip
 
       - name: Prepare asset (Unix)
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          cp cryptokeeper keeper
-          zip ${{ matrix.asset_name }}.zip cryptokeeper keeper
+          zip ${{ matrix.asset_name }}.zip cryptokeeper
           mv ${{ matrix.asset_name }}.zip ${{ github.workspace }}/
 
       - name: Upload artifact
