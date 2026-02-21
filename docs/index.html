@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CryptoKeeper — Encrypted Vault for Private Keys</title>
+  <meta name="description" content="CryptoKeeper is a local-only, encrypted CLI vault for cryptocurrency private keys and seed phrases. XChaCha20-Poly1305 + Argon2id. Zero cloud. Zero trust.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:     #070707;
+      --amber:  #D4950A;   /* Dimmed amber — not neon, more worn-terminal */
+      --amber-b:#FFB800;   /* Brighter for prompts */
+      --cyan:   #0EA5A8;
+      --green:  #3A9E52;
+      --text:   #C8C8C0;
+      --muted:  #505050;
+      --dim:    #303030;
+      --s1:     #0B0B0B;
+      --s2:     #0F0F0F;
+      --s3:     #141414;
+      --border: #181818;
+      --b2:     #222222;
+      --mono:   'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      --body:   'Outfit', system-ui, sans-serif;
+    }
+
+    html { scroll-behavior: smooth; overflow-x: hidden; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--body);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* Very subtle hex grid — almost invisible */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100'%3E%3Cpath d='M28 66L0 50V16L28 0l28 16v34L28 66zM28 100L0 84V66l28 16 28-16v18L28 100z' fill='none' stroke='%23FFB800' stroke-width='0.3' opacity='0.03'/%3E%3C/svg%3E");
+      background-size: 56px 100px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 1020px;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    /* ─────────────────────────── NAV ─────────────────────────── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 200;
+      padding: 10px 0;
+      background: rgba(7,7,7,0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      text-decoration: none;
+    }
+    .nav-icon { height: 24px; width: auto; opacity: 0.85; }
+    .nav-name {
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: 0.08em;
+    }
+    nav ul {
+      display: flex;
+      gap: 20px;
+      list-style: none;
+      align-items: center;
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      transition: color 0.15s;
+    }
+    nav a:hover { color: var(--amber-b); }
+    .nav-gh {
+      padding: 5px 11px;
+      border: 1px solid var(--b2);
+      border-radius: 3px;
+      color: var(--text) !important;
+    }
+    .nav-gh:hover { border-color: var(--b2); background: var(--s3); color: var(--text) !important; }
+
+    /* ─────────────────────────── HERO ─────────────────────────── */
+    #hero {
+      display: flex;
+      align-items: flex-start;
+      padding: 48px 0 32px;
+      position: relative;
+    }
+    .hero-inner {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0;
+    }
+
+    /* Logo image */
+    .hero-logo {
+      display: block;
+      width: min(420px, 75vw);
+      height: auto;
+      opacity: 0.88;
+      margin-bottom: 0;
+    }
+
+    .hero-tag {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.1em;
+      margin-top: -20px;
+      margin-bottom: 32px;
+    }
+
+    /* CTAs */
+    .hero-ctas {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 10px 20px;
+      border-radius: 4px;
+      font-family: var(--mono);
+      font-size: 0.79rem;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-primary  { background: var(--amber-b); color: #040404; font-weight: 600; }
+    .btn-primary:hover  { background: #FFC933; box-shadow: 0 4px 16px rgba(255,184,0,0.15); }
+    .btn-secondary      { background: transparent; color: var(--text); border: 1px solid var(--b2); }
+    .btn-secondary:hover { background: var(--s3); }
+
+    /* ─────────────────────────── SECTION HELPERS ─────────────────────────── */
+    section { position: relative; z-index: 1; }
+
+    .sec-label {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      color: var(--muted);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .sec-label::before { content: '# '; color: var(--amber-b); opacity: 0.6; }
+
+    .sec-title {
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: clamp(1.1rem, 2.5vw, 1.5rem);
+      margin-bottom: 32px;
+      color: var(--text);
+      letter-spacing: -0.01em;
+    }
+
+    /* ─────────────────────────── FEATURES ─────────────────────────── */
+    #features {
+      background: var(--s1);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 0;
+    }
+    .feat-term {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      padding: 28px 0;
+    }
+    .feat-cmd {
+      color: var(--muted);
+      margin-bottom: 18px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+    }
+    .feat-cmd .tp { color: var(--amber-b); }
+    .feat-rows { display: flex; flex-direction: column; gap: 0; }
+    .feat-row {
+      display: grid;
+      grid-template-columns: 18px 1fr;
+      gap: 0 12px;
+      padding: 7px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.025);
+      align-items: baseline;
+    }
+    .feat-row:last-child { border-bottom: none; }
+    .feat-check { color: var(--green); }
+    .feat-content {
+      display: grid;
+      grid-template-columns: minmax(160px, 200px) minmax(200px, 260px) 1fr;
+      gap: 0 20px;
+    }
+    .f-key  { color: var(--amber); font-weight: 500; }
+    .f-val  { color: var(--text); }
+    .f-desc { color: var(--muted); font-style: italic; }
+
+    /* ─────────────────────────── INSTALL ─────────────────────────── */
+    #install { padding: 76px 0; }
+
+    .os-tabs {
+      display: flex;
+      border: 1px solid var(--b2);
+      border-radius: 4px;
+      overflow: hidden;
+      width: fit-content;
+    }
+    .os-tab {
+      padding: 8px 20px;
+      background: transparent;
+      border: none;
+      border-right: 1px solid var(--b2);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.04em;
+    }
+    .os-tab:last-child { border-right: none; }
+    .os-tab.active { background: var(--amber-b); color: #040404; font-weight: 600; }
+    .os-tab:not(.active):hover { background: var(--s3); color: var(--text); }
+
+    .install-panel { display: none; margin-top: 22px; }
+    .install-panel.active { display: block; }
+
+    .sub-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--b2);
+      margin-bottom: 18px;
+    }
+    .sub-tab {
+      padding: 6px 16px;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .sub-tab.active { color: var(--amber-b); border-bottom-color: var(--amber-b); }
+    .sub-tab:not(.active):hover { color: var(--text); }
+
+    .sub-panel { display: none; }
+    .sub-panel.active { display: block; }
+
+    .install-card {
+      background: var(--s1);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 22px 26px;
+    }
+    .install-intro {
+      color: var(--muted);
+      font-size: 0.82rem;
+      margin-bottom: 14px;
+    }
+    .install-intro a { color: var(--amber-b); text-decoration: none; }
+    .install-intro a:hover { text-decoration: underline; }
+    .install-intro code { font-family: var(--mono); font-size: 0.75rem; color: var(--cyan); }
+
+    .code-block {
+      position: relative;
+      background: #020202;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 13px 44px 13px 16px;
+      margin: 10px 0;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      line-height: 1.9;
+      color: var(--text);
+      overflow-x: auto;
+    }
+    .code-block .p { color: var(--amber-b); user-select: none; }
+
+    .copy-btn {
+      position: absolute;
+      top: 8px; right: 8px;
+      padding: 2px 8px;
+      background: var(--s2);
+      border: 1px solid var(--b2);
+      border-radius: 3px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .copy-btn:hover { color: var(--amber-b); border-color: var(--amber-b); }
+    .copy-btn.copied { color: var(--green); border-color: var(--green); }
+
+    .dl-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .dl-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 15px;
+      background: var(--s3);
+      border: 1px solid var(--b2);
+      border-radius: 4px;
+      color: var(--text);
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 0.77rem;
+      transition: all 0.15s;
+    }
+    .dl-btn:hover { border-color: var(--amber-b); color: var(--amber-b); }
+    .dl-btn .arch { margin-left: auto; color: var(--muted); font-size: 0.68rem; }
+    .dl-btn:hover .arch { color: rgba(255,184,0,0.5); }
+
+    .install-note {
+      margin-top: 12px;
+      padding: 10px 13px;
+      background: rgba(255,184,0,0.025);
+      border: 1px solid rgba(255,184,0,0.09);
+      border-radius: 4px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .install-note strong { color: var(--text); }
+    .install-note code { font-family: var(--mono); font-size: 0.73rem; color: var(--cyan); }
+
+    /* ─────────────────────────── QUICK START ─────────────────────────── */
+    #quickstart {
+      padding: 76px 0;
+      background: var(--s1);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .terminal {
+      background: #020202;
+      border: 1px solid var(--b2);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .term-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 13px;
+      background: var(--s2);
+      border-bottom: 1px solid var(--border);
+    }
+    .tdot2 { width: 10px; height: 10px; border-radius: 50%; }
+    .t2r { background: #5A3030; } .t2y { background: #5A4A20; } .t2g { background: #205A30; }
+    .term-title { font-family: var(--mono); font-size: 0.68rem; color: var(--muted); margin-left: 8px; }
+    .term-body  { padding: 22px 26px; }
+
+    .step {
+      display: grid;
+      grid-template-columns: 26px 1fr;
+      gap: 0 14px;
+      margin-bottom: 26px;
+      align-items: start;
+    }
+    .step:last-child { margin-bottom: 0; }
+    .step-num {
+      font-family: var(--mono);
+      font-size: 0.66rem;
+      color: var(--amber-b);
+      background: rgba(255,184,0,0.07);
+      border: 1px solid rgba(255,184,0,0.16);
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .step-title { font-weight: 600; font-size: 0.88rem; margin-bottom: 3px; }
+    .step-desc  { font-size: 0.78rem; color: var(--muted); margin-bottom: 7px; line-height: 1.5; }
+    .step-desc code { font-family: var(--mono); font-size: 0.73rem; color: var(--cyan); }
+    .step-code {
+      font-family: var(--mono);
+      font-size: 0.77rem;
+      line-height: 1.9;
+      background: rgba(0,0,0,0.5);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px 13px;
+    }
+    .step-code .p  { color: var(--amber-b); }
+    .step-code .out { color: var(--muted); }
+    .step-code .ok  { color: var(--green); }
+
+    /* ─────────────────────────── COMMANDS ─────────────────────────── */
+    #commands { padding: 76px 0; }
+
+    /* --help style output */
+    .help-term {
+      background: #020202;
+      border: 1px solid var(--b2);
+      border-radius: 6px;
+      overflow: hidden;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+    }
+    .help-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 13px;
+      background: var(--s2);
+      border-bottom: 1px solid var(--border);
+    }
+    .help-body { padding: 20px 22px; line-height: 1.7; }
+    .h-prompt { color: var(--amber-b); }
+    .h-cmd    { color: var(--text); font-weight: 500; }
+    .h-label  {
+      color: var(--muted);
+      font-size: 0.66rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      margin: 18px 0 6px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+    }
+    .h-label:first-child { margin-top: 10px; }
+    .h-row {
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 0 12px;
+      padding: 2px 0;
+    }
+    .h-name { color: var(--amber); }
+    .h-desc { color: var(--muted); }
+
+    /* ─────────────────────────── FOOTER ─────────────────────────── */
+    footer {
+      position: relative;
+      z-index: 1;
+      padding: 32px 0;
+      border-top: 1px solid var(--border);
+    }
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .footer-logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .f-icon { height: 18px; width: auto; opacity: 0.5; }
+    .f-name { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); letter-spacing: 0.06em; }
+    .footer-links { display: flex; gap: 18px; }
+    .footer-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 0.73rem;
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: var(--amber-b); }
+    .footer-badges { display: flex; gap: 7px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .badge-mit  { color: var(--cyan);  border-color: rgba(14,165,168,0.18); }
+    .badge-rust { color: #A05030;      border-color: rgba(160,80,48,0.18); }
+
+    /* ─────────────────────────── RESPONSIVE ─────────────────────────── */
+
+    /* Features: hide the description column below 640px */
+    @media (max-width: 640px) {
+      .feat-content {
+        grid-template-columns: minmax(120px,160px) 1fr;
+      }
+      .f-desc { display: none; }
+    }
+    @media (max-width: 440px) {
+      .feat-content { grid-template-columns: 1fr; gap: 2px 0; }
+      .f-val { display: none; }
+    }
+
+    /* Commands --help: single column on small screens */
+    @media (max-width: 520px) {
+      .h-row { grid-template-columns: 1fr; gap: 0; }
+      .h-name { margin-bottom: 1px; }
+      .h-desc { padding-left: 0; margin-bottom: 6px; }
+    }
+
+    /* Nav: hide links below 640px */
+    @media (max-width: 640px) {
+      nav ul { display: none; }
+    }
+
+    /* OS tabs full-width on small screens */
+    @media (max-width: 500px) {
+      .os-tabs  { width: 100%; }
+      .os-tab   { flex: 1; text-align: center; padding: 8px 6px; font-size: 0.73rem; }
+    }
+
+    /* Stack install card padding */
+    @media (max-width: 480px) {
+      .install-card { padding: 16px; }
+      .term-body    { padding: 16px; }
+    }
+
+    /* Hero CTAs stack */
+    @media (max-width: 380px) {
+      .hero-ctas { flex-direction: column; align-items: center; }
+      .btn { width: 100%; max-width: 260px; justify-content: center; }
+    }
+
+    /* Sections */
+    @media (max-width: 600px) {
+      #install, #quickstart, #commands { padding: 56px 0; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════ NAV ═══════════════════════════ -->
+<nav>
+  <div class="container">
+    <a href="#" class="nav-logo">
+      <img src="../Cryptokeeper-icon-white.png" alt="CryptoKeeper" class="nav-icon">
+    </a>
+    <ul>
+      <li><a href="#features">security</a></li>
+      <li><a href="#install">install</a></li>
+      <li><a href="#quickstart">usage</a></li>
+      <li><a href="#commands">commands</a></li>
+      <li><a href="https://github.com/ryanonmars/CryptoKeeper" target="_blank" rel="noopener" class="nav-gh">github ↗</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+<section id="hero">
+  <div class="container">
+    <div class="hero-inner">
+
+      <img src="../Cryptokeeper-white.png" alt="CryptoKeeper" class="hero-logo">
+
+      <p class="hero-tag">v0.2.5 · local-only TUI vault</p>
+
+      <div class="hero-ctas">
+        <a href="#install" class="btn btn-primary">↓ &thinsp;download</a>
+        <a href="https://github.com/ryanonmars/CryptoKeeper" target="_blank" rel="noopener" class="btn btn-secondary">github ↗</a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ FEATURES ═══════════════════════════ -->
+<section id="features">
+  <div class="container">
+    <div class="feat-term">
+      <div class="feat-cmd">
+        <span class="tp"># </span>security model
+      </div>
+      <div class="feat-rows">
+        <div class="feat-row">
+          <span class="feat-check">✓</span>
+          <div class="feat-content">
+            <span class="f-key">XChaCha20-Poly1305</span>
+            <span class="f-val">AEAD cipher, 192-bit nonce</span>
+            <span class="f-desc">authenticated, tamper-evident</span>
+          </div>
+        </div>
+        <div class="feat-row">
+          <span class="feat-check">✓</span>
+          <div class="feat-content">
+            <span class="f-key">Argon2id</span>
+            <span class="f-val">memory-hard KDF</span>
+            <span class="f-desc">resistant to GPU &amp; ASIC attacks</span>
+          </div>
+        </div>
+        <div class="feat-row">
+          <span class="feat-check">✓</span>
+          <div class="feat-content">
+            <span class="f-key">~/.cryptokeeper/</span>
+            <span class="f-val">local-only storage</span>
+            <span class="f-desc">no network access, no cloud sync</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ INSTALL ═══════════════════════════ -->
+<section id="install">
+  <div class="container">
+    <div class="sec-label">installation</div>
+    <h2 class="sec-title">get cryptokeeper</h2>
+
+    <div class="os-tabs">
+      <button class="os-tab active" onclick="switchOS('macos',this)">macOS</button>
+      <button class="os-tab"        onclick="switchOS('linux',this)">Linux</button>
+      <button class="os-tab"        onclick="switchOS('windows',this)">Windows</button>
+    </div>
+
+    <!-- macOS -->
+    <div class="install-panel active" id="panel-macos">
+      <div class="sub-tabs">
+        <button class="sub-tab active" onclick="switchSub('macos','brew',this)">Homebrew</button>
+        <button class="sub-tab"        onclick="switchSub('macos','dl',this)">Direct Download</button>
+      </div>
+      <div class="sub-panel active" id="subpanel-macos-brew">
+        <div class="install-card">
+          <p class="install-intro">Install via Homebrew — updates with <code>brew upgrade</code>.</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="copyCode(this)">copy</button>
+            <code class="copy-source" hidden>brew install ryanonmars/cryptokeeper/cryptokeeper</code>
+            <span class="p">$ </span>brew install ryanonmars/cryptokeeper/cryptokeeper
+          </div>
+        </div>
+      </div>
+      <div class="sub-panel" id="subpanel-macos-dl">
+        <div class="install-card">
+          <p class="install-intro">Choose your architecture:</p>
+          <div class="dl-grid">
+            <a class="dl-btn" href="https://github.com/ryanonmars/CryptoKeeper/releases/latest/download/cryptokeeper-macos-aarch64.zip">
+              ↓ macOS Apple Silicon <span class="arch">ARM64</span>
+            </a>
+            <a class="dl-btn" href="https://github.com/ryanonmars/CryptoKeeper/releases/latest/download/cryptokeeper-macos-x86_64.zip">
+              ↓ macOS Intel <span class="arch">x86_64</span>
+            </a>
+          </div>
+          <div class="code-block">
+            <button class="copy-btn" onclick="copyCode(this)">copy</button>
+            <code class="copy-source" hidden>unzip cryptokeeper-macos-*.zip
+chmod +x cryptokeeper
+sudo mv cryptokeeper /usr/local/bin/</code>
+            <span class="p">$ </span>unzip cryptokeeper-macos-*.zip<br>
+            <span class="p">$ </span>chmod +x cryptokeeper<br>
+            <span class="p">$ </span>sudo mv cryptokeeper /usr/local/bin/
+          </div>
+          <div class="install-note">
+            <strong>Gatekeeper:</strong> If macOS blocks the app, go to <strong>System Settings → Privacy &amp; Security</strong>,
+            scroll to the bottom to the <strong>Security</strong> section — the blocked app appears there. Click <strong>Open Anyway</strong>, then confirm with <strong>Open</strong>.
+            Optionally, from the folder where the binary is, run <code>xattr -d com.apple.quarantine ./cryptokeeper</code> to remove the quarantine flag; if you see &quot;No such xattr&quot;, the file isn’t quarantined and you can skip that step.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Linux -->
+    <div class="install-panel" id="panel-linux">
+      <div class="sub-tabs">
+        <button class="sub-tab active" onclick="switchSub('linux','brew',this)">Homebrew (Linuxbrew)</button>
+        <button class="sub-tab"        onclick="switchSub('linux','dl',this)">Direct Download</button>
+      </div>
+      <div class="sub-panel active" id="subpanel-linux-brew">
+        <div class="install-card">
+          <p class="install-intro">Requires <a href="https://brew.sh" target="_blank" rel="noopener">Homebrew for Linux</a>.</p>
+          <div class="code-block">
+            <button class="copy-btn" onclick="copyCode(this)">copy</button>
+            <code class="copy-source" hidden>brew install ryanonmars/cryptokeeper/cryptokeeper</code>
+            <span class="p">$ </span>brew install ryanonmars/cryptokeeper/cryptokeeper
+          </div>
+        </div>
+      </div>
+      <div class="sub-panel" id="subpanel-linux-dl">
+        <div class="install-card">
+          <div class="dl-grid">
+            <a class="dl-btn" href="https://github.com/ryanonmars/CryptoKeeper/releases/latest/download/cryptokeeper-linux-x86_64.zip">
+              ↓ Linux x86_64 <span class="arch">.zip</span>
+            </a>
+          </div>
+          <div class="code-block">
+            <button class="copy-btn" onclick="copyCode(this)">copy</button>
+            <code class="copy-source" hidden>unzip cryptokeeper-linux-x86_64.zip
+chmod +x cryptokeeper
+sudo mv cryptokeeper /usr/local/bin/</code>
+            <span class="p">$ </span>unzip cryptokeeper-linux-x86_64.zip<br>
+            <span class="p">$ </span>chmod +x cryptokeeper<br>
+            <span class="p">$ </span>sudo mv cryptokeeper /usr/local/bin/
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Windows -->
+    <div class="install-panel" id="panel-windows">
+      <div class="install-card">
+        <p class="install-intro">Download the Windows binary:</p>
+        <div class="dl-grid">
+          <a class="dl-btn" href="https://github.com/ryanonmars/CryptoKeeper/releases/latest/download/cryptokeeper-windows-x86_64.zip">
+            ↓ Windows x86_64 <span class="arch">.zip</span>
+          </a>
+        </div>
+        <div class="install-note">
+          <strong>Setup:</strong> Extract the ZIP, place <code>cryptokeeper.exe</code> in a folder
+          (e.g. <code>C:\tools\</code>), then add it to your <strong>PATH</strong> via
+          System Properties → Environment Variables → Path → Edit → New.<br><br>
+          <strong>SmartScreen:</strong> Click "More info" → "Run anyway" on first launch,
+          or right-click the .exe → Properties → check <strong>Unblock</strong>.
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════ QUICK START ═══════════════════════════ -->
+<section id="quickstart">
+  <div class="container">
+    <div class="sec-label">usage</div>
+    <h2 class="sec-title">up in 60 seconds</h2>
+
+    <div class="terminal">
+      <div class="term-bar">
+        <div class="tdot2 t2r"></div>
+        <div class="tdot2 t2y"></div>
+        <div class="tdot2 t2g"></div>
+        <span class="term-title">cryptokeeper — TUI</span>
+      </div>
+      <div class="term-body">
+
+        <div class="step">
+          <div class="step-num">1</div>
+          <div>
+            <div class="step-title">Launch — that's the only command</div>
+            <div class="step-desc">Run <code>cryptokeeper</code> from any terminal. First launch opens the setup wizard to create your vault and set a master password.</div>
+            <div class="step-code">
+              <span class="p">$ </span>cryptokeeper<br>
+              <span class="out">  → wizard runs on first launch</span><br>
+              <span class="out">  → login screen on subsequent launches</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">2</div>
+          <div>
+            <div class="step-title">Navigate the dashboard</div>
+            <div class="step-desc">After login, the entry list is your home screen. Use arrow keys to move, <code>/</code> to search.</div>
+            <div class="step-code">
+              <span class="out">  ↑ / ↓     navigate entries</span><br>
+              <span class="out">  /          search and filter</span><br>
+              <span class="out">  Esc        clear filter / go back</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">3</div>
+          <div>
+            <div class="step-title">Add a private key or seed phrase</div>
+            <div class="step-desc">Press <code>Shift+A</code> from the dashboard. Fill in the form — the secret field is hidden and never touches shell history.</div>
+            <div class="step-code">
+              <span class="out">  Shift+A    open add-entry form</span><br>
+              <span class="out">  Name: my-eth-wallet</span><br>
+              <span class="out">  Secret: ••••••••••••••••</span><br>
+              <span class="ok">  ✓ Entry saved</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">4</div>
+          <div>
+            <div class="step-title">View or copy a secret</div>
+            <div class="step-desc">Select an entry with arrow keys. Press <code>Shift+V</code> to reveal, or <code>Shift+C</code> to copy to clipboard — it auto-clears after 10 seconds.</div>
+            <div class="step-code">
+              <span class="out">  Shift+V    view secret (revealed in TUI)</span><br>
+              <span class="out">  Shift+C    copy to clipboard</span><br>
+              <span class="ok">  ✓ Copied. Clears in 10s.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">5</div>
+          <div>
+            <div class="step-title">Edit, rename, or delete</div>
+            <div class="step-desc">All vault operations are a keypress away. Destructive actions require confirmation.</div>
+            <div class="step-code">
+              <span class="out">  Shift+E    edit entry</span><br>
+              <span class="out">  Shift+D    delete (prompts for confirmation)</span><br>
+              <span class="out">  Shift+X / Shift+I   export / import encrypted backup</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-num">?</div>
+          <div>
+            <div class="step-title">Press ? for the full shortcut reference</div>
+            <div class="step-desc">Available from anywhere in the TUI. Shows all keybindings for the current screen.</div>
+            <div class="step-code">
+              <span class="out">  ?          keyboard shortcut reference</span><br>
+              <span class="out">  Shift+Q    quit</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ COMMANDS ═══════════════════════════ -->
+<section id="commands">
+  <div class="container">
+    <div class="sec-label">reference</div>
+    <h2 class="sec-title">keyboard shortcuts</h2>
+
+    <div class="help-term">
+      <div class="help-bar">
+        <div class="tdot2 t2r"></div>
+        <div class="tdot2 t2y"></div>
+        <div class="tdot2 t2g"></div>
+        <span class="term-title">press ? inside the TUI for this reference</span>
+      </div>
+      <div class="help-body">
+
+        <div class="h-label">navigation</div>
+        <div class="h-row"><span class="h-name">↑ / ↓</span><span class="h-desc">Move between entries</span></div>
+        <div class="h-row"><span class="h-name">Enter</span><span class="h-desc">Select / confirm</span></div>
+        <div class="h-row"><span class="h-name">Esc</span><span class="h-desc">Go back / cancel / clear filter</span></div>
+        <div class="h-row"><span class="h-name">/</span><span class="h-desc">Search and filter entries in real-time</span></div>
+        <div class="h-row"><span class="h-name">Shift+F</span><span class="h-desc">Find / filter entries</span></div>
+
+        <div class="h-label">entry operations</div>
+        <div class="h-row"><span class="h-name">Shift+A</span><span class="h-desc">Add a new private key or seed phrase</span></div>
+        <div class="h-row"><span class="h-name">Shift+V</span><span class="h-desc">View selected entry (secret revealed in TUI)</span></div>
+        <div class="h-row"><span class="h-name">Shift+C</span><span class="h-desc">Copy secret to clipboard — auto-clears after 10s</span></div>
+        <div class="h-row"><span class="h-name">Shift+E</span><span class="h-desc">Edit selected entry</span></div>
+        <div class="h-row"><span class="h-name">Shift+D</span><span class="h-desc">Delete entry (confirmation required)</span></div>
+
+        <div class="h-label">vault operations</div>
+        <div class="h-row"><span class="h-name">Shift+X</span><span class="h-desc">Export vault to an encrypted backup file</span></div>
+        <div class="h-row"><span class="h-name">Shift+I</span><span class="h-desc">Import entries from a backup file</span></div>
+        <div class="h-row"><span class="h-name">Shift+P</span><span class="h-desc">Change master password</span></div>
+        <div class="h-row"><span class="h-name">Shift+S</span><span class="h-desc">Settings (clipboard timeout, recovery setup)</span></div>
+        <div class="h-row"><span class="h-name">F1</span><span class="h-desc">Password recovery (from login screen)</span></div>
+
+        <div class="h-label">global</div>
+        <div class="h-row"><span class="h-name">?</span><span class="h-desc">Show keyboard shortcut reference</span></div>
+        <div class="h-row"><span class="h-name">Shift+Q</span><span class="h-desc">Quit CryptoKeeper</span></div>
+
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════════════════════ FOOTER ═══════════════════════════ -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-logo">
+        <img src="../Cryptokeeper-icon-white.png" alt="" class="f-icon">
+        <span class="f-name">cryptokeeper</span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/ryanonmars/CryptoKeeper" target="_blank" rel="noopener">github</a>
+        <a href="https://github.com/ryanonmars/CryptoKeeper/releases" target="_blank" rel="noopener">releases</a>
+        <a href="https://github.com/ryanonmars/CryptoKeeper/issues" target="_blank" rel="noopener">issues</a>
+      </div>
+      <div class="footer-badges">
+        <span class="badge badge-mit">MIT</span>
+        <span class="badge badge-rust">Rust 🦀</span>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  function switchOS(os, btn) {
+    document.querySelectorAll('.os-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.install-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + os).classList.add('active');
+  }
+
+  function switchSub(os, sub, btn) {
+    const panel = document.getElementById('panel-' + os);
+    panel.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+    panel.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('subpanel-' + os + '-' + sub).classList.add('active');
+  }
+
+  function copyCode(btn) {
+    const source = btn.closest('.code-block').querySelector('.copy-source');
+    if (!source) return;
+    const text = source.textContent.trim();
+    const done = () => {
+      btn.textContent = 'copied';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 2000);
+    };
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(done).catch(() => fallback(text, done));
+    } else {
+      fallback(text, done);
+    }
+  }
+
+  function fallback(text, done) {
+    const ta = Object.assign(document.createElement('textarea'), {
+      value: text, style: 'position:fixed;top:-9999px;opacity:0'
+    });
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch(e) {}
+    document.body.removeChild(ta);
+  }
+</script>
+</body>
+</html>
