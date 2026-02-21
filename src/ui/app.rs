@@ -1,4 +1,4 @@
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
@@ -122,7 +122,9 @@ impl App {
 
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
-                    self.handle_key(key.code, key.modifiers)?;
+                    if key.kind != KeyEventKind::Release {
+                        self.handle_key(key.code, key.modifiers)?;
+                    }
                 }
             } else if let AppView::CopyCountdown { entry_name, seconds_left } = &self.view {
                 if let Some(clear_time) = self.clipboard_clear_time {
