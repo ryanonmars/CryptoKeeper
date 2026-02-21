@@ -79,3 +79,74 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-tap:
+    name: Update Homebrew Tap
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Compute SHA256s and update formula
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          SHA_LINUX=$(sha256sum artifacts/cryptokeeper-linux-x86_64/cryptokeeper-linux-x86_64.zip | awk '{print $1}')
+          SHA_MACOS_X86=$(sha256sum artifacts/cryptokeeper-macos-x86_64/cryptokeeper-macos-x86_64.zip | awk '{print $1}')
+          SHA_MACOS_ARM=$(sha256sum artifacts/cryptokeeper-macos-aarch64/cryptokeeper-macos-aarch64.zip | awk '{print $1}')
+
+          git clone https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ryanonmars/homebrew-cryptokeeper.git tap
+          cd tap
+
+          VER=${VERSION#v}
+
+          cat > Formula/cryptokeeper.rb << EOF
+          # typed: false
+          # frozen_string_literal: true
+
+          class Cryptokeeper < Formula
+            desc "CLI encrypted storage for cryptocurrency private keys and seed phrases"
+            homepage "https://github.com/ryanonmars/CryptoKeeper"
+            version "${VER}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-macos-x86_64.zip"
+                sha256 "${SHA_MACOS_X86}"
+              end
+
+              on_arm do
+                url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-macos-aarch64.zip"
+                sha256 "${SHA_MACOS_ARM}"
+              end
+
+              def install
+                bin.install "cryptokeeper"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/ryanonmars/CryptoKeeper/releases/download/${VERSION}/cryptokeeper-linux-x86_64.zip"
+              sha256 "${SHA_LINUX}"
+
+              def install
+                bin.install "cryptokeeper"
+              end
+            end
+
+            test do
+              assert_match "Encrypted storage for cryptocurrency", shell_output("#{bin}/cryptokeeper --help")
+            end
+          end
+          EOF
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cryptokeeper.rb
+          git commit -m "cryptokeeper ${VER}"
+          git push
