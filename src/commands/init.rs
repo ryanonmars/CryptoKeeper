@@ -50,7 +50,7 @@ pub fn run() -> Result<()> {
         String::new(),
         format!(
             "{}",
-            "Use `keeper add` to store your first key or phrase.".dimmed()
+            "Use `cryptokeeper add` to store your first key or phrase.".dimmed()
         ),
     ];
     println!();

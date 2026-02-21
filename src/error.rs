@@ -2,7 +2,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CryptoKeeperError {
-    #[error("Vault not found. Run `keeper init` first.")]
+    #[error("Vault not found. Run `cryptokeeper init` first.")]
     VaultNotFound,
 
     #[error("Vault already exists at {0}")]
@@ -14,7 +14,7 @@ pub enum CryptoKeeperError {
     #[error("Invalid vault file — corrupted or wrong format.")]
     InvalidVaultFormat,
 
-    #[error("Entry '{0}' not found. Use `keeper list` to see entries with their index numbers.")]
+    #[error("Entry '{0}' not found. Use `cryptokeeper list` to see entries with their index numbers.")]
     EntryNotFound(String),
 
     #[error("Entry '{0}' already exists.")]
@@ -50,7 +50,7 @@ pub enum CryptoKeeperError {
     #[error("Incorrect secondary password.")]
     SecondaryPasswordWrong,
 
-    #[error("Password recovery is not configured. Set it up via settings or `keeper init`.")]
+    #[error("Password recovery is not configured. Set it up via settings or `cryptokeeper init`.")]
     RecoveryNotConfigured,
 
     #[error("Recovery failed: {0}")]

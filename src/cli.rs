@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "keeper",
+    name = "cryptokeeper",
     about = "Encrypted storage for cryptocurrency private keys and seed phrases",
     version
 )]

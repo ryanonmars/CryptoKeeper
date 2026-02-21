@@ -151,7 +151,7 @@ fn print_meta_table(meta: &[EntryMeta], filter: Option<&str>) -> Result<()> {
         println!("{}", "No entries stored yet.".dimmed());
         println!(
             "{}",
-            "Use `keeper add` to store your first key or phrase.".dimmed()
+            "Use `cryptokeeper add` to store your first key or phrase.".dimmed()
         );
         return Ok(());
     }
@@ -188,8 +188,8 @@ fn interactive_loop(filter: Option<&str>) -> Result<()> {
             println!("{}", "No entries stored yet.".dimmed());
             println!(
                 "{}",
-                "Use `keeper add` to store your first key or phrase.".dimmed()
-            );
+            "Use `cryptokeeper add` to store your first key or phrase.".dimmed()
+        );
             return Ok(());
         }
 
