@@ -27,11 +27,14 @@ Local-only, encrypted vault for private keys, seed phrases, and passwords. Run `
 
 ### macOS
 
-**Homebrew** (recommended; updates with `brew upgrade`):
+**Homebrew** (recommended):
 
 ```bash
 brew install ryanonmars/termkey/termkey
+termkey update
 ```
+
+`termkey update` will check the latest release and, for Homebrew installs, run the required Homebrew upgrade steps for you.
 
 **Installer DMG:** [Apple Silicon (ARM64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg) · [Intel (x86_64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-x86_64.dmg)
 
@@ -57,7 +60,10 @@ sudo mv termkey /opt/homebrew/bin/
 
 ```bash
 brew install ryanonmars/termkey/termkey
+termkey update
 ```
+
+`termkey update` will check the latest release and, for Homebrew installs, run the required Homebrew upgrade steps for you.
 
 **Direct download:** [Linux x86_64](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-linux-x86_64.zip)
 
@@ -180,6 +186,7 @@ termkey import <path/to/backup.ck>
 termkey passwd
 termkey recover
 termkey config --show
+termkey update
 termkey derive <name-or-index>
 termkey browser install
 termkey browser status
@@ -190,6 +197,7 @@ Notes:
 
 - `termkey export <directory>` writes an encrypted `backup.ck` file into that directory.
 - `termkey recover` uses your configured recovery question flow.
+- `termkey update` checks the latest GitHub release. On Homebrew installs it runs the Homebrew update flow; on installer/manual/source installs it prints the correct release download page.
 - `termkey derive` saves a public address for supported Ethereum, Bitcoin, and Solana key or seed entries.
 
 ---
