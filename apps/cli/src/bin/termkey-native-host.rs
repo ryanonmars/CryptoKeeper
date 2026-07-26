@@ -1,26 +1,54 @@
+use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::IpAddr;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use termkey::vault::model::EntryMeta;
+use termkey::native::site::{
+    entry_authorizes_origin, entry_fingerprint, find_site_matches as authorized_site_matches,
+    HttpsOrigin, SiteMatch, NATIVE_CAPABILITIES, NATIVE_PROTOCOL_VERSION,
+};
 use termkey::vault::model::{Entry, SecretType};
 use termkey::{apply_configured_vault_dir_override, config, crypto, vault};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-#[derive(Debug, Deserialize)]
+const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_NATIVE_RESPONSE_BYTES: usize = 900 * 1024;
+const ISSUED_MATCH_TTL: Duration = Duration::from_secs(30);
+const MAX_ISSUED_MATCHES: usize = 100;
+
+struct SensitiveString(Zeroizing<String>);
+
+impl<'de> Deserialize<'de> for SensitiveString {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(|value| Self(Zeroizing::new(value)))
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum NativeRequest {
-    Ping,
-    Status,
+    Ping {
+        #[serde(default)]
+        #[serde(alias = "protocolVersion")]
+        protocol_version: Option<u32>,
+    },
+    Status {
+        #[serde(default)]
+        #[serde(alias = "protocolVersion")]
+        protocol_version: Option<u32>,
+    },
     GeneratePassword,
     GetAutofillEntry {
         id: String,
-        #[serde(default)]
-        password: Option<String>,
+        origin: String,
         #[serde(default)]
         #[serde(alias = "secondaryPassword")]
-        secondary_password: Option<String>,
+        secondary_password: Option<SensitiveString>,
     },
     FindSiteMatches {
         url: String,
@@ -29,25 +57,31 @@ enum NativeRequest {
         name: String,
         #[serde(default)]
         username: Option<String>,
-        password: String,
+        password: SensitiveString,
         #[serde(default)]
         url: Option<String>,
         #[serde(default)]
-        #[serde(alias = "masterPassword")]
-        master_password: Option<String>,
-        #[serde(default)]
         #[serde(alias = "secondaryPassword")]
-        secondary_password: Option<String>,
+        secondary_password: Option<SensitiveString>,
     },
     ListEntries,
     Unlock {
-        password: String,
+        password: SensitiveString,
     },
+}
+
+#[derive(Clone)]
+struct IssuedMatch {
+    fingerprint: String,
+    origin: String,
+    expires_at: Instant,
 }
 
 #[derive(Default)]
 struct HostState {
-    unlocked_password: Option<Zeroizing<String>>,
+    session: Option<vault::session::VaultSession>,
+    issued_matches: HashMap<String, IssuedMatch>,
+    protocol_negotiated: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -60,14 +94,8 @@ struct StatusResponse {
     first_run_complete: bool,
     recovery_configured: bool,
     locked: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedSite {
-    origin: String,
-    hostname: String,
-    registrable_domain: Option<String>,
-    has_explicit_port: bool,
+    protocol_version: u32,
+    capabilities: &'static [&'static str],
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -85,22 +113,11 @@ struct EntrySummary {
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SiteMatchSummary {
-    id: String,
-    name: String,
-    username: Option<String>,
-    url: Option<String>,
-    match_type: &'static str,
-    has_secondary_password: bool,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SiteMatchesResponse {
     site_url: String,
     site_origin: String,
     site_hostname: String,
-    matches: Vec<SiteMatchSummary>,
+    matches: Vec<SiteMatch>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -110,7 +127,6 @@ struct AutofillEntryResponse {
     name: String,
     username: Option<String>,
     password: String,
-    url: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -119,6 +135,8 @@ enum NativeResponse {
     Pong {
         app: &'static str,
         version: &'static str,
+        protocol_version: u32,
+        capabilities: &'static [&'static str],
     },
     Status(StatusResponse),
     GeneratedPassword {
@@ -136,10 +154,30 @@ enum NativeResponse {
     },
     Unlock {
         unlocked: bool,
+        #[serde(rename = "recoveryNotice", skip_serializing_if = "Option::is_none")]
+        recovery_notice: Option<String>,
     },
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeWireResponse {
+    request_id: String,
+    #[serde(flatten)]
+    response: NativeResponse,
+}
+
+impl NativeWireResponse {
+    fn zeroize_secrets(&mut self) {
+        match &mut self.response {
+            NativeResponse::GeneratedPassword { password } => password.zeroize(),
+            NativeResponse::AutofillEntry { entry } => entry.password.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 fn load_status_for_state(state: &HostState) -> StatusResponse {
@@ -153,11 +191,13 @@ fn load_status_for_state(state: &HostState) -> StatusResponse {
         vault_exists,
         first_run_complete: config.first_run_complete,
         recovery_configured: config.recovery.is_some(),
-        locked: vault_exists && state.unlocked_password.is_none(),
+        locked: vault_exists && state.session.is_none(),
+        protocol_version: NATIVE_PROTOCOL_VERSION,
+        capabilities: NATIVE_CAPABILITIES,
     }
 }
 
-fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+fn read_message(reader: &mut impl Read) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
     let mut len_buf = [0_u8; 4];
     let mut read_len = 0;
 
@@ -178,29 +218,122 @@ fn read_message(reader: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     }
 
     let payload_len = u32::from_le_bytes(len_buf) as usize;
-    let mut payload = vec![0_u8; payload_len];
+    if payload_len > MAX_NATIVE_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "native host payload exceeds 64 MiB",
+        ));
+    }
+    let mut payload = Zeroizing::new(vec![0_u8; payload_len]);
     reader.read_exact(&mut payload)?;
     Ok(Some(payload))
 }
 
-fn write_message(writer: &mut impl Write, response: &NativeResponse) -> io::Result<()> {
+#[cfg(test)]
+fn write_message(writer: &mut impl Write, response: &impl Serialize) -> io::Result<()> {
     let payload = serde_json::to_vec(response).map_err(io::Error::other)?;
+    write_payload(writer, &payload)
+}
+
+fn encode_wire_response(response: &NativeWireResponse) -> io::Result<Zeroizing<Vec<u8>>> {
+    if let Some(payload) = serialize_bounded_zeroizing(response)? {
+        return Ok(payload);
+    }
+
+    serialize_bounded_zeroizing(&NativeWireResponse {
+        request_id: response.request_id.clone(),
+        response: NativeResponse::Error {
+            message: "Native response exceeded the safe browser message limit.".to_string(),
+        },
+    })
+    .and_then(|payload| {
+        payload.ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidData,
+                "compact native response exceeded the safe browser message limit",
+            )
+        })
+    })
+}
+
+struct BoundedZeroizingWriter {
+    payload: Zeroizing<Vec<u8>>,
+    exceeded: bool,
+}
+
+impl BoundedZeroizingWriter {
+    fn new() -> Self {
+        Self {
+            payload: Zeroizing::new(Vec::with_capacity(MAX_NATIVE_RESPONSE_BYTES)),
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedZeroizingWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let fits = self
+            .payload
+            .len()
+            .checked_add(bytes.len())
+            .is_some_and(|length| length <= MAX_NATIVE_RESPONSE_BYTES);
+        if !fits {
+            self.exceeded = true;
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "native response exceeded the safe browser message limit",
+            ));
+        }
+        self.payload.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_bounded_zeroizing(value: &impl Serialize) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let mut writer = BoundedZeroizingWriter::new();
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(Some(writer.payload)),
+        Err(_) if writer.exceeded => Ok(None),
+        Err(err) => Err(io::Error::other(err)),
+    }
+}
+
+fn write_wire_message(
+    writer: &mut impl Write,
+    response: &mut NativeWireResponse,
+) -> io::Result<()> {
+    let payload = encode_wire_response(response);
+    response.zeroize_secrets();
+    let payload = payload?;
+    write_payload(writer, &payload)
+}
+
+fn write_payload(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
     writer.write_all(&(payload.len() as u32).to_le_bytes())?;
-    writer.write_all(&payload)?;
+    writer.write_all(payload)?;
     writer.flush()
 }
 
-fn unlock_vault(state: &mut HostState, password: String) -> NativeResponse {
+fn unlock_vault(state: &mut HostState, password: SensitiveString) -> NativeResponse {
     if !vault::storage::vault_exists() {
         return NativeResponse::Error {
             message: "Vault not found. Run `termkey init` first.".to_string(),
         };
     }
 
-    match vault::storage::read_vault(password.as_bytes(), &vault::storage::vault_path()) {
-        Ok(_) => {
-            state.unlocked_password = Some(Zeroizing::new(password));
-            NativeResponse::Unlock { unlocked: true }
+    match vault::session::VaultSession::open(password.0, vault::storage::vault_path()) {
+        Ok(outcome) => {
+            let recovery_notice = outcome.recovery_notice;
+            state.issued_matches.clear();
+            state.session = Some(outcome.session);
+            NativeResponse::Unlock {
+                unlocked: true,
+                recovery_notice,
+            }
         }
         Err(err) => NativeResponse::Error {
             message: err.to_string(),
@@ -208,14 +341,12 @@ fn unlock_vault(state: &mut HostState, password: String) -> NativeResponse {
     }
 }
 
-fn require_unlocked_password(state: &HostState) -> Result<&str, NativeResponse> {
-    state
-        .unlocked_password
-        .as_deref()
-        .ok_or_else(|| NativeResponse::Error {
-            message: "Vault is locked. Unlock it first.".to_string(),
-        })
-        .map(|value| value.as_str())
+fn require_unlocked_session(
+    state: &HostState,
+) -> Result<&vault::session::VaultSession, NativeResponse> {
+    state.session.as_ref().ok_or_else(|| NativeResponse::Error {
+        message: "Vault is locked. Unlock it first.".to_string(),
+    })
 }
 
 fn summarize_entry(index: usize, entry: &Entry) -> EntrySummary {
@@ -242,283 +373,76 @@ fn summarize_entry(index: usize, entry: &Entry) -> EntrySummary {
     }
 }
 
-fn summarize_site_match(
-    index: usize,
-    entry: &EntryMeta,
-    match_type: &'static str,
-) -> SiteMatchSummary {
-    SiteMatchSummary {
-        id: (index + 1).to_string(),
-        name: entry.name.clone(),
-        username: entry.username.clone(),
-        url: entry.url.clone(),
-        match_type,
-        has_secondary_password: entry.has_secondary_password,
-    }
-}
-
-fn parse_site(input: &str) -> Option<ParsedSite> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        trimmed.to_string()
-    } else {
-        format!("https://{trimmed}")
-    };
-
-    let scheme_end = normalized.find("://")?;
-    let scheme = &normalized[..scheme_end];
-    let remainder = &normalized[scheme_end + 3..];
-    let authority_end = remainder
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(remainder.len());
-    let authority = &remainder[..authority_end];
-    if authority.is_empty() {
-        return None;
-    }
-
-    let authority_without_userinfo = authority.rsplit('@').next()?;
-    let host_port = authority_without_userinfo.trim();
-    if host_port.is_empty() {
-        return None;
-    }
-
-    let hostname = if host_port.starts_with('[') {
-        let closing = host_port.find(']')?;
-        host_port[..=closing].to_ascii_lowercase()
-    } else {
-        host_port.split(':').next().map(str::to_ascii_lowercase)?
-    };
-    let has_explicit_port = if host_port.starts_with('[') {
-        host_port[hostname.len()..].starts_with(':')
-    } else {
-        host_port.contains(':')
-    };
-
-    Some(ParsedSite {
-        origin: format!(
-            "{scheme}://{}",
-            authority_without_userinfo.to_ascii_lowercase()
-        ),
-        registrable_domain: registrable_domain(&hostname),
-        hostname,
-        has_explicit_port,
-    })
-}
-
-fn registrable_domain(hostname: &str) -> Option<String> {
-    if hostname.starts_with('[') || hostname.parse::<IpAddr>().is_ok() {
-        return None;
-    }
-
-    let labels: Vec<&str> = hostname
-        .split('.')
-        .filter(|label| !label.is_empty())
-        .collect();
-    if labels.len() < 2 {
-        return None;
-    }
-
-    const MULTI_LABEL_SUFFIXES: &[&str] = &[
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "co.jp", "com.au", "net.au", "org.au", "co.nz",
-        "com.br", "com.mx", "co.in", "com.sg", "com.tr", "com.cn", "com.hk", "com.tw",
-    ];
-
-    let suffix = format!("{}.{}", labels[labels.len() - 2], labels[labels.len() - 1]);
-    if MULTI_LABEL_SUFFIXES.contains(&suffix.as_str()) && labels.len() >= 3 {
-        return Some(labels[labels.len() - 3..].join(".").to_ascii_lowercase());
-    }
-
-    Some(labels[labels.len() - 2..].join(".").to_ascii_lowercase())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SiteRule {
-    ExactOrigin(String),
-    ExactHost(String),
-    RegistrableDomain(String),
-}
-
-fn parse_site_rule(input: &str) -> Option<SiteRule> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some(value) = trimmed.strip_prefix("origin:") {
-        return parse_site(value).map(|site| SiteRule::ExactOrigin(site.origin));
-    }
-
-    if let Some(value) = trimmed.strip_prefix("host:") {
-        return parse_site(value).map(|site| SiteRule::ExactHost(site.hostname));
-    }
-
-    if let Some(value) = trimmed.strip_prefix("domain:") {
-        let normalized = parse_site(value)
-            .and_then(|site| site.registrable_domain.or(Some(site.hostname)))
-            .or_else(|| registrable_domain(&value.to_ascii_lowercase()))?;
-        return Some(SiteRule::RegistrableDomain(normalized));
-    }
-
-    parse_site(trimmed).map(|site| {
-        if trimmed.contains("://") {
-            SiteRule::ExactOrigin(site.origin)
-        } else {
-            SiteRule::ExactHost(site.hostname)
-        }
-    })
-}
-
-fn derive_default_site_rules(url: Option<&str>) -> Vec<SiteRule> {
-    let Some(site) = url.and_then(parse_site) else {
-        return Vec::new();
-    };
-
-    let mut rules = vec![SiteRule::ExactOrigin(site.origin.clone())];
-
-    if !site.has_explicit_port {
-        rules.push(SiteRule::ExactHost(site.hostname.clone()));
-
-        if let Some(domain) = site.registrable_domain {
-            if domain != site.hostname {
-                rules.push(SiteRule::RegistrableDomain(domain));
-            }
-        }
-    }
-
-    rules
-}
-
-fn effective_site_rules(entry: &EntryMeta) -> Vec<SiteRule> {
-    let rules = if entry.site_rules.is_empty() {
-        derive_default_site_rules(entry.url.as_deref())
-    } else {
-        entry
-            .site_rules
-            .iter()
-            .filter_map(|rule| parse_site_rule(rule))
-            .collect()
-    };
-
-    let mut deduped = Vec::new();
-    for rule in rules {
-        if !deduped.contains(&rule) {
-            deduped.push(rule);
-        }
-    }
-
-    deduped
-}
-
-fn classify_site_rule_match(current: &ParsedSite, rule: &SiteRule) -> Option<&'static str> {
-    match rule {
-        SiteRule::ExactOrigin(origin) => {
-            if current.origin == *origin {
-                Some("exact_origin")
-            } else {
-                None
-            }
-        }
-        SiteRule::ExactHost(hostname) => {
-            if current.hostname == *hostname {
-                Some("exact_host")
-            } else if current.hostname.ends_with(&format!(".{hostname}")) {
-                Some("subdomain")
-            } else {
-                None
-            }
-        }
-        SiteRule::RegistrableDomain(domain) => {
-            if current.registrable_domain.as_deref() == Some(domain.as_str()) {
-                Some("registrable_domain")
-            } else {
-                None
-            }
-        }
-    }
-}
-
-fn match_rank(match_type: &str) -> u8 {
-    match match_type {
-        "exact_origin" => 4,
-        "exact_host" => 3,
-        "subdomain" => 2,
-        "registrable_domain" => 1,
-        _ => 0,
-    }
-}
-
-fn find_site_matches(_state: &HostState, site_url: String) -> NativeResponse {
-    let current_site = match parse_site(&site_url) {
-        Some(site) => site,
-        None => {
+fn find_site_matches(state: &mut HostState, site_url: String) -> NativeResponse {
+    let origin = match HttpsOrigin::parse(&site_url) {
+        Ok(origin) => origin,
+        Err(_) => {
             return NativeResponse::Error {
-                message: "Current tab URL is not a supported website.".to_string(),
+                message: "Current tab origin is not a supported HTTPS origin.".to_string(),
             }
         }
     };
 
-    let metadata = match vault::storage::read_vault_metadata() {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            return NativeResponse::Error {
-                message: err.to_string(),
-            }
-        }
+    let matches = {
+        let session = match require_unlocked_session(state) {
+            Ok(session) => session,
+            Err(response) => return response,
+        };
+        authorized_site_matches(&session.vault, &origin)
     };
-
-    let mut matches: Vec<(u8, SiteMatchSummary)> = metadata
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| entry.secret_type == SecretType::Password)
-        .filter_map(|(index, entry)| {
-            let match_type = effective_site_rules(entry)
-                .iter()
-                .filter_map(|rule| classify_site_rule_match(&current_site, rule))
-                .max_by_key(|match_type| match_rank(match_type))?;
-
-            Some((
-                match_rank(match_type),
-                summarize_site_match(index, entry, match_type),
-            ))
+    let site_hostname = url::Url::parse(origin.as_str())
+        .expect("HttpsOrigin always contains a parsed URL")
+        .host_str()
+        .expect("HttpsOrigin always contains a host")
+        .to_string();
+    let now = Instant::now();
+    state.issued_matches.clear();
+    let matches = matches
+        .into_iter()
+        .take(MAX_ISSUED_MATCHES)
+        .map(|mut site_match| {
+            let fingerprint = std::mem::take(&mut site_match.id);
+            let id = issue_match_id(&state.issued_matches);
+            state.issued_matches.insert(
+                id.clone(),
+                IssuedMatch {
+                    fingerprint,
+                    origin: origin.as_str().to_string(),
+                    expires_at: now + ISSUED_MATCH_TTL,
+                },
+            );
+            site_match.id = id;
+            site_match
         })
         .collect();
 
-    matches.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.name.to_lowercase().cmp(&right.1.name.to_lowercase()))
-    });
-
     NativeResponse::SiteMatches(SiteMatchesResponse {
-        site_url,
-        site_origin: current_site.origin,
-        site_hostname: current_site.hostname,
-        matches: matches.into_iter().map(|(_, summary)| summary).collect(),
+        site_url: origin.as_str().to_string(),
+        site_origin: origin.as_str().to_string(),
+        site_hostname,
+        matches,
     })
 }
 
+fn issue_match_id(existing: &HashMap<String, IssuedMatch>) -> String {
+    loop {
+        let mut bytes = [0_u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        let id = hex::encode(bytes);
+        if !existing.contains_key(&id) {
+            return id;
+        }
+    }
+}
+
 fn list_entries(state: &HostState) -> NativeResponse {
-    let password = match require_unlocked_password(state) {
-        Ok(password) => password,
+    let session = match require_unlocked_session(state) {
+        Ok(session) => session,
         Err(response) => return response,
     };
 
-    let vault = match vault::storage::read_vault(password.as_bytes(), &vault::storage::vault_path())
-    {
-        Ok(vault) => vault,
-        Err(err) => {
-            return NativeResponse::Error {
-                message: err.to_string(),
-            }
-        }
-    };
-
-    let entries = vault
+    let entries = session
+        .vault
         .entries
         .iter()
         .enumerate()
@@ -528,109 +452,69 @@ fn list_entries(state: &HostState) -> NativeResponse {
     NativeResponse::ListEntries { entries }
 }
 
-fn resolve_vault_password(
-    state: &HostState,
-    password: Option<String>,
-) -> Result<String, NativeResponse> {
-    let password = match password {
-        Some(password) => password,
-        None => match require_unlocked_password(state) {
-            Ok(password) => password.to_string(),
-            Err(response) => return Err(response),
-        },
+fn get_autofill_entry(
+    state: &mut HostState,
+    id: String,
+    origin: String,
+    secondary_password: Option<SensitiveString>,
+) -> NativeResponse {
+    let origin = match HttpsOrigin::parse(&origin) {
+        Ok(origin) => origin,
+        Err(_) => {
+            return NativeResponse::Error {
+                message: "Current tab origin is not a supported HTTPS origin.".to_string(),
+            }
+        }
+    };
+    if state.session.is_none() {
+        return NativeResponse::Error {
+            message: "Vault is locked. Unlock it first.".to_string(),
+        };
+    }
+    if !is_valid_request_id(&id) {
+        return NativeResponse::Error {
+            message: "Selected login match ID is invalid.".to_string(),
+        };
+    }
+    let issued = match state.issued_matches.get(&id).cloned() {
+        Some(issued) if issued.origin == origin.as_str() && issued.expires_at > Instant::now() => {
+            issued
+        }
+        _ => {
+            state.issued_matches.remove(&id);
+            return NativeResponse::Error {
+                message: "Selected login match expired or is no longer valid.".to_string(),
+            };
+        }
     };
 
-    if password.is_empty() {
-        return Err(NativeResponse::Error {
-            message: "Enter your master password.".to_string(),
-        });
-    }
-
-    Ok(password)
-}
-
-fn read_vault_with_password(password: &str) -> Result<vault::model::VaultData, NativeResponse> {
-    match vault::storage::read_vault(password.as_bytes(), &vault::storage::vault_path()) {
-        Ok(vault) => Ok(vault),
-        Err(err) => Err(NativeResponse::Error {
-            message: err.to_string(),
-        }),
-    }
-}
-
-fn read_vault_for_autofill(
-    state: &HostState,
-    password: Option<String>,
-) -> Result<vault::model::VaultData, NativeResponse> {
-    let password = resolve_vault_password(state, password)?;
-
-    read_vault_with_password(&password)
-}
-
-fn decrypt_secondary_password_entry(
-    entry: &Entry,
-    secondary_password: &str,
-) -> Result<Zeroizing<String>, NativeResponse> {
-    let wrapped = entry
-        .entry_key_wrapped
-        .as_ref()
-        .ok_or_else(|| NativeResponse::Error {
-            message: "This entry requires a secondary password to view.".to_string(),
-        })?;
-    let nonce = entry
-        .entry_key_nonce
-        .as_ref()
-        .ok_or_else(|| NativeResponse::Error {
-            message: "This entry requires a secondary password to view.".to_string(),
-        })?;
-    let salt = entry
-        .entry_key_salt
-        .as_ref()
-        .ok_or_else(|| NativeResponse::Error {
-            message: "This entry requires a secondary password to view.".to_string(),
-        })?;
-    let ciphertext = entry
-        .encrypted_secret
-        .as_ref()
-        .ok_or_else(|| NativeResponse::Error {
-            message: "This entry requires a secondary password to view.".to_string(),
-        })?;
-    let ciphertext_nonce =
-        entry
-            .encrypted_secret_nonce
-            .as_ref()
-            .ok_or_else(|| NativeResponse::Error {
-                message: "This entry requires a secondary password to view.".to_string(),
-            })?;
-
-    let entry_key = crypto::entry_key::unwrap_entry_key(wrapped, nonce, salt, secondary_password)
-        .map_err(|err| NativeResponse::Error {
-        message: err.to_string(),
-    })?;
-
-    crypto::entry_key::decrypt_secret(&entry_key, ciphertext, ciphertext_nonce).map_err(|err| {
-        NativeResponse::Error {
-            message: err.to_string(),
+    let reload_result = match state.session.as_mut() {
+        Some(session) => session.reload(),
+        None => {
+            return NativeResponse::Error {
+                message: "Vault is locked. Unlock it first.".to_string(),
+            }
         }
-    })
-}
+    };
+    if let Err(err) = reload_result {
+        state.session = None;
+        state.issued_matches.clear();
+        return NativeResponse::Error {
+            message: err.to_string(),
+        };
+    }
 
-fn get_autofill_entry(
-    state: &HostState,
-    id: String,
-    password: Option<String>,
-    secondary_password: Option<String>,
-) -> NativeResponse {
-    let vault = match read_vault_for_autofill(state, password) {
-        Ok(vault) => vault,
+    let session = match require_unlocked_session(state) {
+        Ok(session) => session,
         Err(response) => return response,
     };
 
-    let entry = match vault.find_entry_by_id(&id) {
-        Some(entry) => entry,
-        None => {
+    let entry = match find_unique_entry_by_fingerprint(&session.vault, &issued.fingerprint) {
+        Ok(entry) => entry,
+        Err(()) => {
             return NativeResponse::Error {
-                message: format!("Entry '{id}' not found."),
+                message: "Selected login match changed, is ambiguous, or no longer exists."
+                    .to_string(),
             }
         }
     };
@@ -641,41 +525,54 @@ fn get_autofill_entry(
         };
     }
 
-    if entry.has_secondary_password {
-        let secondary_password = match secondary_password {
-            Some(password) => password,
-            None => {
-                return NativeResponse::Error {
-                    message: "This entry requires a secondary password to view.".to_string(),
-                }
-            }
-        };
-
-        let secret = match decrypt_secondary_password_entry(entry, &secondary_password) {
-            Ok(secret) => secret,
-            Err(response) => return response,
-        };
-
-        return NativeResponse::AutofillEntry {
-            entry: AutofillEntryResponse {
-                id,
-                name: entry.name.clone(),
-                username: entry.username.clone(),
-                password: secret.to_string(),
-                url: entry.url.clone(),
-            },
+    if !entry_authorizes_origin(entry, &origin) {
+        return NativeResponse::Error {
+            message: "Selected entry is not authorized for the current HTTPS origin.".to_string(),
         };
     }
 
-    NativeResponse::AutofillEntry {
+    let secondary_password = secondary_password.map(|password| password.0);
+    let secret = match entry.reveal_secret(
+        secondary_password
+            .as_ref()
+            .map(|password| password.as_str()),
+    ) {
+        Ok(secret) => secret,
+        Err(err) => {
+            let message = if entry.has_secondary_password && secondary_password.is_none() {
+                "This entry requires a secondary password to view.".to_string()
+            } else {
+                err.to_string()
+            };
+            return NativeResponse::Error { message };
+        }
+    };
+
+    let response = NativeResponse::AutofillEntry {
         entry: AutofillEntryResponse {
-            id,
+            id: id.clone(),
             name: entry.name.clone(),
             username: entry.username.clone(),
-            password: entry.secret.clone(),
-            url: entry.url.clone(),
+            password: secret.to_string(),
         },
+    };
+    state.issued_matches.remove(&id);
+    response
+}
+
+fn find_unique_entry_by_fingerprint<'a>(
+    vault: &'a vault::model::VaultData,
+    fingerprint: &str,
+) -> std::result::Result<&'a Entry, ()> {
+    let mut matches = vault
+        .entries
+        .iter()
+        .filter(|entry| entry_fingerprint(entry) == fingerprint);
+    let entry = matches.next().ok_or(())?;
+    if matches.next().is_some() {
+        return Err(());
     }
+    Ok(entry)
 }
 
 fn normalize_optional_field(value: Option<String>) -> Option<String> {
@@ -684,12 +581,24 @@ fn normalize_optional_field(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_optional_secret(value: Option<SensitiveString>) -> Option<Zeroizing<String>> {
+    let value = value?;
+    let trimmed = value.0.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() == value.0.len() {
+        return Some(value.0);
+    }
+    Some(Zeroizing::new(trimmed.to_string()))
+}
+
 fn build_password_entry(
     name: String,
     username: Option<String>,
-    password: String,
+    password: SensitiveString,
     url: Option<String>,
-    secondary_password: Option<String>,
+    secondary_password: Option<SensitiveString>,
 ) -> Result<Entry, NativeResponse> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -698,7 +607,7 @@ fn build_password_entry(
         });
     }
 
-    if password.is_empty() {
+    if password.0.is_empty() {
         return Err(NativeResponse::Error {
             message: "Password cannot be empty.".to_string(),
         });
@@ -706,8 +615,21 @@ fn build_password_entry(
 
     let now = Utc::now();
     let username = normalize_optional_field(username);
-    let url = normalize_optional_field(url);
-    let secondary_password = normalize_optional_field(secondary_password);
+    let url = url
+        .map(|url| {
+            if url.is_empty() {
+                return Ok(None);
+            }
+            HttpsOrigin::parse(&url)
+                .map(|origin| origin.as_str().to_string())
+                .map_err(|_| NativeResponse::Error {
+                    message: "Saved login URL must be a canonical HTTPS origin.".to_string(),
+                })
+                .map(Some)
+        })
+        .transpose()?
+        .flatten();
+    let secondary_password = normalize_optional_secret(secondary_password);
 
     let (
         has_secondary_password,
@@ -720,7 +642,7 @@ fn build_password_entry(
     ) = if let Some(secondary_password) = secondary_password {
         let entry_key = crypto::entry_key::generate_entry_key();
         let (encrypted_secret, encrypted_secret_nonce) =
-            crypto::entry_key::encrypt_secret(&entry_key, &password).map_err(|err| {
+            crypto::entry_key::encrypt_secret(&entry_key, &password.0).map_err(|err| {
                 NativeResponse::Error {
                     message: err.to_string(),
                 }
@@ -742,7 +664,7 @@ fn build_password_entry(
             Some(encrypted_secret_nonce),
         )
     } else {
-        (false, password, None, None, None, None, None)
+        (false, password.0.to_string(), None, None, None, None, None)
     };
 
     Ok(Entry {
@@ -767,47 +689,52 @@ fn build_password_entry(
 }
 
 fn save_password_entry(
-    state: &HostState,
+    state: &mut HostState,
     name: String,
     username: Option<String>,
-    password: String,
+    password: SensitiveString,
     url: Option<String>,
-    master_password: Option<String>,
-    secondary_password: Option<String>,
+    secondary_password: Option<SensitiveString>,
 ) -> NativeResponse {
-    let vault_password = match resolve_vault_password(state, master_password) {
-        Ok(password) => password,
-        Err(response) => return response,
-    };
-
-    let mut vault = match read_vault_with_password(&vault_password) {
-        Ok(vault) => vault,
-        Err(response) => return response,
-    };
+    if state.session.is_none() {
+        return NativeResponse::Error {
+            message: "Vault is locked. Unlock it first.".to_string(),
+        };
+    }
 
     let entry = match build_password_entry(name, username, password, url, secondary_password) {
         Ok(entry) => entry,
         Err(response) => return response,
     };
 
-    if vault.has_entry(&entry.name) {
+    let entry_name = entry.name.clone();
+    let session = state
+        .session
+        .as_mut()
+        .expect("retained session was checked before building the entry");
+    let snapshot = session.vault.clone();
+    if let Err(err) = session.vault.push_entry(entry) {
         return NativeResponse::Error {
-            message: format!("Entry '{}' already exists.", entry.name),
+            message: err.to_string(),
         };
     }
-
-    let entry_name = entry.name.clone();
-    vault.entries.push(entry);
-
-    match vault::storage::write_vault(
-        &vault,
-        vault_password.as_bytes(),
-        &vault::storage::vault_path(),
-    ) {
-        Ok(()) => NativeResponse::SaveEntry { entry_name },
-        Err(err) => NativeResponse::Error {
-            message: err.to_string(),
-        },
+    let save_result = session.save();
+    match save_result {
+        Ok(()) => {
+            state.issued_matches.clear();
+            NativeResponse::SaveEntry { entry_name }
+        }
+        Err(err) => {
+            session.vault = snapshot;
+            let conflicted = matches!(err, termkey::error::TermKeyError::VaultConflict);
+            if conflicted {
+                state.session = None;
+                state.issued_matches.clear();
+            }
+            NativeResponse::Error {
+                message: err.to_string(),
+            }
+        }
     }
 }
 
@@ -821,39 +748,104 @@ fn handle_request(state: &mut HostState, payload: &[u8]) -> NativeResponse {
         }
     };
 
-    match request {
-        NativeRequest::Ping => NativeResponse::Pong {
+    if let NativeRequest::Ping { protocol_version } | NativeRequest::Status { protocol_version } =
+        &request
+    {
+        if *protocol_version != Some(NATIVE_PROTOCOL_VERSION) {
+            state.protocol_negotiated = false;
+            return NativeResponse::Error {
+                message: protocol_repair_message().to_string(),
+            };
+        }
+        state.protocol_negotiated = true;
+    }
+
+    if matches!(request, NativeRequest::Ping { .. }) {
+        return NativeResponse::Pong {
             app: "termkey",
             version: env!("CARGO_PKG_VERSION"),
-        },
-        NativeRequest::Status => NativeResponse::Status(load_status_for_state(state)),
+            protocol_version: NATIVE_PROTOCOL_VERSION,
+            capabilities: NATIVE_CAPABILITIES,
+        };
+    }
+
+    if !state.protocol_negotiated {
+        return NativeResponse::Error {
+            message: protocol_repair_message().to_string(),
+        };
+    }
+
+    match request {
+        NativeRequest::Ping { .. } => unreachable!("ping handled above"),
+        NativeRequest::Status { .. } => NativeResponse::Status(load_status_for_state(state)),
         NativeRequest::GeneratePassword => NativeResponse::GeneratedPassword {
             password: crypto::passwords::generate_password(),
         },
         NativeRequest::GetAutofillEntry {
             id,
-            password,
+            origin,
             secondary_password,
-        } => get_autofill_entry(state, id, password, secondary_password),
+        } => get_autofill_entry(state, id, origin, secondary_password),
         NativeRequest::FindSiteMatches { url } => find_site_matches(state, url),
         NativeRequest::SavePasswordEntry {
             name,
             username,
             password,
             url,
-            master_password,
             secondary_password,
-        } => save_password_entry(
-            state,
-            name,
-            username,
-            password,
-            url,
-            master_password,
-            secondary_password,
-        ),
+        } => save_password_entry(state, name, username, password, url, secondary_password),
         NativeRequest::ListEntries => list_entries(state),
         NativeRequest::Unlock { password } => unlock_vault(state, password),
+    }
+}
+
+fn protocol_repair_message() -> &'static str {
+    "TermKey browser integration is out of date. Run `termkey browser repair`."
+}
+
+fn protocol_info_json() -> serde_json::Value {
+    serde_json::json!({
+        "app": "termkey",
+        "version": env!("CARGO_PKG_VERSION"),
+        "protocolVersion": NATIVE_PROTOCOL_VERSION,
+        "capabilities": NATIVE_CAPABILITIES,
+    })
+}
+
+fn is_valid_request_id(request_id: &str) -> bool {
+    request_id.len() == 64
+        && request_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[derive(Deserialize)]
+struct NativeRequestEnvelope<'a> {
+    #[serde(rename = "requestId", borrow)]
+    request_id: Option<&'a str>,
+}
+
+fn handle_wire_request(state: &mut HostState, payload: &[u8]) -> NativeWireResponse {
+    let request_id = serde_json::from_slice::<NativeRequestEnvelope<'_>>(payload)
+        .ok()
+        .and_then(|envelope| envelope.request_id)
+        .filter(|request_id| is_valid_request_id(request_id))
+        .map(str::to_owned)
+        .unwrap_or_default();
+
+    if request_id.is_empty() {
+        return NativeWireResponse {
+            request_id,
+            response: NativeResponse::Error {
+                message: "invalid request: requestId must be 64 lowercase hexadecimal characters"
+                    .to_string(),
+            },
+        };
+    }
+
+    NativeWireResponse {
+        request_id,
+        response: handle_request(state, payload),
     }
 }
 
@@ -861,13 +853,19 @@ fn main() -> io::Result<()> {
     crypto::secure::harden_process();
     apply_configured_vault_dir_override();
 
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--protocol-info")) {
+        serde_json::to_writer(io::stdout().lock(), &protocol_info_json())
+            .map_err(io::Error::other)?;
+        return Ok(());
+    }
+
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let mut state = HostState::default();
 
     while let Some(payload) = read_message(&mut stdin)? {
-        let response = handle_request(&mut state, &payload);
-        write_message(&mut stdout, &response)?;
+        let mut response = handle_wire_request(&mut state, &payload);
+        write_wire_message(&mut stdout, &mut response)?;
     }
 
     Ok(())
@@ -876,15 +874,22 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_site_rule_match, handle_request, load_status_for_state, parse_site, read_message,
-        write_message, HostState, NativeResponse, SiteRule,
+        encode_wire_response, entry_fingerprint, find_unique_entry_by_fingerprint, handle_request,
+        handle_wire_request, load_status_for_state, protocol_info_json, read_message,
+        write_message, write_wire_message, AutofillEntryResponse, HostState, NativeRequest,
+        NativeResponse, NativeWireResponse, SensitiveString, MAX_ISSUED_MATCHES,
+        MAX_NATIVE_RESPONSE_BYTES, NATIVE_CAPABILITIES, NATIVE_PROTOCOL_VERSION,
     };
     use chrono::Utc;
+    use std::collections::HashMap;
     use std::io::Cursor;
     use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
     use termkey::crypto::entry_key;
+    use termkey::error::TermKeyError;
     use termkey::vault::model::{Entry, SecretType, VaultData};
+    use termkey::vault::session::VaultSession;
     use termkey::vault::storage::{read_vault, write_vault};
     use zeroize::Zeroizing;
 
@@ -915,6 +920,44 @@ mod tests {
                 encrypted_secret_nonce: None,
             }],
             version: 1,
+            revision: 0,
+        }
+    }
+
+    fn unlocked_state(path: &std::path::Path) -> HostState {
+        HostState {
+            session: Some(
+                VaultSession::open(
+                    Zeroizing::new("correct horse battery staple".to_string()),
+                    path.to_path_buf(),
+                )
+                .unwrap()
+                .session,
+            ),
+            issued_matches: HashMap::new(),
+            protocol_negotiated: true,
+        }
+    }
+
+    fn negotiated_state() -> HostState {
+        HostState {
+            protocol_negotiated: true,
+            ..HostState::default()
+        }
+    }
+
+    fn discover_first_match_id(state: &mut HostState, origin: &str) -> String {
+        match handle_request(
+            state,
+            format!(r#"{{"type":"find_site_matches","url":"{origin}"}}"#).as_bytes(),
+        ) {
+            NativeResponse::SiteMatches(response) => response
+                .matches
+                .first()
+                .expect("fixture should have an authorized site match")
+                .id
+                .clone(),
+            other => panic!("unexpected discovery response: {other:?}"),
         }
     }
 
@@ -946,6 +989,7 @@ mod tests {
                 encrypted_secret_nonce: Some(encrypted_secret_nonce),
             }],
             version: 1,
+            revision: 0,
         }
     }
 
@@ -959,7 +1003,7 @@ mod tests {
                 public_address: None,
                 username: Some("ryan".to_string()),
                 url: Some("https://accounts.google.com".to_string()),
-                site_rules: Vec::new(),
+                site_rules: vec!["domain:google.com".to_string()],
                 notes: String::new(),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -971,6 +1015,7 @@ mod tests {
                 encrypted_secret_nonce: None,
             }],
             version: 1,
+            revision: 0,
         }
     }
 
@@ -996,6 +1041,7 @@ mod tests {
                 encrypted_secret_nonce: None,
             }],
             version: 1,
+            revision: 0,
         }
     }
 
@@ -1024,20 +1070,49 @@ mod tests {
                 encrypted_secret_nonce: None,
             }],
             version: 1,
+            revision: 0,
         }
     }
 
     #[test]
-    fn ping_returns_pong() {
+    fn ping_requires_current_protocol_version() {
         let response = handle_request(&mut HostState::default(), br#"{"type":"ping"}"#);
 
-        assert_eq!(
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message } if message.contains("browser repair")
+        ));
+    }
+
+    #[test]
+    fn current_protocol_ping_returns_capabilities_and_unlocks_privileged_requests() {
+        let mut state = negotiated_state();
+        let response = handle_request(&mut state, br#"{"type":"ping","protocolVersion":2}"#);
+
+        assert!(matches!(
             response,
             NativeResponse::Pong {
-                app: "termkey",
-                version: env!("CARGO_PKG_VERSION"),
+                protocol_version: 2,
+                capabilities: NATIVE_CAPABILITIES,
+                ..
             }
-        );
+        ));
+        assert!(state.protocol_negotiated);
+    }
+
+    #[test]
+    fn protocol_info_mode_reports_actual_binary_compatibility() {
+        let info = protocol_info_json();
+        assert_eq!(info["app"], "termkey");
+        assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(info["protocolVersion"], NATIVE_PROTOCOL_VERSION);
+        for capability in NATIVE_CAPABILITIES {
+            assert!(info["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value.as_str() == Some(capability)));
+        }
     }
 
     #[test]
@@ -1049,10 +1124,7 @@ mod tests {
 
     #[test]
     fn generate_password_returns_generated_password() {
-        let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"generate_password"}"#,
-        );
+        let response = handle_request(&mut negotiated_state(), br#"{"type":"generate_password"}"#);
 
         match response {
             NativeResponse::GeneratedPassword { password } => {
@@ -1064,22 +1136,37 @@ mod tests {
 
     #[test]
     fn status_returns_status_payload() {
-        let response = handle_request(&mut HostState::default(), br#"{"type":"status"}"#);
+        let mut state = HostState::default();
+        let response = handle_request(&mut state, br#"{"type":"status","protocolVersion":2}"#);
 
         assert!(matches!(response, NativeResponse::Status(_)));
+        assert!(state.protocol_negotiated);
     }
 
     #[test]
-    fn status_is_unlocked_when_state_has_password() {
-        let state = HostState {
-            unlocked_password: Some(Zeroizing::new("secret".to_string())),
-        };
-
+    fn status_is_unlocked_when_state_has_session() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(&VaultData::new(), b"correct horse battery staple", &path).unwrap();
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let mut state = negotiated_state();
+        let response = handle_request(
+            &mut state,
+            br#"{"type":"unlock","password":"correct horse battery staple"}"#,
+        );
         let status = load_status_for_state(&state);
-
-        if status.vault_exists {
-            assert!(!status.locked);
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
         }
+
+        assert!(matches!(
+            response,
+            NativeResponse::Unlock { unlocked: true, .. }
+        ));
+        assert!(!status.locked);
     }
 
     #[test]
@@ -1092,7 +1179,7 @@ mod tests {
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
         let response = handle_request(
-            &mut HostState::default(),
+            &mut negotiated_state(),
             br#"{"type":"unlock","password":"correct horse battery staple"}"#,
         );
         match previous_vault_dir {
@@ -1102,8 +1189,36 @@ mod tests {
 
         assert!(matches!(
             response,
-            NativeResponse::Unlock { unlocked: true }
+            NativeResponse::Unlock { unlocked: true, .. }
         ));
+    }
+
+    #[test]
+    fn native_unlock_surfaces_post_migration_recovery_notice() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(&VaultData::new(), b"correct horse battery staple", &path).unwrap();
+
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let response = handle_request(
+            &mut negotiated_state(),
+            br#"{"type":"unlock","password":"correct horse battery staple"}"#,
+        );
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
+        }
+
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["unlocked"], true);
+        assert!(
+            json["recoveryNotice"]
+                .as_str()
+                .is_some_and(|notice| notice.to_ascii_lowercase().contains("recovery phrase")),
+            "native unlock did not return a recovery notice: {json}"
+        );
     }
 
     #[test]
@@ -1129,7 +1244,16 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let mut state = HostState {
-            unlocked_password: Some(Zeroizing::new("correct horse battery staple".to_string())),
+            session: Some(
+                VaultSession::open(
+                    Zeroizing::new("correct horse battery staple".to_string()),
+                    path.clone(),
+                )
+                .unwrap()
+                .session,
+            ),
+            issued_matches: HashMap::new(),
+            protocol_negotiated: true,
         };
         let response = handle_request(&mut state, br#"{"type":"list_entries"}"#);
 
@@ -1149,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn site_matches_are_available_without_unlocking() {
+    fn site_matches_require_unlock() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
@@ -1164,8 +1288,8 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"find_site_matches","url":"https://example.com/login"}"#,
+            &mut negotiated_state(),
+            br#"{"type":"find_site_matches","url":"https://example.com"}"#,
         );
 
         match previous_vault_dir {
@@ -1173,14 +1297,313 @@ mod tests {
             None => std::env::remove_var("TERMKEY_VAULT_DIR"),
         }
 
-        match response {
-            NativeResponse::SiteMatches(matches) => {
-                assert_eq!(matches.site_hostname, "example.com");
-                assert_eq!(matches.matches.len(), 1);
-                assert_eq!(matches.matches[0].name, "Email");
-            }
-            other => panic!("unexpected response: {:?}", other),
+        assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn autofill_requires_https_origin() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+
+        for request in [
+            br#"{"type":"get_autofill_entry","id":"1"}"#.as_slice(),
+            br#"{"type":"get_autofill_entry","id":"1","origin":"http://example.com"}"#,
+            br#"{"type":"get_autofill_entry","id":"1","origin":"https://user@example.com"}"#,
+            br#"{"type":"get_autofill_entry","id":"1","origin":"https://example.com/login"}"#,
+        ] {
+            assert!(matches!(
+                handle_request(&mut state, request),
+                NativeResponse::Error { .. }
+            ));
         }
+    }
+
+    #[test]
+    fn autofill_rejects_entry_not_authorized_for_origin() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+
+        let response = handle_request(
+            &mut unlocked_state(&path),
+            br#"{"type":"get_autofill_entry","id":"1","origin":"https://attacker.example"}"#,
+        );
+
+        assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn autofill_old_password_field_cannot_bypass_unlock() {
+        let response = handle_request(
+            &mut negotiated_state(),
+            br#"{"type":"get_autofill_entry","id":"1","origin":"https://example.com","password":"correct horse battery staple"}"#,
+        );
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message } if message.contains("locked")
+        ));
+    }
+
+    #[test]
+    fn save_old_master_password_field_cannot_bypass_unlock() {
+        let response = handle_request(
+            &mut negotiated_state(),
+            br#"{"type":"save_password_entry","name":"Rejected","password":"secret","masterPassword":"correct horse battery staple"}"#,
+        );
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message } if message.contains("locked")
+        ));
+    }
+
+    #[test]
+    fn autofill_rejects_an_entry_changed_after_discovery() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://example.com");
+        let mut independent = VaultSession::open(
+            Zeroizing::new("correct horse battery staple".into()),
+            path.clone(),
+        )
+        .unwrap()
+        .session;
+        independent.vault.entries[0].secret = "changed-secret".into();
+        independent.save().unwrap();
+
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+
+        assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn autofill_never_returns_the_entry_that_moves_into_a_deleted_match_position() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        let mut original = test_vault_with_entry();
+        let mut second = original.entries[0].clone();
+        second.name = "Other".into();
+        second.secret = "other-secret".into();
+        original.entries.push(second);
+        write_vault(&original, b"correct horse battery staple", &path).unwrap();
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://example.com");
+
+        let mut independent = VaultSession::open(
+            Zeroizing::new("correct horse battery staple".into()),
+            path.clone(),
+        )
+        .unwrap()
+        .session;
+        independent.vault.entries.remove(0);
+        independent.save().unwrap();
+
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+
+        assert!(
+            matches!(response, NativeResponse::Error { .. }),
+            "deleted match handle returned another entry: {response:?}"
+        );
+    }
+
+    #[test]
+    fn discovery_issues_opaque_non_positional_handles_that_expire() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://example.com");
+
+        assert_ne!(handle, "1");
+        assert_eq!(handle.len(), 64);
+        assert!(handle.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        state.issued_matches.get_mut(&handle).unwrap().expires_at =
+            Instant::now() - Duration::from_millis(1);
+
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+        assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn discovery_capacity_never_returns_an_already_evicted_handle() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        let mut vault = test_vault_with_entry();
+        let template = vault.entries[0].clone();
+        for index in 1..=100 {
+            let mut entry = template.clone();
+            entry.name = format!("Entry {index:03}");
+            entry.username = Some(format!("user-{index}@example.com"));
+            vault.entries.push(entry);
+        }
+        for entry in &mut vault.entries {
+            entry.site_rules = vec!["domain:example.com".to_string()];
+        }
+        write_vault(&vault, b"correct horse battery staple", &path).unwrap();
+        let mut state = unlocked_state(&path);
+
+        let matches = match handle_request(
+            &mut state,
+            br#"{"type":"find_site_matches","url":"https://example.com"}"#,
+        ) {
+            NativeResponse::SiteMatches(response) => response.matches,
+            other => panic!("unexpected response: {other:?}"),
+        };
+
+        assert_eq!(matches.len(), MAX_ISSUED_MATCHES);
+        assert!(matches
+            .iter()
+            .all(|site_match| state.issued_matches.contains_key(&site_match.id)));
+
+        for origin in ["https://example.com", "https://login.example.com"] {
+            let refreshed = match handle_request(
+                &mut state,
+                format!(r#"{{"type":"find_site_matches","url":"{origin}"}}"#).as_bytes(),
+            ) {
+                NativeResponse::SiteMatches(response) => response.matches,
+                other => panic!("unexpected response: {other:?}"),
+            };
+            assert_eq!(refreshed.len(), MAX_ISSUED_MATCHES);
+            assert!(refreshed
+                .iter()
+                .all(|site_match| state.issued_matches.contains_key(&site_match.id)));
+        }
+    }
+
+    #[test]
+    fn duplicate_exact_fingerprints_fail_closed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let duplicate = state.session.as_ref().unwrap().vault.entries[0].clone();
+        state
+            .session
+            .as_mut()
+            .unwrap()
+            .vault
+            .entries
+            .push(duplicate);
+        let fingerprint = entry_fingerprint(&state.session.as_ref().unwrap().vault.entries[0]);
+        assert!(find_unique_entry_by_fingerprint(
+            &state.session.as_ref().unwrap().vault,
+            &fingerprint
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn autofill_reloads_authorization_before_release() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://example.com");
+        let mut independent = VaultSession::open(
+            Zeroizing::new("correct horse battery staple".into()),
+            path.clone(),
+        )
+        .unwrap()
+        .session;
+        independent.vault.entries[0].url = Some("https://other.example".into());
+        independent.save().unwrap();
+
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+
+        assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn autofill_replacement_vault_locks_session() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://example.com");
+        let replacement = termkey::vault::format::encode_v3(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            termkey::vault::model::VaultHeader::MAGIC,
+            None,
+            None,
+        )
+        .unwrap();
+        std::fs::write(path, replacement.as_slice()).unwrap();
+
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+
+        assert!(matches!(response, NativeResponse::Error { .. }));
+        assert!(state.session.is_none());
     }
 
     #[test]
@@ -1199,7 +1622,7 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let response = handle_request(
-            &mut HostState::default(),
+            &mut unlocked_state(&path),
             br#"{"type":"find_site_matches","url":"https://mail.google.com"}"#,
         );
 
@@ -1218,6 +1641,31 @@ mod tests {
     }
 
     #[test]
+    fn site_matches_reject_http_and_page_urls() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+
+        let http = handle_request(
+            &mut unlocked_state(&path),
+            br#"{"type":"find_site_matches","url":"http://example.com"}"#,
+        );
+        let page_url = handle_request(
+            &mut unlocked_state(&path),
+            br#"{"type":"find_site_matches","url":"https://example.com/login"}"#,
+        );
+
+        assert!(matches!(http, NativeResponse::Error { .. }));
+        assert!(matches!(page_url, NativeResponse::Error { .. }));
+    }
+
+    #[test]
     fn site_matches_support_explicit_site_rules_without_url() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
@@ -1233,7 +1681,7 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let response = handle_request(
-            &mut HostState::default(),
+            &mut unlocked_state(&path),
             br#"{"type":"find_site_matches","url":"https://dashboard.example.com"}"#,
         );
 
@@ -1267,7 +1715,7 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let response = handle_request(
-            &mut HostState::default(),
+            &mut unlocked_state(&path),
             br#"{"type":"find_site_matches","url":"https://home.ryanonmars.space"}"#,
         );
 
@@ -1285,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn save_password_entry_accepts_one_off_master_password() {
+    fn save_password_entry_persists_with_retained_unlock() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
@@ -1295,8 +1743,8 @@ mod tests {
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
         let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"save_password_entry","name":"Example Login","username":"ryan@example.com","password":"super-secret","url":"https://example.com/login","masterPassword":"correct horse battery staple"}"#,
+            &mut unlocked_state(&path),
+            br#"{"type":"save_password_entry","name":"Example Login","username":"ryan@example.com","password":"super-secret","url":"https://EXAMPLE.com:443/"}"#,
         );
 
         let saved_vault = read_vault(b"correct horse battery staple", &path).unwrap();
@@ -1321,10 +1769,48 @@ mod tests {
         );
         assert_eq!(
             saved_vault.entries[0].url.as_deref(),
-            Some("https://example.com/login")
+            Some("https://example.com")
         );
         assert_eq!(saved_vault.entries[0].secret, "super-secret");
         assert!(!saved_vault.entries[0].has_secondary_password);
+    }
+
+    #[test]
+    fn native_save_rejects_non_origin_urls_before_mutating_the_vault() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(&VaultData::new(), b"correct horse battery staple", &path).unwrap();
+        let mut state = unlocked_state(&path);
+
+        for (index, url) in [
+            "http://example.com",
+            "https://user@example.com",
+            "https://user:password@example.com",
+            "https://example.com/login",
+            "https://example.com?next=home",
+            "https://example.com#fragment",
+            " https://example.com",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = handle_request(
+                &mut state,
+                serde_json::json!({
+                    "type": "save_password_entry",
+                    "name": format!("Rejected {index}"),
+                    "password": "secret",
+                    "url": url,
+                })
+                .to_string()
+                .as_bytes(),
+            );
+            assert!(
+                matches!(response, NativeResponse::Error { .. }),
+                "native save accepted {url:?}"
+            );
+        }
+        assert!(state.session.as_ref().unwrap().vault.entries.is_empty());
     }
 
     #[test]
@@ -1337,13 +1823,18 @@ mod tests {
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
+        let mut state = unlocked_state(&path);
         let save_response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"save_password_entry","name":"Protected Login","username":"ryan@example.com","password":"super-secret","url":"https://secure.example.com","masterPassword":"correct horse battery staple","secondaryPassword":"view-pass"}"#,
+            &mut state,
+            br#"{"type":"save_password_entry","name":"Protected Login","username":"ryan@example.com","password":"super-secret","url":"https://secure.example.com","secondaryPassword":"view-pass"}"#,
         );
+        let handle = discover_first_match_id(&mut state, "https://secure.example.com");
         let autofill_response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"get_autofill_entry","id":"1","password":"correct horse battery staple","secondaryPassword":"view-pass"}"#,
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://secure.example.com","secondaryPassword":"view-pass"}}"#
+            )
+            .as_bytes(),
         );
 
         match previous_vault_dir {
@@ -1363,7 +1854,57 @@ mod tests {
     }
 
     #[test]
-    fn autofill_entry_accepts_password_without_unlocking_state() {
+    fn save_password_entry_duplicate_preserves_existing_protected_entry_in_memory_and_on_disk() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_secondary_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let mut state = unlocked_state(&path);
+        let original_memory = serde_json::to_vec(&state.session.as_ref().unwrap().vault).unwrap();
+        let original_disk = std::fs::read(&path).unwrap();
+
+        let response = handle_request(
+            &mut state,
+            br#"{"type":"save_password_entry","name":"protected email","username":"attacker","password":"replacement","url":"https://evil.example"}"#,
+        );
+
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
+        }
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message }
+                if message.contains("already exists")
+        ));
+        assert_eq!(
+            serde_json::to_vec(&state.session.as_ref().unwrap().vault).unwrap(),
+            original_memory
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_disk);
+
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+        assert_eq!(serde_json::to_vec(&persisted).unwrap(), original_memory);
+        let existing = persisted.find_entry("PROTECTED EMAIL").unwrap();
+        assert_eq!(
+            &*existing.reveal_secret(Some("view-pass")).unwrap(),
+            "super-secret"
+        );
+        assert_eq!(existing.username.as_deref(), Some("ryan"));
+        assert_eq!(existing.url.as_deref(), Some("https://secure.example.com"));
+    }
+
+    #[test]
+    fn failed_retained_save_rolls_back_unsaved_entry() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
@@ -1373,28 +1914,78 @@ mod tests {
             &path,
         )
         .unwrap();
-
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let mut state = negotiated_state();
+        assert!(matches!(
+            handle_request(
+                &mut state,
+                br#"{"type":"unlock","password":"correct horse battery staple"}"#,
+            ),
+            NativeResponse::Unlock { unlocked: true, .. }
+        ));
+        std::fs::remove_file(&path).unwrap();
 
-        let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"get_autofill_entry","id":"1","password":"correct horse battery staple"}"#,
+        let save_response = handle_request(
+            &mut state,
+            br#"{"type":"save_password_entry","name":"Unsaved","password":"secret"}"#,
         );
-
+        let list_response = handle_request(&mut state, br#"{"type":"list_entries"}"#);
         match previous_vault_dir {
             Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
             None => std::env::remove_var("TERMKEY_VAULT_DIR"),
         }
 
-        match response {
-            NativeResponse::AutofillEntry { entry } => {
-                assert_eq!(entry.name, "Email");
-                assert_eq!(entry.username.as_deref(), Some("ryan"));
-                assert_eq!(entry.password, "super-secret");
+        assert!(matches!(save_response, NativeResponse::Error { .. }));
+        match list_response {
+            NativeResponse::ListEntries { entries } => {
+                assert!(entries.iter().all(|entry| entry.name != "Unsaved"));
             }
-            other => panic!("unexpected response: {:?}", other),
+            other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn retained_conflict_invalidates_session_without_exposing_unsaved_entry() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let mut state = unlocked_state(&path);
+        let mut independent = VaultSession::open(
+            Zeroizing::new("correct horse battery staple".into()),
+            path.clone(),
+        )
+        .unwrap()
+        .session;
+        independent.vault.entries[0].notes = "external update".into();
+        independent.save().unwrap();
+
+        let save_response = handle_request(
+            &mut state,
+            br#"{"type":"save_password_entry","name":"Unsaved","password":"secret"}"#,
+        );
+        let list_response = handle_request(&mut state, br#"{"type":"list_entries"}"#);
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
+        }
+
+        assert!(matches!(save_response, NativeResponse::Error { .. }));
+        assert!(matches!(list_response, NativeResponse::Error { .. }));
+        assert!(persisted
+            .entries
+            .iter()
+            .all(|entry| entry.name != "Unsaved"));
+        assert_eq!(persisted.entries[0].notes, "external update");
     }
 
     #[test]
@@ -1412,9 +2003,14 @@ mod tests {
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://secure.example.com");
         let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"get_autofill_entry","id":"1","password":"correct horse battery staple"}"#,
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://secure.example.com"}}"#
+            )
+            .as_bytes(),
         );
 
         match previous_vault_dir {
@@ -1445,9 +2041,14 @@ mod tests {
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://secure.example.com");
         let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"get_autofill_entry","id":"1","password":"correct horse battery staple","secondary_password":"view-pass"}"#,
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://secure.example.com","secondary_password":"view-pass"}}"#
+            )
+            .as_bytes(),
         );
 
         match previous_vault_dir {
@@ -1479,9 +2080,14 @@ mod tests {
         let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
         std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://secure.example.com");
         let response = handle_request(
-            &mut HostState::default(),
-            br#"{"type":"get_autofill_entry","id":"1","password":"correct horse battery staple","secondaryPassword":"view-pass"}"#,
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://secure.example.com","secondaryPassword":"view-pass"}}"#
+            )
+            .as_bytes(),
         );
 
         match previous_vault_dir {
@@ -1499,38 +2105,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_site_supports_full_urls_and_host_only_values() {
-        let full = parse_site("https://accounts.example.com/login?next=1").unwrap();
-        let host_only = parse_site("accounts.example.com").unwrap();
+    fn autofill_secondary_password_entry_rejects_wrong_secondary_password() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_secondary_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
 
-        assert_eq!(full.origin, "https://accounts.example.com");
-        assert_eq!(full.hostname, "accounts.example.com");
-        assert_eq!(host_only.hostname, "accounts.example.com");
+        let mut state = unlocked_state(&path);
+        let handle = discover_first_match_id(&mut state, "https://secure.example.com");
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{handle}","origin":"https://secure.example.com","secondaryPassword":"wrong-pass"}}"#
+            )
+            .as_bytes(),
+        );
+
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
+        }
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message }
+                if message.contains("Incorrect secondary password")
+        ));
     }
 
     #[test]
-    fn classify_site_match_prefers_origin_then_host_then_subdomain() {
-        let current = parse_site("https://app.example.com/login").unwrap();
-        let exact_origin = SiteRule::ExactOrigin("https://app.example.com".to_string());
-        let exact_host = SiteRule::ExactHost("app.example.com".to_string());
-        let subdomain = SiteRule::ExactHost("example.com".to_string());
-        let registrable_domain = SiteRule::RegistrableDomain("example.com".to_string());
+    fn malformed_marker_backed_entry_is_rejected_before_persistence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        let mut malformed = test_vault_with_secondary_entry();
+        malformed.entries[0].encrypted_secret_nonce = None;
 
-        assert_eq!(
-            classify_site_rule_match(&current, &exact_origin),
-            Some("exact_origin")
-        );
-        assert_eq!(
-            classify_site_rule_match(&current, &exact_host),
-            Some("exact_host")
-        );
-        assert_eq!(
-            classify_site_rule_match(&current, &subdomain),
-            Some("subdomain")
-        );
-        assert_eq!(
-            classify_site_rule_match(&current, &registrable_domain),
-            Some("registrable_domain")
+        assert!(matches!(
+            write_vault(&malformed, b"correct horse battery staple", &path),
+            Err(TermKeyError::InvalidEntry(_))
+        ));
+        assert!(
+            !path.exists(),
+            "invalid vault data reached the persistence boundary"
         );
     }
 
@@ -1542,6 +2164,8 @@ mod tests {
             &NativeResponse::Pong {
                 app: "termkey",
                 version: env!("CARGO_PKG_VERSION"),
+                protocol_version: NATIVE_PROTOCOL_VERSION,
+                capabilities: NATIVE_CAPABILITIES,
             },
         )
         .unwrap();
@@ -1551,5 +2175,234 @@ mod tests {
 
         assert_eq!(decoded["type"], "pong");
         assert_eq!(decoded["app"], "termkey");
+    }
+
+    #[test]
+    fn native_message_rejects_payload_over_64_mib_before_allocation() {
+        let oversized = (64_u32 * 1024 * 1024) + 1;
+        let error = read_message(&mut Cursor::new(oversized.to_le_bytes())).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn wire_success_echoes_valid_request_id() {
+        let request_id = "a".repeat(64);
+        let response = handle_wire_request(
+            &mut HostState::default(),
+            format!(r#"{{"type":"ping","protocolVersion":2,"requestId":"{request_id}"}}"#)
+                .as_bytes(),
+        );
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(encoded["requestId"], request_id);
+        assert_eq!(encoded["type"], "pong");
+    }
+
+    #[test]
+    fn wire_application_error_echoes_valid_request_id() {
+        let request_id = "b".repeat(64);
+        let response = handle_wire_request(
+            &mut negotiated_state(),
+            format!(
+                r#"{{"type":"get_autofill_entry","requestId":"{request_id}","id":"1","origin":"https://example.com"}}"#
+            )
+            .as_bytes(),
+        );
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(encoded["requestId"], request_id);
+        assert_eq!(encoded["type"], "error");
+        assert!(encoded["message"].as_str().unwrap().contains("locked"));
+    }
+
+    #[test]
+    fn wire_rejects_missing_and_malformed_request_ids() {
+        let missing = serde_json::to_value(handle_wire_request(
+            &mut HostState::default(),
+            br#"{"type":"ping"}"#,
+        ))
+        .unwrap();
+        let malformed = serde_json::to_value(handle_wire_request(
+            &mut HostState::default(),
+            br#"{"type":"ping","requestId":"short"}"#,
+        ))
+        .unwrap();
+
+        assert_eq!(missing["requestId"], "");
+        assert_eq!(missing["type"], "error");
+        assert!(missing["message"].as_str().unwrap().contains("requestId"));
+        assert_eq!(malformed["requestId"], "");
+        assert_eq!(malformed["type"], "error");
+        assert!(malformed["message"].as_str().unwrap().contains("requestId"));
+    }
+
+    #[test]
+    fn wire_never_echoes_an_oversized_invalid_request_id() {
+        let oversized = "a".repeat(1_000_000);
+        let response = handle_wire_request(
+            &mut HostState::default(),
+            serde_json::json!({ "type": "ping", "requestId": oversized })
+                .to_string()
+                .as_bytes(),
+        );
+        let encoded = serde_json::to_vec(&response).unwrap();
+
+        assert!(encoded.len() < 1024);
+        assert_eq!(response.request_id, "");
+    }
+
+    #[test]
+    fn wire_rejects_escaped_request_ids_without_owned_envelope_decoding() {
+        let escaped = format!(
+            r#"{{"type":"ping","protocolVersion":2,"requestId":"{}\u0061"}}"#,
+            "a".repeat(63)
+        );
+        let response = handle_wire_request(&mut HostState::default(), escaped.as_bytes());
+
+        assert_eq!(response.request_id, "");
+        assert!(matches!(response.response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn outbound_wire_limit_allows_exact_boundary_and_compacts_beyond_it() {
+        let request_id = "a".repeat(64);
+        let base = NativeWireResponse {
+            request_id: request_id.clone(),
+            response: NativeResponse::GeneratedPassword {
+                password: String::new(),
+            },
+        };
+        let base_len = serde_json::to_vec(&base).unwrap().len();
+        let exact = NativeWireResponse {
+            request_id: request_id.clone(),
+            response: NativeResponse::GeneratedPassword {
+                password: "x".repeat(MAX_NATIVE_RESPONSE_BYTES - base_len),
+            },
+        };
+        let beyond = NativeWireResponse {
+            request_id: request_id.clone(),
+            response: NativeResponse::GeneratedPassword {
+                password: "x".repeat(MAX_NATIVE_RESPONSE_BYTES - base_len + 1),
+            },
+        };
+
+        let exact_encoded = encode_wire_response(&exact).unwrap();
+        let beyond_encoded = encode_wire_response(&beyond).unwrap();
+        let beyond_json: serde_json::Value = serde_json::from_slice(&beyond_encoded).unwrap();
+
+        assert_eq!(exact_encoded.len(), MAX_NATIVE_RESPONSE_BYTES);
+        assert_eq!(exact_encoded.capacity(), MAX_NATIVE_RESPONSE_BYTES);
+        assert!(beyond_encoded.len() < MAX_NATIVE_RESPONSE_BYTES);
+        assert_eq!(beyond_json["requestId"], request_id);
+        assert_eq!(beyond_json["type"], "error");
+    }
+
+    #[test]
+    fn writing_wire_responses_clears_transient_generated_and_autofill_secrets() {
+        let request_id = "a".repeat(64);
+        for response in [
+            NativeResponse::GeneratedPassword {
+                password: "generated-secret".to_string(),
+            },
+            NativeResponse::AutofillEntry {
+                entry: AutofillEntryResponse {
+                    id: "b".repeat(64),
+                    name: "Example".to_string(),
+                    username: Some("person@example.test".to_string()),
+                    password: "autofill-secret".to_string(),
+                },
+            },
+        ] {
+            let mut wire = NativeWireResponse {
+                request_id: request_id.clone(),
+                response,
+            };
+            let mut framed = Vec::new();
+            write_wire_message(&mut framed, &mut wire).unwrap();
+
+            match &wire.response {
+                NativeResponse::GeneratedPassword { password } => {
+                    assert!(password.is_empty());
+                }
+                NativeResponse::AutofillEntry { entry } => {
+                    assert!(entry.password.is_empty());
+                }
+                other => panic!("unexpected fixture response: {other:?}"),
+            }
+            let payload = read_message(&mut Cursor::new(framed)).unwrap().unwrap();
+            fn assert_zeroizing_payload(_: &Zeroizing<Vec<u8>>) {}
+            assert_zeroizing_payload(&payload);
+            let serialized: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert!(
+                serialized["password"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+                    || serialized["entry"]["password"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_native_request_fields_deserialize_directly_into_zeroizing_storage() {
+        let request: NativeRequest = serde_json::from_slice(
+            br#"{"type":"save_password_entry","name":"Example","password":"save-secret","secondaryPassword":"view-secret"}"#,
+        )
+        .unwrap();
+
+        let NativeRequest::SavePasswordEntry {
+            password,
+            secondary_password: Some(secondary_password),
+            ..
+        } = request
+        else {
+            panic!("unexpected parsed request");
+        };
+        fn assert_sensitive_wrapper(value: &SensitiveString, expected: &str) {
+            let _: &Zeroizing<String> = &value.0;
+            assert_eq!(value.0.as_str(), expected);
+        }
+        assert_sensitive_wrapper(&password, "save-secret");
+        assert_sensitive_wrapper(&secondary_password, "view-secret");
+    }
+
+    #[test]
+    fn sequential_wire_requests_retain_unlocked_host_state() {
+        let _guard = env_lock().lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(&VaultData::new(), b"correct horse battery staple", &path).unwrap();
+        let previous_vault_dir = std::env::var_os("TERMKEY_VAULT_DIR");
+        std::env::set_var("TERMKEY_VAULT_DIR", dir.path());
+        let mut state = negotiated_state();
+        let unlock_id = "c".repeat(64);
+        let status_id = "d".repeat(64);
+
+        let unlock = serde_json::to_value(handle_wire_request(
+            &mut state,
+            format!(
+                r#"{{"type":"unlock","requestId":"{unlock_id}","password":"correct horse battery staple"}}"#
+            )
+            .as_bytes(),
+        ))
+        .unwrap();
+        let status = serde_json::to_value(handle_wire_request(
+            &mut state,
+            format!(r#"{{"type":"status","protocolVersion":2,"requestId":"{status_id}"}}"#)
+                .as_bytes(),
+        ))
+        .unwrap();
+
+        match previous_vault_dir {
+            Some(value) => std::env::set_var("TERMKEY_VAULT_DIR", value),
+            None => std::env::remove_var("TERMKEY_VAULT_DIR"),
+        }
+        assert_eq!(unlock["requestId"], unlock_id);
+        assert_eq!(unlock["type"], "unlock");
+        assert_eq!(status["requestId"], status_id);
+        assert_eq!(status["type"], "status");
+        assert_eq!(status["locked"], false);
     }
 }

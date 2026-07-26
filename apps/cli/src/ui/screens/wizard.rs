@@ -6,8 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-
-use crate::config::model::RECOVERY_QUESTIONS;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone)]
 enum WizardStep {
@@ -15,25 +14,19 @@ enum WizardStep {
     SetPassword,
     ConfirmPassword,
     RecoveryChoice,
-    RecoveryQuestion,
-    RecoveryAnswer,
-    RecoveryConfirmAnswer,
     Complete,
 }
 
 pub struct WizardResult {
-    pub password: String,
-    pub recovery: Option<(u8, String)>, // (question_index, answer)
+    pub password: Zeroizing<String>,
+    pub setup_recovery: bool,
 }
 
 pub struct WizardScreen {
     step: WizardStep,
-    password: String,
-    confirm_password: String,
+    password: Zeroizing<String>,
+    confirm_password: Zeroizing<String>,
     recovery_choice: bool,
-    recovery_question_index: u8,
-    recovery_answer: String,
-    recovery_confirm_answer: String,
     error_message: Option<String>,
 }
 
@@ -43,16 +36,19 @@ pub enum WizardAction {
     Cancel,
 }
 
+impl Default for WizardScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WizardScreen {
     pub fn new() -> Self {
         Self {
             step: WizardStep::Welcome,
-            password: String::new(),
-            confirm_password: String::new(),
+            password: Zeroizing::new(String::new()),
+            confirm_password: Zeroizing::new(String::new()),
             recovery_choice: true,
-            recovery_question_index: 0,
-            recovery_answer: String::new(),
-            recovery_confirm_answer: String::new(),
             error_message: None,
         }
     }
@@ -93,7 +89,7 @@ impl WizardScreen {
                     }
                 }
                 KeyCode::Esc => {
-                    self.password.clear();
+                    self.password.zeroize();
                     self.step = WizardStep::Welcome;
                     WizardAction::Continue
                 }
@@ -112,7 +108,7 @@ impl WizardScreen {
                 KeyCode::Enter => {
                     if self.confirm_password != self.password {
                         self.error_message = Some("Passwords do not match.".into());
-                        self.confirm_password.clear();
+                        self.confirm_password.zeroize();
                         WizardAction::Continue
                     } else {
                         self.step = WizardStep::RecoveryChoice;
@@ -120,7 +116,7 @@ impl WizardScreen {
                     }
                 }
                 KeyCode::Esc => {
-                    self.confirm_password.clear();
+                    self.confirm_password.zeroize();
                     self.step = WizardStep::SetPassword;
                     WizardAction::Continue
                 }
@@ -130,7 +126,7 @@ impl WizardScreen {
             WizardStep::RecoveryChoice => match key {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.recovery_choice = true;
-                    self.step = WizardStep::RecoveryQuestion;
+                    self.step = WizardStep::Complete;
                     WizardAction::Continue
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
@@ -143,123 +139,24 @@ impl WizardScreen {
                     WizardAction::Continue
                 }
                 KeyCode::Enter => {
-                    if self.recovery_choice {
-                        self.step = WizardStep::RecoveryQuestion;
-                    } else {
-                        self.step = WizardStep::Complete;
-                    }
+                    self.step = WizardStep::Complete;
                     WizardAction::Continue
                 }
                 KeyCode::Esc => {
-                    self.confirm_password.clear();
+                    self.confirm_password.zeroize();
                     self.step = WizardStep::ConfirmPassword;
                     WizardAction::Continue
                 }
                 _ => WizardAction::Continue,
             },
 
-            WizardStep::RecoveryQuestion => match key {
-                KeyCode::Up => {
-                    if self.recovery_question_index > 0 {
-                        self.recovery_question_index -= 1;
-                    }
-                    WizardAction::Continue
-                }
-                KeyCode::Down => {
-                    if (self.recovery_question_index as usize) < RECOVERY_QUESTIONS.len() - 1 {
-                        self.recovery_question_index += 1;
-                    }
-                    WizardAction::Continue
-                }
-                KeyCode::Enter => {
-                    self.step = WizardStep::RecoveryAnswer;
-                    WizardAction::Continue
-                }
+            WizardStep::Complete => match key {
+                KeyCode::Enter => WizardAction::Complete(WizardResult {
+                    password: std::mem::take(&mut self.password),
+                    setup_recovery: self.recovery_choice,
+                }),
                 KeyCode::Esc => {
                     self.step = WizardStep::RecoveryChoice;
-                    WizardAction::Continue
-                }
-                _ => WizardAction::Continue,
-            },
-
-            WizardStep::RecoveryAnswer => match key {
-                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.recovery_answer.push(c);
-                    WizardAction::Continue
-                }
-                KeyCode::Backspace => {
-                    self.recovery_answer.pop();
-                    WizardAction::Continue
-                }
-                KeyCode::Enter => {
-                    let trimmed = self.recovery_answer.trim();
-                    if trimmed.len() < 3 {
-                        self.error_message = Some("Answer must be at least 3 characters.".into());
-                        WizardAction::Continue
-                    } else {
-                        self.step = WizardStep::RecoveryConfirmAnswer;
-                        WizardAction::Continue
-                    }
-                }
-                KeyCode::Esc => {
-                    self.recovery_answer.clear();
-                    self.step = WizardStep::RecoveryQuestion;
-                    WizardAction::Continue
-                }
-                _ => WizardAction::Continue,
-            },
-
-            WizardStep::RecoveryConfirmAnswer => match key {
-                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.recovery_confirm_answer.push(c);
-                    WizardAction::Continue
-                }
-                KeyCode::Backspace => {
-                    self.recovery_confirm_answer.pop();
-                    WizardAction::Continue
-                }
-                KeyCode::Enter => {
-                    let a = crate::crypto::recovery::normalize_answer(&self.recovery_answer);
-                    let b =
-                        crate::crypto::recovery::normalize_answer(&self.recovery_confirm_answer);
-                    if a != b {
-                        self.error_message = Some("Answers do not match.".into());
-                        self.recovery_confirm_answer.clear();
-                        WizardAction::Continue
-                    } else {
-                        self.step = WizardStep::Complete;
-                        WizardAction::Continue
-                    }
-                }
-                KeyCode::Esc => {
-                    self.recovery_confirm_answer.clear();
-                    self.step = WizardStep::RecoveryAnswer;
-                    WizardAction::Continue
-                }
-                _ => WizardAction::Continue,
-            },
-
-            WizardStep::Complete => match key {
-                KeyCode::Enter => {
-                    let recovery = if self.recovery_choice {
-                        Some((
-                            self.recovery_question_index,
-                            crate::crypto::recovery::normalize_answer(&self.recovery_answer),
-                        ))
-                    } else {
-                        None
-                    };
-                    WizardAction::Complete(WizardResult {
-                        password: self.password.clone(),
-                        recovery,
-                    })
-                }
-                KeyCode::Esc => {
-                    if self.recovery_choice {
-                        self.step = WizardStep::RecoveryConfirmAnswer;
-                    } else {
-                        self.step = WizardStep::RecoveryChoice;
-                    }
                     WizardAction::Continue
                 }
                 _ => WizardAction::Continue,
@@ -276,12 +173,9 @@ impl WizardScreen {
             WizardStep::SetPassword => 2,
             WizardStep::ConfirmPassword => 3,
             WizardStep::RecoveryChoice => 4,
-            WizardStep::RecoveryQuestion => 5,
-            WizardStep::RecoveryAnswer => 6,
-            WizardStep::RecoveryConfirmAnswer => 7,
-            WizardStep::Complete => 8,
+            WizardStep::Complete => 5,
         };
-        let total = if self.recovery_choice { 8 } else { 5 };
+        let total = 5;
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -312,23 +206,6 @@ impl WizardScreen {
                 &self.confirm_password,
             ),
             WizardStep::RecoveryChoice => self.render_recovery_choice(frame, chunks[1]),
-            WizardStep::RecoveryQuestion => self.render_recovery_question(frame, chunks[1]),
-            WizardStep::RecoveryAnswer => self.render_text_step(
-                frame,
-                chunks[1],
-                "Recovery Answer",
-                &RECOVERY_QUESTIONS[self.recovery_question_index as usize],
-                &self.recovery_answer,
-                false,
-            ),
-            WizardStep::RecoveryConfirmAnswer => self.render_text_step(
-                frame,
-                chunks[1],
-                "Confirm Recovery Answer",
-                "Re-enter your answer to confirm:",
-                &self.recovery_confirm_answer,
-                false,
-            ),
             WizardStep::Complete => self.render_complete(frame, chunks[1]),
         }
 
@@ -451,14 +328,14 @@ impl WizardScreen {
         let text = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "Set up a recovery question?",
+                "Set up a recovery phrase now?",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from("If you forget your master password, a recovery"),
-            Line::from("question can help you regain access to your vault."),
+            Line::from("You will be shown a 24-word phrase after vault creation."),
+            Line::from("You must confirm three words before it is saved."),
             Line::from(""),
             Line::from(vec![
                 Span::raw("         "),
@@ -483,93 +360,6 @@ impl WizardScreen {
         frame.render_widget(paragraph, centered);
     }
 
-    fn render_recovery_question(&self, frame: &mut Frame, area: Rect) {
-        let mut lines = vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Select a recovery question:",
-                Style::default().fg(Color::White),
-            )),
-            Line::from(""),
-        ];
-
-        for (i, question) in RECOVERY_QUESTIONS.iter().enumerate() {
-            let style = if i == self.recovery_question_index as usize {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            let prefix = if i == self.recovery_question_index as usize {
-                " > "
-            } else {
-                "   "
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{}{}", prefix, question),
-                style,
-            )));
-        }
-
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Use ↑/↓ to select, Enter to confirm",
-            Style::default().fg(Color::DarkGray),
-        )));
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Recovery Question ")
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .border_style(Style::default().fg(Color::Cyan));
-
-        let paragraph = Paragraph::new(lines).block(block);
-        let centered = center_vertical(area, 10);
-        frame.render_widget(paragraph, centered);
-    }
-
-    fn render_text_step(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        title: &str,
-        prompt: &str,
-        buffer: &str,
-        _masked: bool,
-    ) {
-        let display = buffer.to_string();
-        let text = vec![
-            Line::from(""),
-            Line::from(Span::styled(prompt, Style::default().fg(Color::White))),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(display, Style::default().fg(Color::Yellow)),
-                Span::styled("█", Style::default().fg(Color::Cyan)),
-            ]),
-        ];
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {} ", title))
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .border_style(Style::default().fg(Color::Cyan));
-
-        let paragraph = Paragraph::new(text).block(block);
-        let centered = center_vertical(area, 7);
-        frame.render_widget(paragraph, centered);
-    }
-
     fn render_complete(&self, frame: &mut Frame, area: Rect) {
         let mut lines = vec![
             Line::from(""),
@@ -588,18 +378,18 @@ impl WizardScreen {
             )),
         ];
 
-        if self.recovery_choice {
-            let q = RECOVERY_QUESTIONS[self.recovery_question_index as usize];
-            lines.push(Line::from(Span::styled(
-                format!("  Recovery question: {}", q),
-                Style::default().fg(Color::Yellow),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                "  Recovery question: not set",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+        lines.push(Line::from(Span::styled(
+            if self.recovery_choice {
+                "  Recovery phrase: configure after creation"
+            } else {
+                "  Recovery phrase: not set"
+            },
+            if self.recovery_choice {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        )));
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -638,4 +428,36 @@ fn center_vertical(area: Rect, height: u16) -> Rect {
         ])
         .split(area);
     chunks[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requesting_recovery_advances_to_completion() {
+        let mut wizard = WizardScreen::new();
+        wizard.step = WizardStep::RecoveryChoice;
+        wizard.recovery_choice = true;
+
+        let action = wizard.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(action, WizardAction::Continue));
+        assert!(matches!(wizard.step, WizardStep::Complete));
+    }
+
+    #[test]
+    fn completion_transfers_zeroizing_master_password_without_a_plaintext_clone() {
+        let mut wizard = WizardScreen::new();
+        wizard.step = WizardStep::Complete;
+        wizard.password.push_str("master-secret");
+
+        let WizardAction::Complete(result) = wizard.handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        else {
+            panic!("wizard did not complete");
+        };
+
+        let _: zeroize::Zeroizing<String> = result.password;
+        assert!(wizard.password.is_empty());
+    }
 }

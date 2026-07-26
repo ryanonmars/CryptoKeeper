@@ -18,6 +18,12 @@ pub struct NukeScreen {
     pub error_message: Option<String>,
 }
 
+impl Default for NukeScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NukeScreen {
     pub fn new() -> Self {
         Self {

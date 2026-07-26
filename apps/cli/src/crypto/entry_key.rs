@@ -1,4 +1,4 @@
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{cipher, kdf};
 use crate::error::{Result, TermKeyError};
@@ -39,11 +39,18 @@ pub fn decrypt_secret(
     }
     let mut nonce_arr = [0u8; 24];
     nonce_arr.copy_from_slice(nonce);
-    let plaintext = cipher::decrypt(entry_key, &nonce_arr, ciphertext)
+    let mut plaintext = cipher::decrypt(entry_key, &nonce_arr, ciphertext)
         .map_err(|_| TermKeyError::SecondaryPasswordWrong)?;
-    let s = String::from_utf8(plaintext.to_vec())
-        .map_err(|_| TermKeyError::Encryption("Invalid UTF-8 in decrypted secret".into()))?;
-    Ok(Zeroizing::new(s))
+    match String::from_utf8(std::mem::take(&mut *plaintext)) {
+        Ok(secret) => Ok(Zeroizing::new(secret)),
+        Err(error) => {
+            let mut recovered_bytes = error.into_bytes();
+            recovered_bytes.zeroize();
+            Err(TermKeyError::Encryption(
+                "Invalid UTF-8 in decrypted secret".into(),
+            ))
+        }
+    }
 }
 
 /// Wrap (encrypt) a per-entry key under a view password using Argon2 + XChaCha20.
@@ -56,7 +63,7 @@ pub fn wrap_entry_key(
     let (m, t, p) = entry_key_params();
     let wrapping_key = kdf::derive_key(view_password.as_bytes(), &salt, m, t, p)?;
     let nonce = cipher::generate_nonce();
-    let wrapped = cipher::encrypt(&*wrapping_key, &nonce, entry_key)?;
+    let wrapped = cipher::encrypt(&wrapping_key, &nonce, entry_key)?;
     Ok((wrapped, nonce.to_vec(), salt.to_vec()))
 }
 
@@ -77,7 +84,7 @@ pub fn unwrap_entry_key(
     }
     let mut nonce_arr = [0u8; 24];
     nonce_arr.copy_from_slice(nonce);
-    let plaintext = cipher::decrypt(&*wrapping_key, &nonce_arr, wrapped)
+    let plaintext = cipher::decrypt(&wrapping_key, &nonce_arr, wrapped)
         .map_err(|_| TermKeyError::SecondaryPasswordWrong)?;
     if plaintext.len() != 32 {
         return Err(TermKeyError::SecondaryPasswordWrong);
@@ -114,6 +121,18 @@ mod tests {
         let (ct, nonce) = encrypt_secret(&key1, "secret").unwrap();
         let result = decrypt_secret(&key2, &ct, &nonce);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decrypt_secret_invalid_utf8_returns_encryption_error() {
+        let key = generate_entry_key();
+        let nonce = cipher::generate_nonce();
+        let ciphertext = cipher::encrypt(&key, &nonce, &[0xff]).unwrap();
+
+        assert!(matches!(
+            decrypt_secret(&key, &ciphertext, &nonce),
+            Err(TermKeyError::Encryption(_))
+        ));
     }
 
     #[test]

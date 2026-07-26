@@ -8,17 +8,30 @@ use ratatui::{
 };
 
 use crate::vault::model::Entry;
+use zeroize::Zeroizing;
 
 pub struct ViewEntryScreen {
     pub entry: Entry,
+    revealed_secret: Option<Zeroizing<String>>,
     secret_revealed: bool,
     status_message: Option<(String, bool)>,
 }
 
 impl ViewEntryScreen {
     pub fn new(entry: Entry) -> Self {
+        let revealed_secret = entry.reveal_secret(None).ok();
         Self {
             entry,
+            revealed_secret,
+            secret_revealed: false,
+            status_message: None,
+        }
+    }
+
+    pub fn new_with_secret(entry: Entry, secret: Zeroizing<String>) -> Self {
+        Self {
+            entry,
+            revealed_secret: Some(secret),
             secret_revealed: false,
             status_message: None,
         }
@@ -33,7 +46,10 @@ impl ViewEntryScreen {
             }
             KeyCode::Char('c') => {
                 if self.secret_revealed {
-                    ViewEntryAction::Copy(self.entry.secret.clone())
+                    self.revealed_secret
+                        .as_ref()
+                        .map(|secret| ViewEntryAction::Copy(secret.clone()))
+                        .unwrap_or(ViewEntryAction::Continue)
                 } else {
                     ViewEntryAction::Continue
                 }
@@ -45,19 +61,32 @@ impl ViewEntryScreen {
                     ViewEntryAction::Continue
                 }
             }
-            KeyCode::Char('o') => {
-                if let Some(url) = self.entry.url.clone() {
-                    ViewEntryAction::OpenUrl(url)
-                } else {
-                    ViewEntryAction::Continue
-                }
-            }
+            KeyCode::Char('o') => self
+                .entry
+                .url
+                .as_deref()
+                .filter(|url| crate::links::is_web_url(url))
+                .map(|url| ViewEntryAction::OpenUrl(url.to_string()))
+                .unwrap_or(ViewEntryAction::Continue),
             _ => ViewEntryAction::Continue,
         }
     }
 
     pub fn set_status(&mut self, message: String, is_error: bool) {
         self.status_message = Some((message, is_error));
+    }
+
+    fn secret_display(&self) -> &str {
+        if self.entry.has_secondary_password && self.revealed_secret.is_none() {
+            "[Protected - secondary password required]"
+        } else if self.secret_revealed {
+            self.revealed_secret
+                .as_ref()
+                .map(|secret| secret.as_str())
+                .unwrap_or("[Secret unavailable]")
+        } else {
+            "••••••••••••••••"
+        }
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -76,7 +105,10 @@ impl ViewEntryScreen {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Entry: {} ", self.entry.name))
+            .title(format!(
+                " Entry: {} ",
+                crate::links::sanitize_terminal_text(&self.entry.name)
+            ))
             .title_style(
                 Style::default()
                     .fg(Color::Cyan)
@@ -104,7 +136,7 @@ impl ViewEntryScreen {
             lines.push(Line::from(vec![
                 Span::styled("Network: ", Style::default().fg(Color::Cyan)),
                 Span::styled(
-                    self.entry.network.clone(),
+                    crate::links::sanitize_terminal_text(&self.entry.network),
                     Style::default().fg(Color::White),
                 ),
             ]));
@@ -112,21 +144,30 @@ impl ViewEntryScreen {
             if let Some(ref addr) = self.entry.public_address {
                 lines.push(Line::from(vec![
                     Span::styled("Public Address: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(addr.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        crate::links::sanitize_terminal_text(addr),
+                        Style::default().fg(Color::White),
+                    ),
                 ]));
             }
         } else if self.entry.secret_type.is_password_type() {
             if let Some(ref username) = self.entry.username {
                 lines.push(Line::from(vec![
                     Span::styled("Username: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(username.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        crate::links::sanitize_terminal_text(username),
+                        Style::default().fg(Color::White),
+                    ),
                 ]));
             }
 
             if let Some(ref url) = self.entry.url {
                 lines.push(Line::from(vec![
                     Span::styled("URL: ", Style::default().fg(Color::Cyan)),
-                    Span::styled(url.clone(), Style::default().fg(Color::White)),
+                    Span::styled(
+                        crate::links::sanitize_terminal_text(url),
+                        Style::default().fg(Color::White),
+                    ),
                 ]));
             }
         }
@@ -137,7 +178,9 @@ impl ViewEntryScreen {
                 "Notes:",
                 Style::default().fg(Color::Cyan),
             )]));
-            lines.push(Line::from(self.entry.notes.clone()));
+            lines.push(Line::from(crate::links::sanitize_terminal_text(
+                &self.entry.notes,
+            )));
         }
 
         lines.push(Line::from(""));
@@ -155,18 +198,12 @@ impl ViewEntryScreen {
             lines.push(Line::from(""));
         }
 
-        let secret_display = if self.entry.has_secondary_password && !self.secret_revealed {
-            "[Protected - secondary password required]".to_string()
-        } else if self.secret_revealed {
-            self.entry.secret.clone()
-        } else {
-            "••••••••••••••••".to_string()
-        };
+        let secret_display = self.secret_display();
 
         lines.push(Line::from(vec![
             Span::styled("Secret: ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                secret_display,
+                crate::links::sanitize_terminal_text(secret_display),
                 if self.secret_revealed {
                     Style::default().fg(Color::Yellow)
                 } else {
@@ -178,12 +215,22 @@ impl ViewEntryScreen {
         lines.push(Line::from(""));
         lines.push(Line::from(""));
 
-        let help_text = if self.secret_revealed && self.entry.url.is_some() {
+        let has_url = self.entry.url.is_some();
+        let has_openable_url = self
+            .entry
+            .url
+            .as_deref()
+            .is_some_and(crate::links::is_web_url);
+        let help_text = if self.secret_revealed && has_openable_url {
             "r: Hide secret │ c: Copy secret │ u: Copy URL │ o: Open URL │ Esc/q: Close"
+        } else if self.secret_revealed && has_url {
+            "r: Hide secret │ c: Copy secret │ u: Copy URL │ Esc/q: Close"
         } else if self.secret_revealed {
             "r: Hide secret │ c: Copy secret │ Esc/q: Close"
-        } else if self.entry.url.is_some() {
+        } else if has_openable_url {
             "r: Reveal secret │ u: Copy URL │ o: Open URL │ Esc/q: Close"
+        } else if has_url {
+            "r: Reveal secret │ u: Copy URL │ Esc/q: Close"
         } else {
             "r: Reveal secret │ Esc/q: Close"
         };
@@ -211,7 +258,7 @@ fn centered_rect(percent: u16, r: Rect) -> Rect {
 
 pub enum ViewEntryAction {
     Continue,
-    Copy(String),
+    Copy(Zeroizing<String>),
     CopyUrl(String),
     OpenUrl(String),
     Close,
@@ -221,6 +268,7 @@ pub enum ViewEntryAction {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use ratatui::{backend::TestBackend, Terminal};
 
     fn password_entry_with_url() -> Entry {
         Entry {
@@ -266,5 +314,84 @@ mod tests {
             ViewEntryAction::OpenUrl(url) => assert_eq!(url, "https://example.com"),
             _ => panic!("expected OpenUrl action"),
         }
+    }
+
+    #[test]
+    fn revealed_secret_display_borrows_zeroizing_storage() {
+        let mut screen = ViewEntryScreen::new_with_secret(
+            password_entry_with_url(),
+            Zeroizing::new("revealed-secret".to_string()),
+        );
+        screen.secret_revealed = true;
+
+        let display = screen.secret_display();
+        let backing = screen.revealed_secret.as_ref().unwrap().as_str();
+
+        assert_eq!(display, "revealed-secret");
+        assert_eq!(display.as_ptr(), backing.as_ptr());
+        assert_eq!(display.len(), backing.len());
+    }
+
+    #[test]
+    fn tui_view_rendering_exposes_no_entry_derived_controls() {
+        let mut password_entry = password_entry_with_url();
+        password_entry.name = "na\u{001b}me".to_string();
+        password_entry.username = Some("us\u{009b}er".to_string());
+        password_entry.url = Some("https://example.com/\u{001b}]0;owned".to_string());
+        password_entry.notes = "no\u{0007}tes".to_string();
+        let mut password_screen = ViewEntryScreen::new_with_secret(
+            password_entry,
+            Zeroizing::new("sec\u{001b}]0;owned\u{0085}ret".to_string()),
+        );
+        password_screen.secret_revealed = true;
+
+        let password_rendered = render_screen(&password_screen);
+        assert!(password_rendered.contains("name"));
+        assert!(password_rendered.contains("user"));
+        assert!(password_rendered.contains("https://example.com/]0;owned"));
+        assert!(password_rendered.contains("notes"));
+        assert!(password_rendered.contains("sec]0;ownedret"));
+        assert!(!contains_terminal_control(&password_rendered));
+
+        let mut crypto_entry = password_entry_with_url();
+        crypto_entry.secret_type = crate::vault::model::SecretType::PrivateKey;
+        crypto_entry.network = "net\u{001b}work".to_string();
+        crypto_entry.public_address = Some("pub\u{009b}lic".to_string());
+        let crypto_rendered = render_screen(&ViewEntryScreen::new(crypto_entry));
+        assert!(crypto_rendered.contains("network"));
+        assert!(crypto_rendered.contains("public"));
+        assert!(!contains_terminal_control(&crypto_rendered));
+    }
+
+    #[test]
+    fn open_url_action_requires_a_structurally_valid_https_url() {
+        let mut entry = password_entry_with_url();
+        entry.url = Some("https://example.com/$(whoami)".to_string());
+        let mut screen = ViewEntryScreen::new(entry);
+
+        assert!(matches!(
+            screen.handle_key(KeyCode::Char('o'), KeyModifiers::NONE),
+            ViewEntryAction::Continue
+        ));
+        assert!(!render_screen(&screen).contains("o: Open URL"));
+    }
+
+    fn render_screen(screen: &ViewEntryScreen) -> String {
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| screen.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn contains_terminal_control(value: &str) -> bool {
+        value
+            .chars()
+            .any(|ch| matches!(ch as u32, 0x00..=0x1f | 0x7f..=0x9f))
     }
 }

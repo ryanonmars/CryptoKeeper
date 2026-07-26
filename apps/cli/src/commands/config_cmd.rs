@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::ui::borders::print_success;
 
 pub fn run(show: bool, clipboard_timeout: Option<u64>) -> Result<()> {
-    let mut cfg = config::load_config()?;
+    let cfg = config::load_config()?;
 
     if show || clipboard_timeout.is_none() {
         println!();
@@ -16,7 +16,7 @@ pub fn run(show: bool, clipboard_timeout: Option<u64>) -> Result<()> {
         );
         println!("  First run complete: {}", cfg.first_run_complete);
         println!(
-            "  Recovery question:  {}",
+            "  Recovery phrase:    {}",
             if cfg.recovery.is_some() {
                 "Configured"
             } else {
@@ -28,8 +28,10 @@ pub fn run(show: bool, clipboard_timeout: Option<u64>) -> Result<()> {
     }
 
     if let Some(timeout) = clipboard_timeout {
-        cfg.clipboard_timeout_secs = timeout;
-        config::save_config(&cfg)?;
+        config::update_config(|config| {
+            config.clipboard_timeout_secs = timeout;
+            Ok(())
+        })?;
         print_success(&format!("Clipboard timeout set to {} seconds.", timeout));
     }
 

@@ -1,14 +1,16 @@
 export type NativeHostRequest =
   | {
       type: "ping";
+      protocolVersion: number;
     }
   | {
       type: "status";
+      protocolVersion?: number;
     }
   | {
       type: "get_autofill_entry";
       id: string;
-      password?: string;
+      origin: string;
       secondaryPassword?: string;
     }
   | {
@@ -24,7 +26,6 @@ export type NativeHostRequest =
       username?: string;
       password: string;
       url?: string;
-      masterPassword?: string;
       secondaryPassword?: string;
     }
   | {
@@ -35,11 +36,15 @@ export type NativeHostRequest =
       password: string;
     };
 
+export type NativeHostWireRequest = NativeHostRequest & {
+  requestId: string;
+};
+
 export type NativeHostPongResponse = {
   type: "pong";
   app: "termkey";
   version: string;
-};
+} & ProtocolInfo;
 
 export type NativeHostStatusResponse = {
   type: "status";
@@ -50,7 +55,7 @@ export type NativeHostStatusResponse = {
   firstRunComplete: boolean;
   recoveryConfigured: boolean;
   locked: boolean;
-};
+} & ProtocolInfo;
 
 export type NativeHostEntrySummary = {
   id: string;
@@ -67,7 +72,6 @@ export type NativeHostSiteMatch = {
   id: string;
   name: string;
   username: string | null;
-  url: string | null;
   matchType:
     | "exact_origin"
     | "exact_host"
@@ -76,12 +80,35 @@ export type NativeHostSiteMatch = {
   hasSecondaryPassword: boolean;
 };
 
+export type PopupSiteMatch = NativeHostSiteMatch & {
+  grantId: string;
+};
+
+export type PopupSiteMatchesResponse = {
+  type: "site_matches";
+  siteUrl: string;
+  siteOrigin: string;
+  siteHostname: string;
+  matches: PopupSiteMatch[];
+};
+
 export type NativeHostAutofillEntry = {
   id: string;
   name: string;
   username: string | null;
   password: string;
-  url: string | null;
+};
+
+export type ProtocolInfo = {
+  protocolVersion: number;
+  capabilities: string[];
+};
+
+export type FillCredentialsMessage = {
+  type: "termkey-fill-credentials";
+  documentToken: string;
+  username?: string;
+  password: string;
 };
 
 export type PopupCapturedLoginResponse = {
@@ -143,7 +170,7 @@ export type PopupSaveResultResponse = {
   entryName: string;
 };
 
-export type NativeHostResponse =
+export type NativeHostResponse = (
   | NativeHostPongResponse
   | NativeHostStatusResponse
   | {
@@ -172,11 +199,15 @@ export type NativeHostResponse =
   | {
       type: "unlock";
       unlocked: true;
+      recoveryNotice?: string;
     }
   | {
       type: "error";
       message: string;
-    };
+    }
+) & {
+  requestId: string;
+};
 
 export type PopupToBackgroundMessage =
   | {
@@ -199,8 +230,8 @@ export type PopupToBackgroundMessage =
     }
   | {
       type: "termkey.autofill.fillSelectedMatch";
+      grantId: string;
       entryId: string;
-      password?: string;
       secondaryPassword?: string;
     }
   | {
@@ -209,7 +240,6 @@ export type PopupToBackgroundMessage =
       username?: string;
       password: string;
       url?: string;
-      masterPassword?: string;
       secondaryPassword?: string;
     }
   | {
@@ -221,7 +251,8 @@ export type PopupToBackgroundResponse =
   | {
       ok: true;
       response:
-        | NativeHostResponse
+        | Exclude<NativeHostResponse, { type: "site_matches" }>
+        | PopupSiteMatchesResponse
         | PopupCapturedLoginResponse
         | PopupPageContextResponse
         | PopupCapturedLoginStepResponse

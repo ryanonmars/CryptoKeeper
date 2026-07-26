@@ -7,9 +7,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::crypto::entry_key;
+use crate::error::TermKeyError;
 use crate::ui::text_edit;
 use crate::vault::model::{Entry, SecretType};
 
@@ -22,7 +22,7 @@ pub struct EditEntryScreen {
     secret_cursor: usize,
     secret_confirm: String,
     secret_confirm_cursor: usize,
-    current_secondary_password: String,
+    current_secondary_password: Zeroizing<String>,
     current_secondary_password_cursor: usize,
     custom_secret_type: String,
     custom_secret_type_cursor: usize,
@@ -89,7 +89,7 @@ impl EditEntryScreen {
             secret_cursor: 0,
             secret_confirm: String::new(),
             secret_confirm_cursor: 0,
-            current_secondary_password: String::new(),
+            current_secondary_password: Zeroizing::new(String::new()),
             current_secondary_password_cursor: 0,
             custom_secret_type,
             custom_secret_type_cursor,
@@ -503,7 +503,7 @@ impl EditEntryScreen {
     }
 
     fn move_cursor_right(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_right(cursor, value));
+        self.with_active_cursor(text_edit::move_right);
     }
 
     fn move_cursor_home(&mut self) {
@@ -511,23 +511,23 @@ impl EditEntryScreen {
     }
 
     fn move_cursor_end(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_end(cursor, value));
+        self.with_active_cursor(text_edit::move_end);
     }
 
     fn move_cursor_word_left(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_word_left(cursor, value));
+        self.with_active_cursor(text_edit::move_word_left);
     }
 
     fn move_cursor_word_right(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_word_right(cursor, value));
+        self.with_active_cursor(text_edit::move_word_right);
     }
 
     fn backspace_word(&mut self) {
-        self.with_active_string(|value, cursor| text_edit::backspace_word(value, cursor));
+        self.with_active_string(text_edit::backspace_word);
     }
 
     fn delete_word(&mut self) {
-        self.with_active_string(|value, cursor| text_edit::delete_word(value, cursor));
+        self.with_active_string(text_edit::delete_word);
     }
 
     fn with_active_cursor(&mut self, mut edit: impl FnMut(&mut usize, &str)) {
@@ -737,7 +737,7 @@ impl EditEntryScreen {
         }
     }
 
-    fn try_save(&self) -> EditEntryAction {
+    fn try_save(&mut self) -> EditEntryAction {
         let name = self.entry.name.trim().to_string();
         if name.is_empty() {
             return EditEntryAction::Continue;
@@ -749,6 +749,9 @@ impl EditEntryScreen {
 
         let secret_changed = !self.secret.is_empty() || !self.secret_confirm.is_empty();
         if secret_changed && (self.secret.is_empty() || self.secret != self.secret_confirm) {
+            return EditEntryAction::Continue;
+        }
+        if self.entry.has_secondary_password && self.current_secondary_password.is_empty() {
             return EditEntryAction::Continue;
         }
 
@@ -790,44 +793,25 @@ impl EditEntryScreen {
         }
 
         if secret_changed {
-            if updated.has_secondary_password {
-                let wrapped = updated.entry_key_wrapped.as_ref();
-                let nonce = updated.entry_key_nonce.as_ref();
-                let salt = updated.entry_key_salt.as_ref();
-
-                let (Some(wrapped), Some(nonce), Some(salt)) = (wrapped, nonce, salt) else {
-                    return EditEntryAction::Continue;
-                };
-
-                if self.current_secondary_password.is_empty() {
-                    return EditEntryAction::Continue;
-                }
-
-                let entry_key = match entry_key::unwrap_entry_key(
-                    wrapped,
-                    nonce,
-                    salt,
-                    &self.current_secondary_password,
-                ) {
-                    Ok(key) => key,
-                    Err(_) => return EditEntryAction::Continue,
-                };
-                let (encrypted_secret, encrypted_secret_nonce) =
-                    match entry_key::encrypt_secret(&entry_key, &self.secret) {
-                        Ok(result) => result,
-                        Err(_) => return EditEntryAction::Continue,
-                    };
-
-                updated.secret = "[encrypted]".to_string();
-                updated.encrypted_secret = Some(encrypted_secret);
-                updated.encrypted_secret_nonce = Some(encrypted_secret_nonce);
+            let secondary_password = if updated.has_secondary_password {
+                Some(self.current_secondary_password.as_str())
             } else {
-                updated.secret = self.secret.clone();
+                None
+            };
+            if let Err(error) = updated.replace_secret(&self.secret, secondary_password) {
+                return EditEntryAction::Error(error);
             }
+        } else {
+            updated.updated_at = Utc::now();
         }
 
-        updated.updated_at = Utc::now();
-        EditEntryAction::Save(updated)
+        let secondary_password = updated
+            .has_secondary_password
+            .then(|| std::mem::take(&mut self.current_secondary_password));
+        EditEntryAction::Save {
+            entry: Box::new(updated),
+            secondary_password,
+        }
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -992,9 +976,9 @@ impl EditEntryScreen {
         lines.push(Line::from(""));
         lines.push(Line::from(""));
 
-        let help_text = if self.current_field == 1 {
-            "\u{2191}\u{2193}: Scroll \u{2502} Enter: Select \u{2502} Tab: Next \u{2502} Esc: Cancel"
-        } else if self.is_crypto_type() && self.current_field == self.network_field() {
+        let help_text = if self.current_field == 1
+            || (self.is_crypto_type() && self.current_field == self.network_field())
+        {
             "\u{2191}\u{2193}: Scroll \u{2502} Enter: Select \u{2502} Tab: Next \u{2502} Esc: Cancel"
         } else {
             "\u{2191}\u{2193}: Scroll \u{2502} Tab: Next \u{2502} Shift+Tab: Previous \u{2502} Ctrl+S: Save \u{2502} Esc: Cancel"
@@ -1132,7 +1116,11 @@ fn centered_rect(percent: u16, r: Rect) -> Rect {
 
 pub enum EditEntryAction {
     Continue,
-    Save(Entry),
+    Save {
+        entry: Box<Entry>,
+        secondary_password: Option<Zeroizing<String>>,
+    },
+    Error(TermKeyError),
     Cancel,
 }
 
@@ -1140,6 +1128,7 @@ pub enum EditEntryAction {
 mod tests {
     use super::*;
     use crate::crypto::entry_key;
+    use crate::error::TermKeyError;
 
     fn make_entry(secret_type: SecretType) -> Entry {
         Entry {
@@ -1170,7 +1159,7 @@ mod tests {
         screen.secret = "new-secret".to_string();
         screen.secret_confirm = "new-secret".to_string();
 
-        let EditEntryAction::Save(updated) = screen.try_save() else {
+        let EditEntryAction::Save { entry: updated, .. } = screen.try_save() else {
             panic!("expected save");
         };
 
@@ -1184,7 +1173,7 @@ mod tests {
         screen.entry.secret_type = SecretType::Other(String::new());
         screen.custom_secret_type = "API".to_string();
 
-        let EditEntryAction::Save(updated) = screen.try_save() else {
+        let EditEntryAction::Save { entry: updated, .. } = screen.try_save() else {
             panic!("expected save");
         };
 
@@ -1215,28 +1204,79 @@ mod tests {
         let mut screen = EditEntryScreen::new(entry);
         screen.secret = "updated-secret".to_string();
         screen.secret_confirm = "updated-secret".to_string();
-        screen.current_secondary_password = "view-pass".to_string();
+        screen.current_secondary_password = Zeroizing::new("view-pass".to_string());
 
-        let EditEntryAction::Save(updated) = screen.try_save() else {
+        let EditEntryAction::Save {
+            entry: updated,
+            secondary_password,
+        } = screen.try_save()
+        else {
             panic!("expected save");
         };
 
-        let decrypted_key = entry_key::unwrap_entry_key(
-            updated.entry_key_wrapped.as_ref().unwrap(),
-            updated.entry_key_nonce.as_ref().unwrap(),
-            updated.entry_key_salt.as_ref().unwrap(),
-            "view-pass",
-        )
-        .unwrap();
-        let decrypted_secret = entry_key::decrypt_secret(
-            &decrypted_key,
-            updated.encrypted_secret.as_ref().unwrap(),
-            updated.encrypted_secret_nonce.as_ref().unwrap(),
-        )
-        .unwrap();
+        let decrypted_secret = updated.reveal_secret(Some("view-pass")).unwrap();
 
+        assert_eq!(
+            secondary_password.as_deref().map(String::as_str),
+            Some("view-pass")
+        );
         assert_eq!(updated.secret, "[encrypted]");
         assert_eq!(&*decrypted_secret, "updated-secret");
+    }
+
+    #[test]
+    fn protected_edit_reports_wrong_secondary_password() {
+        let entry_key_bytes = entry_key::generate_entry_key();
+        let (encrypted_secret, encrypted_secret_nonce) =
+            entry_key::encrypt_secret(&entry_key_bytes, "secret").unwrap();
+        let (wrapped_key, wrapped_nonce, wrapped_salt) =
+            entry_key::wrap_entry_key(&entry_key_bytes, "view-pass").unwrap();
+        let mut entry = make_entry(SecretType::PrivateKey);
+        entry.secret = "[encrypted]".to_string();
+        entry.has_secondary_password = true;
+        entry.entry_key_wrapped = Some(wrapped_key);
+        entry.entry_key_nonce = Some(wrapped_nonce);
+        entry.entry_key_salt = Some(wrapped_salt);
+        entry.encrypted_secret = Some(encrypted_secret);
+        entry.encrypted_secret_nonce = Some(encrypted_secret_nonce);
+        let mut screen = EditEntryScreen::new(entry);
+        screen.secret = "updated-secret".to_string();
+        screen.secret_confirm = "updated-secret".to_string();
+        screen.current_secondary_password = Zeroizing::new("wrong-pass".to_string());
+
+        let action = screen.try_save();
+
+        assert!(matches!(
+            action,
+            EditEntryAction::Error(TermKeyError::SecondaryPasswordWrong)
+        ));
+    }
+
+    #[test]
+    fn protected_edit_reports_structural_error_distinctly() {
+        let entry_key_bytes = entry_key::generate_entry_key();
+        let (encrypted_secret, _) = entry_key::encrypt_secret(&entry_key_bytes, "secret").unwrap();
+        let (wrapped_key, wrapped_nonce, wrapped_salt) =
+            entry_key::wrap_entry_key(&entry_key_bytes, "view-pass").unwrap();
+        let mut entry = make_entry(SecretType::PrivateKey);
+        entry.secret = "[encrypted]".to_string();
+        entry.has_secondary_password = true;
+        entry.entry_key_wrapped = Some(wrapped_key);
+        entry.entry_key_nonce = Some(wrapped_nonce);
+        entry.entry_key_salt = Some(wrapped_salt);
+        entry.encrypted_secret = Some(encrypted_secret);
+        entry.encrypted_secret_nonce = None;
+        let mut screen = EditEntryScreen::new(entry);
+        screen.secret = "updated-secret".to_string();
+        screen.secret_confirm = "updated-secret".to_string();
+        screen.current_secondary_password = Zeroizing::new("view-pass".to_string());
+
+        let action = screen.try_save();
+
+        assert!(matches!(
+            action,
+            EditEntryAction::Error(TermKeyError::InvalidEntry(_))
+        ));
     }
 
     #[test]

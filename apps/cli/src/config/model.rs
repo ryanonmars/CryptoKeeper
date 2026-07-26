@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::vault::format::VaultId;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Path to vault file (default: ~/.termkey/vault.ck)
     #[serde(default = "default_vault_path")]
@@ -41,32 +43,57 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryConfig {
-    /// Index of the preset recovery question (0, 1, or 2)
-    pub question_index: u8,
-
-    /// Argon2 hash of the normalized answer (for verification)
-    pub answer_hash: Vec<u8>,
-
-    /// Salt used for answer hashing
-    pub answer_salt: Vec<u8>,
-
-    /// Vault master key encrypted under recovery-derived key
-    pub master_key_blob: Vec<u8>,
-
-    /// Nonce for master key blob encryption
-    pub master_key_blob_nonce: Vec<u8>,
-
-    /// Salt for recovery key derivation
-    pub master_key_blob_salt: Vec<u8>,
+impl Config {
+    pub fn has_active_recovery_for(&self, vault_id: VaultId) -> bool {
+        matches!(
+            self.recovery.as_ref(),
+            Some(RecoveryConfig::V2(recovery)) if recovery.is_valid_for(vault_id)
+        )
+    }
 }
 
-pub const RECOVERY_QUESTIONS: [&str; 3] = [
-    "What was the name of your first pet?",
-    "What city were you born in?",
-    "What was your childhood nickname?",
-];
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecoveryConfig {
+    V2(RecoveryConfigV2),
+    Legacy(LegacyRecoveryConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryConfigV2 {
+    pub version: u8,
+    pub vault_id: VaultId,
+    pub salt: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub wrapped_dek: Vec<u8>,
+}
+
+impl RecoveryConfigV2 {
+    pub const VERSION: u8 = 2;
+    pub const SALT_LEN: usize = 32;
+    pub const NONCE_LEN: usize = 24;
+    pub const WRAPPED_DEK_LEN: usize = 48;
+
+    pub fn is_valid_for(&self, vault_id: VaultId) -> bool {
+        self.version == Self::VERSION
+            && self.vault_id == vault_id
+            && self.salt.len() == Self::SALT_LEN
+            && self.nonce.len() == Self::NONCE_LEN
+            && self.wrapped_dek.len() == Self::WRAPPED_DEK_LEN
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyRecoveryConfig {
+    question_index: u8,
+    answer_hash: Vec<u8>,
+    answer_salt: Vec<u8>,
+    master_key_blob: Vec<u8>,
+    master_key_blob_nonce: Vec<u8>,
+    master_key_blob_salt: Vec<u8>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -107,22 +134,124 @@ mod tests {
 
     #[test]
     fn recovery_config_roundtrip() {
-        let recovery = RecoveryConfig {
-            question_index: 1,
-            answer_hash: vec![1, 2, 3],
-            answer_salt: vec![4, 5, 6],
-            master_key_blob: vec![7, 8, 9],
-            master_key_blob_nonce: vec![10, 11, 12],
-            master_key_blob_salt: vec![13, 14, 15],
-        };
+        let recovery = RecoveryConfig::V2(RecoveryConfigV2 {
+            version: 2,
+            vault_id: VaultId([1; 16]),
+            salt: vec![2; 32],
+            nonce: vec![3; 24],
+            wrapped_dek: vec![4; 48],
+        });
         let config = Config {
             recovery: Some(recovery),
             ..Config::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let loaded: Config = serde_json::from_str(&json).unwrap();
-        let r = loaded.recovery.unwrap();
-        assert_eq!(r.question_index, 1);
-        assert_eq!(r.answer_hash, vec![1, 2, 3]);
+        let Some(RecoveryConfig::V2(recovery)) = loaded.recovery else {
+            panic!("v2 recovery config did not round-trip as v2");
+        };
+        assert_eq!(recovery.version, 2);
+        assert_eq!(recovery.vault_id, VaultId([1; 16]));
+        assert_eq!(recovery.salt, vec![2; 32]);
+        assert_eq!(recovery.nonce, vec![3; 24]);
+        assert_eq!(recovery.wrapped_dek, vec![4; 48]);
+    }
+
+    #[test]
+    fn legacy_recovery_deserializes_as_unsupported() {
+        let json = r#"{
+            "recovery": {
+                "question_index": 1,
+                "answer_hash": [1, 2, 3],
+                "answer_salt": [4, 5, 6],
+                "master_key_blob": [7, 8, 9],
+                "master_key_blob_nonce": [10, 11, 12],
+                "master_key_blob_salt": [13, 14, 15]
+            }
+        }"#;
+
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(matches!(config.recovery, Some(RecoveryConfig::Legacy(_))));
+    }
+
+    #[test]
+    fn mixed_v2_and_legacy_recovery_object_is_rejected() {
+        let json = r#"{
+            "recovery": {
+                "version": 2,
+                "vault_id": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                "salt": [2, 2],
+                "nonce": [3, 3],
+                "wrapped_dek": [4, 4],
+                "question_index": 1,
+                "answer_hash": [5],
+                "answer_salt": [6],
+                "master_key_blob": [7],
+                "master_key_blob_nonce": [8],
+                "master_key_blob_salt": [9]
+            }
+        }"#;
+
+        assert!(serde_json::from_str::<Config>(json).is_err());
+    }
+
+    #[test]
+    fn active_v2_recovery_requires_matching_vault_and_valid_structure() {
+        let vault_id = VaultId([0x61; 16]);
+        assert!(!Config::default().has_active_recovery_for(vault_id));
+        let legacy: Config = serde_json::from_str(
+            r#"{
+                "recovery": {
+                    "question_index": 1,
+                    "answer_hash": [1],
+                    "answer_salt": [2],
+                    "master_key_blob": [3],
+                    "master_key_blob_nonce": [4],
+                    "master_key_blob_salt": [5]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(!legacy.has_active_recovery_for(vault_id));
+
+        let valid = RecoveryConfigV2 {
+            version: 2,
+            vault_id,
+            salt: vec![0x62; 32],
+            nonce: vec![0x63; 24],
+            wrapped_dek: vec![0x64; 48],
+        };
+        let config = Config {
+            recovery: Some(RecoveryConfig::V2(valid.clone())),
+            ..Config::default()
+        };
+
+        assert!(config.has_active_recovery_for(vault_id));
+        assert!(!config.has_active_recovery_for(VaultId([0x65; 16])));
+
+        for invalid in [
+            RecoveryConfigV2 {
+                version: 1,
+                ..valid.clone()
+            },
+            RecoveryConfigV2 {
+                salt: vec![0; 31],
+                ..valid.clone()
+            },
+            RecoveryConfigV2 {
+                nonce: vec![0; 23],
+                ..valid.clone()
+            },
+            RecoveryConfigV2 {
+                wrapped_dek: vec![0; 47],
+                ..valid
+            },
+        ] {
+            let config = Config {
+                recovery: Some(RecoveryConfig::V2(invalid)),
+                ..Config::default()
+            };
+            assert!(!config.has_active_recovery_for(vault_id));
+        }
     }
 }

@@ -71,9 +71,7 @@ fn check_for_updates() -> Result<UpdateStatus, reqwest::Error> {
 }
 
 fn normalize_version(version: &str) -> &str {
-    version
-        .trim()
-        .trim_start_matches(|ch: char| ch == 'v' || ch == 'V')
+    version.trim().trim_start_matches(['v', 'V'])
 }
 
 fn parse_version_parts(version: &str) -> Option<Vec<u64>> {

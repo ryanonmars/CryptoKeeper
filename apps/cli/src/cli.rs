@@ -52,7 +52,7 @@ pub enum Commands {
         name: String,
     },
 
-    /// Copy a secret to the clipboard (auto-clears after 10 seconds)
+    /// Copy a secret to the clipboard (auto-clears after the configured timeout)
     Copy {
         /// Name or index number of the entry
         name: String,
@@ -79,7 +79,7 @@ pub enum Commands {
     /// Change the master password
     Passwd,
 
-    /// Recover vault access using your recovery question
+    /// Recover vault access using your 24-word recovery phrase
     Recover,
 
     /// Update TermKey via Homebrew or show the latest release page

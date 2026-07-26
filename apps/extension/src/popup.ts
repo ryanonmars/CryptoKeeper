@@ -1,7 +1,5 @@
-declare const chrome: any;
-
 import type {
-  NativeHostSiteMatch,
+  PopupSiteMatch,
   PopupCapturedLoginResponse,
   PopupCapturedLoginStepResponse,
   PopupFillResultResponse,
@@ -458,13 +456,6 @@ document.body.innerHTML = `
           placeholder="Username (optional)"
           autocomplete="username"
         />
-        <input
-          id="save-master-password"
-          class="password-input"
-          type="password"
-          placeholder="Enter your master password"
-          autocomplete="current-password"
-        />
         <label class="checkbox-row">
           <input id="save-use-secondary-password" type="checkbox" />
           <span>Protect this login with a secondary password</span>
@@ -525,6 +516,7 @@ document.body.innerHTML = `
       <p id="password-panel-hint" class="hint">Your password is only used for this fill request.</p>
     </section>
 
+    <p id="recovery-notice" class="message" data-tone="error" hidden></p>
     <p id="native-host-status" class="message">Checking TermKey status...</p>
   </main>
 `;
@@ -544,8 +536,6 @@ const saveEntryNameInputEl =
   document.querySelector<HTMLInputElement>("#save-entry-name");
 const saveUsernameInputEl =
   document.querySelector<HTMLInputElement>("#save-username");
-const saveMasterPasswordInputEl =
-  document.querySelector<HTMLInputElement>("#save-master-password");
 const saveUseSecondaryPasswordInputEl =
   document.querySelector<HTMLInputElement>("#save-use-secondary-password");
 const saveSecondaryPasswordGroupEl =
@@ -568,6 +558,8 @@ const passwordInput =
 const secondaryPasswordInputEl =
   document.querySelector<HTMLInputElement>("#secondary-password");
 const statusEl = document.querySelector<HTMLParagraphElement>("#native-host-status");
+const recoveryNoticeEl =
+  document.querySelector<HTMLParagraphElement>("#recovery-notice");
 const siteHostnameEl =
   document.querySelector<HTMLSpanElement>("#site-hostname");
 const siteSummaryEl =
@@ -593,7 +585,6 @@ if (
   !saveSectionEl ||
   !saveEntryNameInputEl ||
   !saveUsernameInputEl ||
-  !saveMasterPasswordInputEl ||
   !saveUseSecondaryPasswordInputEl ||
   !saveSecondaryPasswordGroupEl ||
   !saveSecondaryPasswordInputEl ||
@@ -606,6 +597,7 @@ if (
   !passwordInput ||
   !secondaryPasswordInputEl ||
   !statusEl ||
+  !recoveryNoticeEl ||
   !siteHostnameEl ||
   !siteSummaryEl ||
   !matchPickerEl ||
@@ -629,7 +621,6 @@ const fillButton = fillBestMatchButton;
 const saveSection = saveSectionEl;
 const saveEntryNameInput = saveEntryNameInputEl;
 const saveUsernameInput = saveUsernameInputEl;
-const saveMasterPasswordInput = saveMasterPasswordInputEl;
 const saveUseSecondaryPasswordInput = saveUseSecondaryPasswordInputEl;
 const saveSecondaryPasswordGroup = saveSecondaryPasswordGroupEl;
 const saveSecondaryPasswordInput = saveSecondaryPasswordInputEl;
@@ -642,6 +633,7 @@ const unlockVaultButton = unlockButton;
 const masterPasswordInput = passwordInput;
 const secondaryPasswordInput = secondaryPasswordInputEl;
 const statusMessage = statusEl;
+const recoveryNotice = recoveryNoticeEl;
 const siteHostname = siteHostnameEl;
 const siteSummary = siteSummaryEl;
 const matchPicker = matchPickerEl;
@@ -651,8 +643,8 @@ const passwordPanelLabel = passwordPanelLabelEl;
 const passwordPanelHint = passwordPanelHintEl;
 const secondaryPasswordGroup = secondaryPasswordGroupEl;
 
-let currentSiteMatches: NativeHostSiteMatch[] = [];
-let pendingFillMatch: NativeHostSiteMatch | null = null;
+let currentSiteMatches: PopupSiteMatch[] = [];
+let pendingFillMatch: PopupSiteMatch | null = null;
 let pendingSaveCandidate: PopupCapturedLoginResponse["candidate"] | null = null;
 let fillingEntryId: string | null = null;
 let captureInFlight = false;
@@ -660,6 +652,7 @@ let generationInFlight = false;
 let saveInFlight = false;
 let backendConnected = false;
 let vaultExists = true;
+let vaultLocked = true;
 let hasSupportedPage = true;
 let pageContext: PopupPageContextResponse["context"] = {
   intent: "unknown",
@@ -713,15 +706,16 @@ function primeCurrentSite() {
       try {
         const parsedUrl = new URL(url);
         if (
-          parsedUrl.protocol !== "http:" &&
-          parsedUrl.protocol !== "https:"
+          parsedUrl.protocol !== "https:" ||
+          parsedUrl.username !== "" ||
+          parsedUrl.password !== ""
         ) {
           setSiteVisibility(false);
           return;
         }
 
         setSiteVisibility(true);
-        renderSite(parsedUrl.hostname, "Checking for a saved login...");
+        renderSite(parsedUrl.origin, "Checking for a saved login...");
       } catch {
         setSiteVisibility(false);
       }
@@ -792,7 +786,6 @@ function stageSaveCandidate(
     candidate.username
   );
   saveUsernameInput.value = candidate.username ?? "";
-  saveMasterPasswordInput.value = "";
   saveUseSecondaryPasswordInput.checked = false;
   saveSecondaryPasswordInput.value = "";
   saveSecondaryPasswordConfirmInput.value = "";
@@ -864,7 +857,6 @@ function clearPendingSave() {
   pendingSaveCandidate = null;
   saveEntryNameInput.value = "";
   saveUsernameInput.value = "";
-  saveMasterPasswordInput.value = "";
   saveUseSecondaryPasswordInput.checked = false;
   saveSecondaryPasswordInput.value = "";
   saveSecondaryPasswordConfirmInput.value = "";
@@ -876,31 +868,37 @@ function clearPendingSave() {
 
 function renderPasswordPrompt() {
   const activeMatch = pendingFillMatch;
-  unlockSection.hidden = activeMatch === null;
+  const needsSecondaryPassword = activeMatch?.hasSecondaryPassword === true;
+  unlockSection.hidden = !vaultLocked && !needsSecondaryPassword;
 
-  if (!activeMatch) {
-    passwordPanelLabel.textContent = "Master password";
-    passwordPanelHint.textContent = "Your password is only used for this fill request.";
+  if (unlockSection.hidden) {
+    masterPasswordInput.hidden = false;
     masterPasswordInput.disabled = false;
     masterPasswordInput.value = "";
     secondaryPasswordInput.disabled = false;
     secondaryPasswordInput.value = "";
     secondaryPasswordGroup.hidden = true;
     unlockVaultButton.disabled = true;
-    unlockVaultButton.textContent = "Authenticate";
+    unlockVaultButton.textContent = "Unlock";
     return;
   }
 
-  passwordPanelLabel.textContent = `Master password for ${activeMatch.name}`;
-  passwordPanelHint.textContent = activeMatch.hasSecondaryPassword
-    ? `Used only for this fill request on ${siteDetails.hostname}. This entry also requires its secondary password.`
-    : `Used only for this fill request on ${siteDetails.hostname}.`;
-  masterPasswordInput.disabled = fillingEntryId !== null;
+  passwordPanelLabel.textContent = vaultLocked
+    ? "Unlock TermKey vault"
+    : `Secondary password for ${activeMatch?.name ?? "this login"}`;
+  passwordPanelHint.textContent = vaultLocked
+    ? "Unlock is retained by the native host for this extension session."
+    : `Required to fill ${activeMatch?.name ?? "this login"} on ${siteDetails.hostname}.`;
+  masterPasswordInput.hidden = !vaultLocked;
+  masterPasswordInput.disabled = !vaultLocked || fillingEntryId !== null;
   secondaryPasswordInput.disabled = fillingEntryId !== null;
-  secondaryPasswordGroup.hidden = !activeMatch.hasSecondaryPassword;
+  secondaryPasswordGroup.hidden = !needsSecondaryPassword;
   unlockVaultButton.disabled = !backendConnected || fillingEntryId !== null;
-  unlockVaultButton.textContent =
-    fillingEntryId === activeMatch.id ? "Authenticating..." : "Authenticate";
+  unlockVaultButton.textContent = fillingEntryId
+    ? "Working..."
+    : vaultLocked
+      ? "Unlock"
+      : "Fill";
 }
 
 function renderSavePrompt() {
@@ -916,10 +914,13 @@ function renderSavePrompt() {
   }
 
   const disabled =
-    !backendConnected || saveInFlight || captureInFlight || generationInFlight;
+    !backendConnected ||
+    vaultLocked ||
+    saveInFlight ||
+    captureInFlight ||
+    generationInFlight;
   saveEntryNameInput.disabled = saveInFlight;
   saveUsernameInput.disabled = saveInFlight;
-  saveMasterPasswordInput.disabled = saveInFlight;
   saveUseSecondaryPasswordInput.disabled = saveInFlight;
   saveSecondaryPasswordInput.disabled = saveInFlight;
   saveSecondaryPasswordConfirmInput.disabled = saveInFlight;
@@ -928,7 +929,7 @@ function renderSavePrompt() {
   submitSaveButton.textContent = saveInFlight ? "Saving..." : "Save login";
 }
 
-function describeMatches(matches: NativeHostSiteMatch[]) {
+function describeMatches(matches: PopupSiteMatch[]) {
   if (matches.length === 0) {
     return "No saved login found for this site.";
   }
@@ -947,17 +948,13 @@ function describeMatches(matches: NativeHostSiteMatch[]) {
   return `${matches.length} saved logins found. Choose one to fill.`;
 }
 
-function formatMatchDetail(match: NativeHostSiteMatch) {
+function formatMatchDetail(match: PopupSiteMatch) {
   const suffix = match.hasSecondaryPassword
     ? " • Secondary password required"
     : "";
 
   if (match.username) {
     return `${match.username}${suffix}`;
-  }
-
-  if (match.url) {
-    return `${match.url}${suffix}`;
   }
 
   return suffix ? `No username saved${suffix}` : "No username saved";
@@ -1026,7 +1023,7 @@ function renderMatchPicker() {
   matchList.append(fragment);
 }
 
-function setCurrentSiteMatches(matches: NativeHostSiteMatch[]) {
+function setCurrentSiteMatches(matches: PopupSiteMatch[]) {
   currentSiteMatches = matches;
   if (
     pendingFillMatch &&
@@ -1040,7 +1037,7 @@ function setCurrentSiteMatches(matches: NativeHostSiteMatch[]) {
   updateFillButtonState();
 }
 
-function beginFill(match: NativeHostSiteMatch) {
+function beginFill(match: PopupSiteMatch) {
   if (!backendConnected) {
     renderMessage("Reconnect the extension backend before autofill.", "error");
     return;
@@ -1050,9 +1047,18 @@ function beginFill(match: NativeHostSiteMatch) {
   pendingFillMatch = match;
   renderMatchPicker();
   renderPasswordPrompt();
-  renderMessage(`Enter your master password to fill ${match.name}.`);
-  masterPasswordInput.focus();
-  masterPasswordInput.select();
+  renderMessage(
+    match.hasSecondaryPassword
+      ? `Enter the secondary password to fill ${match.name}.`
+      : `Filling ${match.name}...`
+  );
+  if (!vaultLocked && !match.hasSecondaryPassword) {
+    submitPendingFill();
+    return;
+  }
+  const input = vaultLocked ? masterPasswordInput : secondaryPasswordInput;
+  input.focus();
+  input.select();
 }
 
 function beginSave() {
@@ -1176,7 +1182,7 @@ function beginGeneratedPasswordFlow() {
         renderMessage(
           `${formatGeneratedPasswordMessage(
             generated.filledPasswordFields
-          )} Enter your master password to save it.`,
+          )} ${vaultLocked ? "Unlock your vault, then save it." : "It is ready to save."}`,
           "success"
         );
         saveEntryNameInput.focus();
@@ -1195,20 +1201,61 @@ function beginGeneratedPasswordFlow() {
 }
 
 function submitPendingFill() {
-  if (!pendingFillMatch) {
-    renderMessage("Choose a saved login before entering your password.", "error");
-    return;
-  }
-
   if (!backendConnected) {
-    renderMessage("Reconnect the extension backend before autofill.", "error");
+    renderMessage("Reconnect the extension backend first.", "error");
     return;
   }
 
-  const password = masterPasswordInput.value;
-  if (!password) {
-    renderMessage("Enter your master password to fill this login.", "error");
-    masterPasswordInput.focus();
+  if (vaultLocked) {
+    const password = masterPasswordInput.value;
+    if (!password) {
+      renderMessage("Enter your master password to unlock TermKey.", "error");
+      masterPasswordInput.focus();
+      return;
+    }
+
+    unlockVaultButton.disabled = true;
+    unlockVaultButton.textContent = "Unlocking...";
+    sendMessage(
+      {
+        type: "termkey.nativeHost.unlock",
+        password,
+      },
+      (response) => {
+        if (!response.ok) {
+          renderPasswordPrompt();
+          renderMessage(`Unlock failed: ${response.error}`, "error");
+          masterPasswordInput.focus();
+          masterPasswordInput.select();
+          return;
+        }
+        if (response.response.type !== "unlock") {
+          renderPasswordPrompt();
+          renderMessage(
+            "Native host returned the wrong response type for unlock.",
+            "error"
+          );
+          return;
+        }
+        vaultLocked = false;
+        masterPasswordInput.value = "";
+        renderPasswordPrompt();
+        renderSavePrompt();
+        updateFillButtonState();
+        if (response.response.recoveryNotice) {
+          recoveryNotice.hidden = false;
+          recoveryNotice.textContent = response.response.recoveryNotice;
+        }
+        renderMessage("Vault unlocked.", "success");
+        inspectPageContext();
+        findSiteMatches();
+      }
+    );
+    return;
+  }
+
+  if (!pendingFillMatch) {
+    renderMessage("Choose a saved login before filling.", "error");
     return;
   }
 
@@ -1230,8 +1277,8 @@ function submitPendingFill() {
   sendMessage(
     {
       type: "termkey.autofill.fillSelectedMatch",
+      grantId: pendingFillMatch.grantId,
       entryId: pendingFillMatch.id,
-      password,
       secondaryPassword: secondaryPassword || undefined,
     },
     (response) => {
@@ -1245,9 +1292,6 @@ function submitPendingFill() {
         if (pendingFillMatch?.hasSecondaryPassword) {
           secondaryPasswordInput.focus();
           secondaryPasswordInput.select();
-        } else {
-          masterPasswordInput.focus();
-          masterPasswordInput.select();
         }
         return;
       }
@@ -1264,7 +1308,6 @@ function submitPendingFill() {
       }
 
       pendingFillMatch = null;
-      masterPasswordInput.value = "";
       secondaryPasswordInput.value = "";
       renderMatchPicker();
       renderPasswordPrompt();
@@ -1294,10 +1337,9 @@ function submitPendingSave() {
     return;
   }
 
-  const masterPassword = saveMasterPasswordInput.value;
-  if (!masterPassword) {
-    renderMessage("Enter your master password to save this login.", "error");
-    saveMasterPasswordInput.focus();
+  if (vaultLocked) {
+    renderMessage("Unlock your vault before saving this login.", "error");
+    masterPasswordInput.focus();
     return;
   }
 
@@ -1335,7 +1377,6 @@ function submitPendingSave() {
       username: saveUsernameInput.value.trim() || undefined,
       password: pendingSaveCandidate.password,
       url: pendingSaveCandidate.url,
-      masterPassword,
       secondaryPassword: secondaryPassword || undefined,
     },
     (response) => {
@@ -1483,7 +1524,7 @@ function findSiteMatches() {
     setCurrentSiteMatches(response.response.matches);
     setSiteVisibility(true);
     renderSite(
-      response.response.siteHostname,
+      response.response.siteOrigin,
       describeMatches(response.response.matches)
     );
 
@@ -1535,6 +1576,7 @@ function refreshStatus() {
 
     setBackendStatus(true, "Connected");
     vaultExists = response.response.vaultExists;
+    vaultLocked = response.response.locked;
 
     if (!vaultExists) {
       pendingFillMatch = null;
@@ -1542,6 +1584,15 @@ function refreshStatus() {
       renderPasswordPrompt();
       resetMatches("Create your vault to save logins for this site.");
       renderMessage("Vault not found. Run `termkey init` first.", "error");
+      return;
+    }
+
+    renderPasswordPrompt();
+    renderSavePrompt();
+    if (vaultLocked) {
+      resetMatches("Unlock your vault to check saved logins.");
+      renderMessage("Unlock TermKey to use saved logins.");
+      inspectPageContext();
       return;
     }
 
@@ -1588,13 +1639,6 @@ saveEntryNameInput.addEventListener("keydown", (event) => {
 });
 
 saveUsernameInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    submitPendingSave();
-  }
-});
-
-saveMasterPasswordInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
     submitPendingSave();

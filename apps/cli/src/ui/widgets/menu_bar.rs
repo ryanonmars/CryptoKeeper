@@ -15,6 +15,12 @@ fn item_width(key: &str, label: &str) -> usize {
     1 + "[".width() + key.width() + "]".width() + 1 + label.width() + 1
 }
 
+impl Default for MenuBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MenuBar {
     pub fn new() -> Self {
         Self {

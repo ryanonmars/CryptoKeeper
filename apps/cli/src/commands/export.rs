@@ -7,11 +7,11 @@ use crate::error::{Result, TermKeyError};
 use crate::ui::borders::print_box;
 use crate::ui::theme::heading;
 use crate::vault::model::VaultData;
-use crate::vault::storage;
+use crate::vault::{session::VaultSession, storage};
 
 pub fn run(file: &str) -> Result<()> {
-    let (vault, _password) = storage::prompt_and_unlock()?;
-    run_with_vault(&vault, file)
+    let session = VaultSession::prompt_and_open()?.session;
+    run_with_vault(&session.vault, file)
 }
 
 /// Core export logic without prompt_and_unlock (for REPL mode).
@@ -56,7 +56,7 @@ pub fn run_with_vault(vault: &VaultData, directory: &str) -> Result<()> {
     let file_path = dir_path.join("backup.ck");
 
     eprintln!("Encrypting backup...");
-    storage::write_backup(&vault, export_password.as_bytes(), &file_path)?;
+    storage::write_backup(vault, export_password.as_bytes(), &file_path)?;
 
     let lines = vec![
         format!(

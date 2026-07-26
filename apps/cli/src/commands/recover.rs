@@ -1,120 +1,25 @@
 use crate::config;
-use crate::config::model::RECOVERY_QUESTIONS;
-use crate::crypto::{kdf, recovery};
 use crate::error::{Result, TermKeyError};
-use crate::ui::borders::{print_error, print_success};
-use crate::ui::theme::heading;
-use crate::vault::storage;
+use crate::vault::{session::VaultSession, storage};
 use zeroize::Zeroizing;
-
-const MAX_ATTEMPTS: u32 = 5;
 
 pub fn run() -> Result<()> {
     let cfg = config::load_config()?;
-    let recovery = cfg
+    let recovery = match cfg
         .recovery
         .as_ref()
-        .ok_or(TermKeyError::RecoveryNotConfigured)?;
-
-    let question = RECOVERY_QUESTIONS
-        .get(recovery.question_index as usize)
-        .ok_or_else(|| TermKeyError::RecoveryFailed("Invalid question index".into()))?;
-
-    println!();
-    println!("  {}", heading("Password Recovery"));
-    println!();
-    println!("  Recovery question:");
-    println!("  {}", question);
-    println!();
-
-    let mut attempts = 0;
-    let master_key = loop {
-        attempts += 1;
-        if attempts > MAX_ATTEMPTS {
-            return Err(TermKeyError::RecoveryFailed(
-                "Too many failed attempts.".into(),
-            ));
-        }
-
-        let answer =
-            Zeroizing::new(rpassword::prompt_password("Your answer: ").map_err(TermKeyError::Io)?);
-
-        let normalized = recovery::normalize_answer(&answer);
-        if !recovery::verify_answer(&normalized, &recovery.answer_salt, &recovery.answer_hash)? {
-            print_error("Incorrect answer. Try again.");
-            continue;
-        }
-
-        // Decrypt master key blob
-        match recovery::decrypt_recovery_blob(
-            &recovery.master_key_blob,
-            &recovery.master_key_blob_nonce,
-            &recovery.master_key_blob_salt,
-            &normalized,
-        ) {
-            Ok(key) => break key,
-            Err(_) => {
-                print_error("Failed to recover master key.");
-                continue;
-            }
-        }
+        .ok_or(TermKeyError::RecoveryNotConfigured)?
+    {
+        config::RecoveryConfig::Legacy(_) => return Err(TermKeyError::LegacyRecoveryUnsupported),
+        config::RecoveryConfig::V2(recovery) => recovery,
     };
 
-    // Verify we can decrypt the vault with the recovered key
-    let vault_path = storage::vault_path();
-    let data = std::fs::read(&vault_path)?;
-    let vault = storage::read_vault_with_key(&master_key, &data)?;
-
-    println!();
-    println!("  Recovery successful! Set a new master password.");
-    println!();
-
+    let phrase = Zeroizing::new(
+        rpassword::prompt_password("24-word recovery phrase: ").map_err(TermKeyError::Io)?,
+    );
+    let dek = crate::crypto::recovery::recover_dek(recovery, recovery.vault_id, &phrase)?;
     let new_password = crate::commands::passwd::prompt_new_password()?;
-
-    // Re-encrypt vault with new password
-    storage::save_vault(&vault, new_password.as_bytes())?;
-
-    // Update recovery config with new master key
-    let mut cfg = cfg;
-    if let Some(ref recovery_cfg) = cfg.recovery {
-        let normalized_answer = {
-            let answer = Zeroizing::new(
-                rpassword::prompt_password("Re-enter recovery answer to update recovery: ")
-                    .map_err(TermKeyError::Io)?,
-            );
-            recovery::normalize_answer(&answer)
-        };
-
-        // Verify the re-entered answer matches the stored hash before using it.
-        if !recovery::verify_answer(
-            &normalized_answer,
-            &recovery_cfg.answer_salt,
-            &recovery_cfg.answer_hash,
-        )? {
-            return Err(TermKeyError::RecoveryFailed(
-                "Recovery answer does not match stored answer. Recovery config not updated.".into(),
-            ));
-        }
-
-        let (blob, nonce, blob_salt) =
-            recovery::create_recovery_blob(&master_key, &normalized_answer)?;
-
-        // Re-hash the answer with a fresh salt so answer_hash/answer_salt stay
-        // in sync with the new blob.
-        let new_answer_salt = kdf::generate_salt().to_vec();
-        let new_answer_hash = recovery::hash_answer(&normalized_answer, &new_answer_salt)?;
-
-        cfg.recovery = Some(config::RecoveryConfig {
-            question_index: recovery_cfg.question_index,
-            answer_hash: new_answer_hash,
-            answer_salt: new_answer_salt,
-            master_key_blob: blob,
-            master_key_blob_nonce: nonce,
-            master_key_blob_salt: blob_salt,
-        });
-        config::save_config(&cfg)?;
-    }
-
-    print_success("Password changed and recovery updated successfully.");
+    VaultSession::recover(dek, recovery.vault_id, new_password, storage::vault_path())?;
+    crate::ui::borders::print_success("Vault recovered. Your recovery phrase remains active.");
     Ok(())
 }

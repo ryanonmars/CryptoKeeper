@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub enum ViewPasswordAction {
     Continue,
@@ -15,7 +15,7 @@ pub enum ViewPasswordAction {
 }
 
 pub struct ViewPasswordScreen {
-    buffer: String,
+    buffer: Zeroizing<String>,
     title: String,
     error_message: Option<String>,
 }
@@ -23,7 +23,7 @@ pub struct ViewPasswordScreen {
 impl ViewPasswordScreen {
     pub fn new(title: &str) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: Zeroizing::new(String::new()),
             title: title.to_string(),
             error_message: None,
         }
@@ -31,7 +31,7 @@ impl ViewPasswordScreen {
 
     pub fn set_error(&mut self, msg: &str) {
         self.error_message = Some(msg.to_string());
-        self.buffer.clear();
+        self.buffer.zeroize();
     }
 
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> ViewPasswordAction {
@@ -54,7 +54,7 @@ impl ViewPasswordScreen {
                 if self.buffer.is_empty() {
                     ViewPasswordAction::Continue
                 } else {
-                    ViewPasswordAction::Submit(Zeroizing::new(self.buffer.clone()))
+                    ViewPasswordAction::Submit(std::mem::take(&mut self.buffer))
                 }
             }
             KeyCode::Esc => ViewPasswordAction::Cancel,
@@ -115,7 +115,6 @@ impl ViewPasswordScreen {
 
 impl Drop for ViewPasswordScreen {
     fn drop(&mut self) {
-        use zeroize::Zeroize;
         self.buffer.zeroize();
     }
 }

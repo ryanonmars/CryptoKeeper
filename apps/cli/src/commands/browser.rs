@@ -1,13 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-
-#[cfg(windows)]
 use std::process::Command;
 
 use serde_json::Value;
 
 use crate::cli::BrowserCommands;
 use crate::error::{Result, TermKeyError};
+use crate::native::site::{NATIVE_CAPABILITIES, NATIVE_PROTOCOL_VERSION};
 use crate::ui::borders::print_success;
 
 const CHROME_EXTENSION_ID: &str = "fpnkkpgaogkddgangnphpgbbfdcpfjah";
@@ -56,7 +55,12 @@ fn print_status() -> Result<()> {
     let native_host_binary = locate_native_host_binary().ok();
     let managed_extension_dir = managed_extension_dir();
     let manifest_path = native_host_manifest_path()?;
-    let manifest_status = native_host_manifest_status(&manifest_path)?;
+    let manifest_status =
+        native_host_manifest_status(&manifest_path, native_host_binary.as_deref())?;
+    let protocol_status = native_host_binary
+        .as_deref()
+        .map(native_host_protocol_status)
+        .unwrap_or_else(|| "missing; run `termkey browser repair`".to_string());
 
     println!();
     println!("  TermKey Browser Integration");
@@ -74,6 +78,7 @@ fn print_status() -> Result<()> {
         "  Native host binary: {}",
         describe_optional_path(native_host_binary.as_deref())
     );
+    println!("  Native host protocol: {}", protocol_status);
     println!(
         "  Chrome native host manifest: {} ({})",
         manifest_path.display(),
@@ -84,7 +89,9 @@ fn print_status() -> Result<()> {
     println!("  Load unpacked from {}", managed_extension_dir.display());
     println!("  after enabling Developer mode on chrome://extensions.");
     println!();
-    println!("  Use `termkey browser install` if any of the paths above are missing or stale.");
+    println!(
+        "  Use `termkey browser repair` if any path or protocol metadata is missing or stale."
+    );
 
     Ok(())
 }
@@ -108,9 +115,7 @@ fn managed_extension_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = current_user_home_dir() {
-            return home
-                .join("Applications")
-                .join("TermKey Browser Extension");
+            return home.join("Applications").join("TermKey Browser Extension");
         }
     }
 
@@ -222,7 +227,13 @@ fn native_host_binary_candidates(current_exe: &Path) -> Vec<PathBuf> {
 
             for prefix in install_prefix_candidates(exe_dir) {
                 candidates.push(prefix.join("libexec").join(binary_name));
-                candidates.push(prefix.join("share").join("termkey").join("bin").join(binary_name));
+                candidates.push(
+                    prefix
+                        .join("share")
+                        .join("termkey")
+                        .join("bin")
+                        .join(binary_name),
+                );
             }
 
             if let Some(repo_root) = repo_root_from_exe(exe_dir) {
@@ -310,7 +321,7 @@ fn macos_resources_dir(current_exe: &Path) -> Option<PathBuf> {
             return Some(resources_dir.to_path_buf());
         }
 
-        return None;
+        None
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -439,13 +450,19 @@ fn local_app_data_dir() -> Option<PathBuf> {
     std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
 }
 
-fn native_host_manifest_status(manifest_path: &Path) -> Result<String> {
+fn native_host_manifest_status(
+    manifest_path: &Path,
+    expected_binary: Option<&Path>,
+) -> Result<String> {
     if !manifest_path.exists() {
         return Ok("missing".to_string());
     }
 
     let contents = fs::read_to_string(manifest_path)?;
-    let parsed: Value = serde_json::from_str(&contents)?;
+    let parsed: Value = match serde_json::from_str(&contents) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok("invalid manifest; run `termkey browser repair`".to_string()),
+    };
     let expected_origin = format!("chrome-extension://{}/", CHROME_EXTENSION_ID);
     let allowed_origins = parsed
         .get("allowed_origins")
@@ -454,7 +471,10 @@ fn native_host_manifest_status(manifest_path: &Path) -> Result<String> {
             TermKeyError::ConfigError(
                 "Chrome native host manifest is missing allowed_origins.".into(),
             )
-        })?;
+        });
+    let Ok(allowed_origins) = allowed_origins else {
+        return Ok("missing extension origin; run `termkey browser repair`".to_string());
+    };
 
     let has_expected_origin = allowed_origins
         .iter()
@@ -462,7 +482,7 @@ fn native_host_manifest_status(manifest_path: &Path) -> Result<String> {
         .any(|origin| origin == expected_origin);
 
     if !has_expected_origin {
-        return Ok("stale extension ID".to_string());
+        return Ok("stale extension ID; run `termkey browser repair`".to_string());
     }
 
     let configured_path = parsed
@@ -470,14 +490,56 @@ fn native_host_manifest_status(manifest_path: &Path) -> Result<String> {
         .and_then(Value::as_str)
         .unwrap_or_default();
     if configured_path.is_empty() {
-        return Ok("stale binary path".to_string());
+        return Ok("stale binary path; run `termkey browser repair`".to_string());
     }
 
     if !Path::new(configured_path).exists() {
-        return Ok("missing binary".to_string());
+        return Ok("missing binary; run `termkey browser repair`".to_string());
+    }
+
+    if let Some(expected_binary) = expected_binary {
+        let configured = fs::canonicalize(configured_path).ok();
+        let expected = fs::canonicalize(expected_binary).ok();
+        if configured.is_none() || configured != expected {
+            return Ok("stale native host path; run `termkey browser repair`".to_string());
+        }
     }
 
     Ok("ready".to_string())
+}
+
+fn native_host_protocol_status(binary: &Path) -> String {
+    let output = match Command::new(binary).arg("--protocol-info").output() {
+        Ok(output) if output.status.success() => output,
+        _ => return "unavailable; run `termkey browser repair`".to_string(),
+    };
+    parse_protocol_info(&output.stdout)
+}
+
+fn parse_protocol_info(bytes: &[u8]) -> String {
+    let parsed: Value = match serde_json::from_slice(bytes) {
+        Ok(parsed) => parsed,
+        Err(_) => return "invalid; run `termkey browser repair`".to_string(),
+    };
+    if parsed.get("app").and_then(Value::as_str) != Some("termkey")
+        || parsed.get("version").and_then(Value::as_str) != Some(env!("CARGO_PKG_VERSION"))
+        || parsed.get("protocolVersion").and_then(Value::as_u64)
+            != Some(u64::from(NATIVE_PROTOCOL_VERSION))
+    {
+        return "version/protocol mismatch; run `termkey browser repair`".to_string();
+    }
+    let capabilities = parsed.get("capabilities").and_then(Value::as_array);
+    if !NATIVE_CAPABILITIES.iter().all(|required| {
+        capabilities.is_some_and(|items| items.iter().any(|item| item.as_str() == Some(required)))
+    }) {
+        return "missing capabilities; run `termkey browser repair`".to_string();
+    }
+
+    format!(
+        "ready (host {}, protocol {})",
+        env!("CARGO_PKG_VERSION"),
+        NATIVE_PROTOCOL_VERSION
+    )
 }
 
 #[cfg(unix)]
@@ -567,5 +629,75 @@ mod tests {
         assert!(target.join("manifest.json").exists());
         assert!(target.join("dist").join("background.js").exists());
         assert!(!target.join("old.txt").exists());
+    }
+
+    #[test]
+    fn manifest_status_requires_the_current_canonical_binary_path() {
+        let dir = TempDir::new().unwrap();
+        let binary = dir.path().join(native_host_binary_name());
+        let manifest = dir.path().join("native-host.json");
+        fs::write(&binary, "host").unwrap();
+        let ready = serde_json::json!({
+            "path": binary,
+            "allowed_origins": [format!("chrome-extension://{CHROME_EXTENSION_ID}/")],
+        });
+        fs::write(&manifest, serde_json::to_vec(&ready).unwrap()).unwrap();
+
+        assert_eq!(
+            native_host_manifest_status(&manifest, Some(&binary)).unwrap(),
+            "ready"
+        );
+
+        let other_binary = dir.path().join("other-native-host");
+        fs::write(&other_binary, "other").unwrap();
+        let stale = native_host_manifest_status(&manifest, Some(&other_binary)).unwrap();
+        assert!(stale.contains("stale native host path"));
+        assert!(stale.contains("browser repair"));
+    }
+
+    #[test]
+    fn manifest_status_reports_malformed_metadata_as_repairable() {
+        let dir = TempDir::new().unwrap();
+        let manifest = dir.path().join("native-host.json");
+        fs::write(&manifest, "{not-json").unwrap();
+
+        let status = native_host_manifest_status(&manifest, None).unwrap();
+        assert!(status.contains("invalid manifest"));
+        assert!(status.contains("browser repair"));
+    }
+
+    #[test]
+    fn protocol_info_parser_rejects_version_protocol_and_capability_skew() {
+        let ready = serde_json::json!({
+            "app": "termkey",
+            "version": env!("CARGO_PKG_VERSION"),
+            "protocolVersion": NATIVE_PROTOCOL_VERSION,
+            "capabilities": NATIVE_CAPABILITIES,
+        });
+        assert!(parse_protocol_info(&serde_json::to_vec(&ready).unwrap()).starts_with("ready"));
+
+        for stale in [
+            serde_json::json!({
+                "app": "termkey",
+                "version": "0.0.1",
+                "protocolVersion": NATIVE_PROTOCOL_VERSION,
+                "capabilities": NATIVE_CAPABILITIES,
+            }),
+            serde_json::json!({
+                "app": "termkey",
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocolVersion": 1,
+                "capabilities": NATIVE_CAPABILITIES,
+            }),
+            serde_json::json!({
+                "app": "termkey",
+                "version": env!("CARGO_PKG_VERSION"),
+                "protocolVersion": NATIVE_PROTOCOL_VERSION,
+                "capabilities": ["opaque-match-handles"],
+            }),
+        ] {
+            let status = parse_protocol_info(&serde_json::to_vec(&stale).unwrap());
+            assert!(status.contains("browser repair"));
+        }
     }
 }

@@ -1,9 +1,8 @@
-declare const chrome: any;
-
 import { coreReady } from "@termkey/core";
 import type {
   NativeHostRequest,
   NativeHostResponse,
+  NativeHostWireRequest,
   PopupPageIntent,
   PopupToBackgroundMessage,
   PopupToBackgroundResponse,
@@ -11,625 +10,1332 @@ import type {
 
 const NATIVE_HOST_NAME = "com.ryanonmars.termkey";
 const PENDING_SAVE_KEY_PREFIX = "pending-save:";
-let nativePort: any | undefined;
-let currentNativeResponseHandler:
-  | ((response: PopupToBackgroundResponse) => void)
-  | undefined;
-let nativeRequestQueue: Promise<void> = Promise.resolve();
+const MATCH_GRANT_TTL_MS = 30_000;
+const MAX_MATCH_GRANTS = 100;
+export const NATIVE_PROTOCOL_VERSION = 2;
+export const REQUIRED_NATIVE_CAPABILITIES = [
+  "opaque-match-handles",
+  "document-token-binding",
+  "origin-only-save",
+  "bounded-native-output",
+] as const;
+const PROTOCOL_REPAIR_ERROR =
+  "TermKey browser integration is out of date. Run `termkey browser repair`.";
+
+export const NATIVE_REQUEST_TIMEOUT_MS = 10_000;
+
+type NativePort = {
+  onMessage: {
+    addListener(listener: (message: unknown) => void): void;
+  };
+  onDisconnect: {
+    addListener(listener: () => void): void;
+  };
+  postMessage(message: NativeHostWireRequest): void;
+  disconnect(): void;
+};
+
+type NativeQueueEntry = {
+  request: NativeHostRequest;
+  requestId: string;
+  resolve: (response: NativeClientResponse) => void;
+};
+
+type NativeClientResponse =
+  | { ok: true; response: NativeHostResponse }
+  | { ok: false; error: string };
+
+type NativeResponseForRequest<TRequest extends NativeHostRequest> =
+  TRequest["type"] extends "ping"
+    ? Extract<NativeHostResponse, { type: "pong" }>
+    : TRequest["type"] extends "status"
+      ? Extract<NativeHostResponse, { type: "status" }>
+      : TRequest["type"] extends "get_autofill_entry"
+        ? Extract<NativeHostResponse, { type: "autofill_entry" }>
+        : TRequest["type"] extends "find_site_matches"
+          ? Extract<NativeHostResponse, { type: "site_matches" }>
+          : TRequest["type"] extends "generate_password"
+            ? Extract<NativeHostResponse, { type: "generated_password" }>
+            : TRequest["type"] extends "save_password_entry"
+              ? Extract<NativeHostResponse, { type: "save_entry" }>
+              : TRequest["type"] extends "list_entries"
+                ? Extract<NativeHostResponse, { type: "list_entries" }>
+                : Extract<NativeHostResponse, { type: "unlock" }>;
+
+type NativeClientResponseFor<TRequest extends NativeHostRequest> =
+  | { ok: true; response: NativeResponseForRequest<TRequest> }
+  | { ok: false; error: string };
 
 type PendingSaveDraft = {
   username: string;
   url: string;
 };
 
-function isMissingContentScriptError(message: string | undefined) {
-  if (!message) {
+export type MatchGrant = {
+  tabId: number;
+  documentToken: string;
+  origin: string;
+  entryId: string;
+  expiresAt: number;
+};
+
+type MessageSender = {
+  id?: string;
+  url?: string;
+};
+
+type BackgroundChrome = {
+  runtime: {
+    id: string;
+    lastError?: { message?: string };
+    getURL(path?: string): string;
+    connectNative(name: string): NativePort;
+    onMessage?: {
+      addListener(
+        listener: (
+          message: PopupToBackgroundMessage,
+          sender: MessageSender,
+          sendResponse: (response: PopupToBackgroundResponse) => void
+        ) => boolean
+      ): void;
+    };
+  };
+  tabs: {
+    query(query: { active: true; currentWindow: true }): Promise<
+      Array<{ id?: number; url?: string }>
+    >;
+    get(tabId: number): Promise<{ id?: number; url?: string }>;
+    sendMessage(
+      tabId: number,
+      message: unknown,
+      options: { frameId: 0 }
+    ): Promise<unknown>;
+    onRemoved?: {
+      addListener(listener: (tabId: number) => void): void;
+    };
+  };
+  scripting: {
+    executeScript(details: {
+      target: { tabId: number; frameIds: [0] };
+      files: ["dist/content.js"];
+    }): Promise<unknown>;
+  };
+  storage?: {
+    session?: {
+      get(
+        keys: string[],
+        callback: (result: Record<string, unknown>) => void
+      ): void;
+      set(value: Record<string, unknown>, callback: () => void): void;
+      remove(key: string, callback: () => void): void;
+    };
+    local?: {
+      get(
+        keys: string[],
+        callback: (result: Record<string, unknown>) => void
+      ): void;
+      set(value: Record<string, unknown>, callback: () => void): void;
+      remove(key: string, callback: () => void): void;
+    };
+  };
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringOrNull(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+function hasString(value: Record<string, unknown>, key: string) {
+  return typeof value[key] === "string";
+}
+
+function hasCompatibleProtocolInfo(value: Record<string, unknown>) {
+  const capabilities = value.capabilities;
+  return (
+    value.protocolVersion === NATIVE_PROTOCOL_VERSION &&
+    Array.isArray(capabilities) &&
+    capabilities.every((capability) => typeof capability === "string") &&
+    REQUIRED_NATIVE_CAPABILITIES.every((required) =>
+      capabilities.includes(required)
+    )
+  );
+}
+
+function isEntrySummary(value: unknown) {
+  if (!isRecord(value)) {
     return false;
   }
 
   return (
-    message.includes("Receiving end does not exist") ||
-    message.includes("Could not establish connection")
+    hasString(value, "id") &&
+    hasString(value, "name") &&
+    hasString(value, "secretType") &&
+    hasString(value, "network") &&
+    typeof value.hasSecondaryPassword === "boolean" &&
+    isStringOrNull(value.publicAddress) &&
+    isStringOrNull(value.username) &&
+    isStringOrNull(value.url)
   );
 }
 
-function sendMessageToTab<TResponse>(
-  tabId: number,
-  message: unknown
-): Promise<TResponse> {
-  return new Promise<TResponse>((resolve, reject) => {
-    chrome.tabs.sendMessage(tabId, message, (response: TResponse | undefined) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message));
-        return;
-      }
+function isSiteMatch(value: unknown) {
+  if (!isRecord(value)) {
+    return false;
+  }
 
-      resolve(response as TResponse);
-    });
-  });
+  return (
+    hasString(value, "id") &&
+    hasString(value, "name") &&
+    isStringOrNull(value.username) &&
+    (value.matchType === "exact_origin" ||
+      value.matchType === "exact_host" ||
+      value.matchType === "subdomain" ||
+      value.matchType === "registrable_domain") &&
+    typeof value.hasSecondaryPassword === "boolean"
+  );
 }
 
-async function ensureContentScript(tabId: number) {
-  try {
-    await sendMessageToTab(tabId, { type: "termkey.contentScriptProbe" });
-    return;
-  } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !isMissingContentScriptError(error.message)
-    ) {
-      throw error;
+function isAutofillEntry(value: unknown) {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    hasString(value, "id") &&
+    hasString(value, "name") &&
+    isStringOrNull(value.username) &&
+    hasString(value, "password")
+  );
+}
+
+export function isNativeHostResponse(value: unknown): value is NativeHostResponse {
+  if (
+    !isRecord(value) ||
+    typeof value.type !== "string" ||
+    typeof value.requestId !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.requestId)
+  ) {
+    return false;
+  }
+
+  switch (value.type) {
+    case "pong":
+      return (
+        value.app === "termkey" &&
+        hasString(value, "version") &&
+        hasCompatibleProtocolInfo(value)
+      );
+    case "status":
+      return (
+        value.app === "termkey" &&
+        hasString(value, "version") &&
+        hasString(value, "vaultPath") &&
+        typeof value.vaultExists === "boolean" &&
+        typeof value.firstRunComplete === "boolean" &&
+        typeof value.recoveryConfigured === "boolean" &&
+        typeof value.locked === "boolean" &&
+        hasCompatibleProtocolInfo(value)
+      );
+    case "autofill_entry":
+      return isAutofillEntry(value.entry);
+    case "generated_password":
+      return hasString(value, "password");
+    case "save_entry":
+      return hasString(value, "entryName");
+    case "site_matches":
+      return (
+        hasString(value, "siteUrl") &&
+        hasString(value, "siteOrigin") &&
+        hasString(value, "siteHostname") &&
+        Array.isArray(value.matches) &&
+        value.matches.every(isSiteMatch)
+      );
+    case "list_entries":
+      return (
+        Array.isArray(value.entries) && value.entries.every(isEntrySummary)
+      );
+    case "unlock":
+      return (
+        value.unlocked === true &&
+        (value.recoveryNotice === undefined ||
+          typeof value.recoveryNotice === "string")
+      );
+    case "error":
+      return hasString(value, "message");
+    default:
+      return false;
+  }
+}
+
+function expectedResponseType(
+  request: NativeHostRequest
+): Exclude<NativeHostResponse["type"], "error"> {
+  switch (request.type) {
+    case "ping":
+      return "pong";
+    case "status":
+      return "status";
+    case "get_autofill_entry":
+      return "autofill_entry";
+    case "find_site_matches":
+      return "site_matches";
+    case "generate_password":
+      return "generated_password";
+    case "save_password_entry":
+      return "save_entry";
+    case "list_entries":
+      return "list_entries";
+    case "unlock":
+      return "unlock";
+  }
+}
+
+function generateNativeRequestId() {
+  return Array.from(
+    crypto.getRandomValues(new Uint8Array(32)),
+    (byte) => byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+export class NativeHostClient {
+  private port: NativePort | undefined;
+  private current: NativeQueueEntry | undefined;
+  private readonly queue: NativeQueueEntry[] = [];
+  private timeoutId: ReturnType<typeof setTimeout> | undefined;
+  private pumpScheduled = false;
+  private protocolNegotiated = false;
+  private handshakeRequestId: string | undefined;
+
+  constructor(
+    private readonly connectNative: () => NativePort,
+    private readonly disconnectError: () => string = () =>
+      "Native host disconnected. Please try again.",
+    private readonly generateRequestId: () => string = generateNativeRequestId
+  ) {}
+
+  request<TRequest extends NativeHostRequest>(
+    request: TRequest
+  ): Promise<NativeClientResponseFor<TRequest>> {
+    const requestId = this.generateRequestId();
+    if (!/^[a-f0-9]{64}$/.test(requestId)) {
+      return Promise.resolve({
+        ok: false,
+        error: "Could not generate a valid native request ID.",
+      });
+    }
+    return new Promise((resolve) => {
+      this.queue.push({
+        request,
+        requestId,
+        resolve: resolve as (response: NativeClientResponse) => void,
+      });
+      this.pump();
+    });
+  }
+
+  private getPort() {
+    if (this.port) {
+      return this.port;
+    }
+
+    const port = this.connectNative();
+    this.port = port;
+    port.onMessage.addListener((message) => {
+      if (this.port === port) {
+        this.handleMessage(message);
+      }
+    });
+    port.onDisconnect.addListener(() => {
+      if (this.port === port) {
+        this.failAll(this.disconnectError(), false);
+      }
+    });
+    return port;
+  }
+
+  private pump() {
+    if (this.current || this.queue.length === 0) {
+      return;
+    }
+
+    const entry = this.queue.shift();
+    if (!entry) {
+      return;
+    }
+
+    this.current = entry;
+    try {
+      const port = this.getPort();
+      this.startTimeout();
+      if (this.protocolNegotiated) {
+        this.postCurrent(port);
+      } else {
+        const handshakeRequestId = this.generateRequestId();
+        if (!/^[a-f0-9]{64}$/.test(handshakeRequestId)) {
+          this.failAll(
+            "Could not generate a valid native handshake request ID.",
+            true
+          );
+          return;
+        }
+        this.handshakeRequestId = handshakeRequestId;
+        port.postMessage({
+          type: "ping",
+          protocolVersion: NATIVE_PROTOCOL_VERSION,
+          requestId: handshakeRequestId,
+        });
+      }
+    } catch (error) {
+      this.failAll(
+        error instanceof Error
+          ? error.message
+          : "Could not connect to the native host.",
+        true
+      );
     }
   }
 
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["dist/content.js"],
-  });
+  private handleMessage(message: unknown) {
+    if (!this.current) {
+      this.failAll("Native host returned an unsolicited response.", true);
+      return;
+    }
+    const entry = this.current;
+
+    if (this.handshakeRequestId) {
+      if (!isNativeHostResponse(message)) {
+        this.failAll(
+          isRecord(message) && message.type === "pong"
+            ? PROTOCOL_REPAIR_ERROR
+            : "Native host returned an invalid handshake response.",
+          true
+        );
+        return;
+      }
+      if (message.requestId !== this.handshakeRequestId) {
+        this.failAll("Native host returned a mismatched handshake request ID.", true);
+        return;
+      }
+      if (message.type === "error") {
+        this.failAll(
+          message.message.includes("termkey browser repair")
+            ? message.message
+            : PROTOCOL_REPAIR_ERROR,
+          true
+        );
+        return;
+      }
+      if (message.type !== "pong") {
+        this.failAll(PROTOCOL_REPAIR_ERROR, true);
+        return;
+      }
+
+      this.handshakeRequestId = undefined;
+      this.protocolNegotiated = true;
+      this.clearCurrentTimeout();
+      this.startTimeout();
+      try {
+        const port = this.port;
+        if (!port) {
+          this.failAll("Native host disconnected during negotiation.", false);
+          return;
+        }
+        this.postCurrent(port);
+      } catch (error) {
+        this.failAll(
+          error instanceof Error
+            ? error.message
+            : "Could not send a request to the native host.",
+          true
+        );
+      }
+      return;
+    }
+
+    if (!isNativeHostResponse(message)) {
+      this.failAll(
+        isRecord(message) &&
+          (message.type === "pong" || message.type === "status") &&
+          typeof message.requestId === "string" &&
+          /^[a-f0-9]{64}$/.test(message.requestId)
+          ? PROTOCOL_REPAIR_ERROR
+          : "Native host returned an invalid response.",
+        true
+      );
+      return;
+    }
+
+    if (message.requestId !== entry.requestId) {
+      this.failAll("Native host returned a mismatched request ID.", true);
+      return;
+    }
+
+    if (message.type !== "error" && message.type !== expectedResponseType(entry.request)) {
+      this.failAll("Native host returned the wrong response type.", true);
+      return;
+    }
+
+    if (message.type === "error") {
+      this.finishCurrent({ ok: false, error: message.message });
+      return;
+    }
+
+    this.finishCurrent({ ok: true, response: message });
+  }
+
+  private clearCurrentTimeout() {
+    if (this.timeoutId !== undefined) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
+  }
+
+  private startTimeout() {
+    this.clearCurrentTimeout();
+    this.timeoutId = setTimeout(() => {
+      this.failAll(
+        "Native host timed out after 10 seconds. Please try again.",
+        true
+      );
+    }, NATIVE_REQUEST_TIMEOUT_MS);
+  }
+
+  private postCurrent(port: NativePort) {
+    const current = this.current;
+    if (!current) {
+      throw new Error("Native request state was lost.");
+    }
+    port.postMessage({
+      ...current.request,
+      requestId: current.requestId,
+    });
+  }
+
+  private finishCurrent(response: NativeClientResponse) {
+    const current = this.current;
+    if (!current) {
+      return;
+    }
+    this.clearCurrentTimeout();
+    this.current = undefined;
+    current.resolve(response);
+    this.schedulePump();
+  }
+
+  private schedulePump() {
+    if (this.pumpScheduled) {
+      return;
+    }
+    this.pumpScheduled = true;
+    queueMicrotask(() => {
+      this.pumpScheduled = false;
+      this.pump();
+    });
+  }
+
+  private failAll(error: string, disconnect: boolean) {
+    this.clearCurrentTimeout();
+    const current = this.current;
+    this.current = undefined;
+    const port = this.port;
+    this.port = undefined;
+    this.protocolNegotiated = false;
+    this.handshakeRequestId = undefined;
+    const entries = [
+      ...(current ? [current] : []),
+      ...this.queue.splice(0),
+    ];
+
+    if (disconnect && port) {
+      try {
+        port.disconnect();
+      } catch {
+        // The port is already unusable; all associated work still fails below.
+      }
+    }
+
+    for (const entry of entries) {
+      entry.resolve({ ok: false, error });
+    }
+  }
 }
 
-async function getCurrentTabUrl(): Promise<string> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const url = tab?.url;
+class MatchGrantStore {
+  private readonly grants = new Map<
+    string,
+    {
+      grant: MatchGrant;
+      state: "available" | "reserved" | "consumed";
+    }
+  >();
 
-  if (!url) {
-    throw new Error("No active tab URL is available.");
+  constructor(
+    private readonly now: () => number,
+    private readonly ttlMs: number
+  ) {}
+
+  add(
+    grantId: string,
+    tabId: number,
+    documentToken: string,
+    origin: string,
+    entryId: string
+  ) {
+    this.prune();
+    this.grants.set(grantId, {
+      grant: {
+        tabId,
+        documentToken,
+        origin,
+        entryId,
+        expiresAt: this.now() + this.ttlMs,
+      },
+      state: "available",
+    });
+    while (this.grants.size > MAX_MATCH_GRANTS) {
+      const oldest = this.grants.keys().next().value as string | undefined;
+      if (!oldest) {
+        break;
+      }
+      this.grants.delete(oldest);
+    }
+    return grantId;
   }
 
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    throw new Error("Current tab is not a supported web page.");
+  reserve(grantId: string) {
+    this.prune();
+    const record = this.grants.get(grantId);
+    if (!record || record.state !== "available") {
+      return undefined;
+    }
+    record.state = "reserved";
+    return record.grant;
   }
 
-  return url;
+  release(grantId: string) {
+    this.prune();
+    const record = this.grants.get(grantId);
+    if (record?.state === "reserved") {
+      record.state = "available";
+      return true;
+    }
+    return false;
+  }
+
+  consume(grantId: string) {
+    this.prune();
+    const record = this.grants.get(grantId);
+    if (record?.state !== "reserved") {
+      return false;
+    }
+    record.state = "consumed";
+    return true;
+  }
+
+  invalidate(grantId: string) {
+    this.grants.delete(grantId);
+  }
+
+  removeTab(tabId: number) {
+    for (const [key, record] of this.grants) {
+      if (record.grant.tabId === tabId) {
+        this.grants.delete(key);
+      }
+    }
+  }
+
+  private prune() {
+    const currentTime = this.now();
+    for (const [key, record] of this.grants) {
+      if (record.grant.expiresAt <= currentTime) {
+        this.grants.delete(key);
+      }
+    }
+  }
 }
 
-async function getCurrentTabId(): Promise<number> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tabId = tab?.id;
+function generateOpaqueGrantId() {
+  return Array.from(
+    crypto.getRandomValues(new Uint8Array(32)),
+    (byte) => byte.toString(16).padStart(2, "0")
+  ).join("");
+}
 
-  if (typeof tabId !== "number") {
-    throw new Error("No active tab is available for autofill.");
+export function canonicalizeHttpsOrigin(url: string) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("Current tab URL is invalid.");
   }
 
-  return tabId;
+  if (parsed.protocol !== "https:") {
+    throw new Error("Current tab must use HTTPS.");
+  }
+  if (parsed.username !== "" || parsed.password !== "") {
+    throw new Error("Current tab URL must not contain user information.");
+  }
+
+  return parsed.origin;
+}
+
+function isMissingContentScriptError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("Receiving end does not exist") ||
+    error.message.includes("Could not establish connection")
+  );
+}
+
+function parseDocumentToken(response: unknown) {
+  if (
+    !isRecord(response) ||
+    response.ok !== true ||
+    typeof response.documentToken !== "string" ||
+    !/^[a-f0-9]{64}$/.test(response.documentToken)
+  ) {
+    throw new Error("Content script returned an invalid document token.");
+  }
+
+  return response.documentToken;
+}
+
+function isKnownPopupMessage(
+  message: unknown
+): message is PopupToBackgroundMessage {
+  if (!isRecord(message) || typeof message.type !== "string") {
+    return false;
+  }
+
+  return (
+    message.type === "termkey.nativeHost.ping" ||
+    message.type === "termkey.nativeHost.status" ||
+    message.type === "termkey.nativeHost.findSiteMatches" ||
+    message.type === "termkey.content.captureVisibleCredentials" ||
+    message.type === "termkey.content.inspectPageContext" ||
+    message.type === "termkey.passwords.generateForPage" ||
+    message.type === "termkey.autofill.fillSelectedMatch" ||
+    message.type === "termkey.nativeHost.savePasswordEntry" ||
+    message.type === "termkey.nativeHost.unlock"
+  );
+}
+
+export function isTrustedExtensionPageSender(
+  sender: MessageSender,
+  chromeApi: Pick<BackgroundChrome, "runtime">
+) {
+  if (
+    sender.id !== chromeApi.runtime.id ||
+    typeof sender.url !== "string"
+  ) {
+    return false;
+  }
+
+  try {
+    const senderUrl = new URL(sender.url);
+    const extensionRoot = new URL(chromeApi.runtime.getURL("/"));
+    return (
+      senderUrl.protocol === "chrome-extension:" &&
+      senderUrl.host === extensionRoot.host &&
+      senderUrl.username === "" &&
+      senderUrl.password === ""
+    );
+  } catch {
+    return false;
+  }
 }
 
 function getPendingSaveKey(tabId: number) {
   return `${PENDING_SAVE_KEY_PREFIX}${tabId}`;
 }
 
-function getSessionStorageArea() {
-  return chrome.storage?.session ?? chrome.storage.local;
-}
+export function createBackgroundService(
+  chromeApi: BackgroundChrome,
+  options: {
+    now?: () => number;
+    grantTtlMs?: number;
+    nativeClient?: NativeHostClient;
+    generateGrantId?: () => string;
+  } = {}
+) {
+  const now = options.now ?? Date.now;
+  const grants = new MatchGrantStore(
+    now,
+    options.grantTtlMs ?? MATCH_GRANT_TTL_MS
+  );
+  const nativeClient =
+    options.nativeClient ??
+    new NativeHostClient(
+      () => chromeApi.runtime.connectNative(NATIVE_HOST_NAME),
+      () =>
+        chromeApi.runtime.lastError?.message ??
+        "Native host disconnected. Please try again."
+    );
+  const storageArea =
+    chromeApi.storage?.session ?? chromeApi.storage?.local;
+  const contentScriptAttempts = new Map<number, Promise<string>>();
+  const generateGrantId = options.generateGrantId ?? generateOpaqueGrantId;
 
-function readPendingSaveDraft(tabId: number): Promise<PendingSaveDraft | null> {
-  return new Promise((resolve) => {
-    getSessionStorageArea().get([getPendingSaveKey(tabId)], (result: Record<string, unknown>) => {
-      resolve((result?.[getPendingSaveKey(tabId)] as PendingSaveDraft | undefined) ?? null);
+  async function getActiveTabOnce() {
+    const tabs = await chromeApi.tabs.query({
+      active: true,
+      currentWindow: true,
     });
-  });
-}
-
-function writePendingSaveDraft(tabId: number, draft: PendingSaveDraft): Promise<void> {
-  return new Promise((resolve) => {
-    getSessionStorageArea().set({ [getPendingSaveKey(tabId)]: draft }, () => resolve());
-  });
-}
-
-function clearPendingSaveDraft(tabId: number): Promise<void> {
-  return new Promise((resolve) => {
-    getSessionStorageArea().remove(getPendingSaveKey(tabId), () => resolve());
-  });
-}
-
-function hostFromUrl(url: string) {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return null;
-  }
-}
-
-function canReusePendingSaveDraft(currentUrl: string, draft: PendingSaveDraft | null) {
-  if (!draft) {
-    return false;
+    const tab = tabs[0];
+    if (typeof tab?.id !== "number" || typeof tab.url !== "string") {
+      throw new Error("No active tab is available.");
+    }
+    return {
+      tabId: tab.id,
+      origin: canonicalizeHttpsOrigin(tab.url),
+    };
   }
 
-  const currentHost = hostFromUrl(currentUrl);
-  const draftHost = hostFromUrl(draft.url);
-
-  return Boolean(currentHost && draftHost && currentHost === draftHost);
-}
-
-chrome.tabs.onRemoved.addListener((tabId: number) => {
-  void clearPendingSaveDraft(tabId);
-});
-
-chrome.runtime.onInstalled.addListener(() => {
-  console.log("TermKey extension installed");
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  console.log("TermKey extension started");
-});
-
-console.log("Core connected:", coreReady);
-console.log("Extension ID:", chrome.runtime.id);
-
-function handleNativeHostResponse(response: NativeHostResponse | undefined) {
-  if (!currentNativeResponseHandler) {
-    console.warn("Dropping unexpected native host response", response);
-    return;
+  async function probeDocument(tabId: number) {
+    const response = await chromeApi.tabs.sendMessage(
+      tabId,
+      { type: "termkey.contentScriptProbe" },
+      { frameId: 0 }
+    );
+    return parseDocumentToken(response);
   }
 
-  const resolve = currentNativeResponseHandler;
-  currentNativeResponseHandler = undefined;
+  async function ensureContentScript(tabId: number) {
+    const existingAttempt = contentScriptAttempts.get(tabId);
+    if (existingAttempt) {
+      return existingAttempt;
+    }
 
-  if (!response) {
-    resolve({ ok: false, error: "Native host returned an empty response." });
-    return;
-  }
+    const attempt = (async () => {
+      try {
+        return await probeDocument(tabId);
+      } catch (error) {
+        if (!isMissingContentScriptError(error)) {
+          throw error;
+        }
+      }
 
-  if (response.type === "error") {
-    resolve({ ok: false, error: response.message });
-    return;
-  }
-
-  if (
-    response.type !== "pong" &&
-    response.type !== "status" &&
-    response.type !== "autofill_entry" &&
-    response.type !== "generated_password" &&
-    response.type !== "save_entry" &&
-    response.type !== "site_matches" &&
-    response.type !== "list_entries" &&
-    response.type !== "unlock"
-  ) {
-    resolve({ ok: false, error: "Native host returned an invalid response." });
-    return;
-  }
-
-  resolve({ ok: true, response });
-}
-
-function getNativePort() {
-  if (nativePort) {
-    return nativePort;
-  }
-
-  const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-  port.onMessage.addListener((message: NativeHostResponse | undefined) => {
-    handleNativeHostResponse(message);
-  });
-  port.onDisconnect.addListener(() => {
-    const runtimeError = chrome.runtime.lastError;
-    nativePort = undefined;
-
-    if (currentNativeResponseHandler) {
-      const resolve = currentNativeResponseHandler;
-      currentNativeResponseHandler = undefined;
-      resolve({
-        ok: false,
-        error: runtimeError?.message ?? "Native host disconnected.",
+      await chromeApi.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        files: ["dist/content.js"],
       });
+      return probeDocument(tabId);
+    })();
+    contentScriptAttempts.set(tabId, attempt);
+    try {
+      return await attempt;
+    } finally {
+      if (contentScriptAttempts.get(tabId) === attempt) {
+        contentScriptAttempts.delete(tabId);
+      }
     }
-  });
-
-  nativePort = port;
-  return port;
-}
-
-function enqueueNativeHostRequest(
-  request: NativeHostRequest
-): Promise<PopupToBackgroundResponse> {
-  const result = nativeRequestQueue.then(
-    () =>
-      new Promise<PopupToBackgroundResponse>((resolve) => {
-        const port = getNativePort();
-        currentNativeResponseHandler = resolve;
-        port.postMessage(request);
-      })
-  );
-
-  nativeRequestQueue = result.then(
-    () => undefined,
-    () => undefined
-  );
-
-  return result;
-}
-
-chrome.runtime.onMessage.addListener(
-  (
-    message: PopupToBackgroundMessage,
-    _sender: unknown,
-    sendResponse: (response: PopupToBackgroundResponse) => void
-  ) => {
-    if (message?.type === "termkey.nativeHost.ping") {
-      void enqueueNativeHostRequest({ type: "ping" }).then(sendResponse);
-      return true;
-    }
-
-    if (message?.type === "termkey.nativeHost.status") {
-      void enqueueNativeHostRequest({ type: "status" }).then(sendResponse);
-      return true;
-    }
-
-    if (message?.type === "termkey.nativeHost.findSiteMatches") {
-      void getCurrentTabUrl()
-        .then((url) =>
-          enqueueNativeHostRequest({ type: "find_site_matches", url })
-        )
-        .then(sendResponse)
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.content.captureVisibleCredentials") {
-      void Promise.all([getCurrentTabId(), getCurrentTabUrl()])
-        .then(([tabId, url]) =>
-          ensureContentScript(tabId).then(() =>
-            sendMessageToTab<{
-              ok: boolean;
-              error?: string;
-              captureState?: "complete" | "password_only" | "username_only";
-              username?: string | null;
-              password?: string;
-            }>(tabId, {
-              type: "termkey.captureVisibleCredentials",
-            }).then((captureResponse) => ({ captureResponse, tabId, url }))
-          )
-        )
-        .then(
-          ({
-            captureResponse,
-            tabId,
-            url,
-          }: {
-            captureResponse: {
-              ok: boolean;
-              error?: string;
-              captureState?: "complete" | "password_only" | "username_only";
-              username?: string | null;
-              password?: string;
-            };
-            tabId: number;
-            url: string;
-          }) => {
-            if (!captureResponse?.ok) {
-              sendResponse({
-                ok: false,
-                error:
-                  captureResponse?.error ??
-                  "Could not read the current login fields from this page.",
-              });
-              return;
-            }
-
-            if (
-              captureResponse.captureState === "username_only" &&
-              captureResponse.username
-            ) {
-              void writePendingSaveDraft(tabId, {
-                username: captureResponse.username,
-                url,
-              }).then(() => {
-                sendResponse({
-                  ok: true,
-                  response: {
-                    type: "captured_login_step",
-                    step: "username_only",
-                    username: captureResponse.username!,
-                    url,
-                  },
-                });
-              });
-              return;
-            }
-
-            if (!captureResponse.password) {
-              sendResponse({
-                ok: false,
-                error: "Could not read the current login password from this page.",
-              });
-              return;
-            }
-
-            void readPendingSaveDraft(tabId).then((draft) => {
-              const useStoredUsername =
-                !captureResponse.username && canReusePendingSaveDraft(url, draft);
-              const mergedUsername = useStoredUsername
-                ? draft?.username ?? null
-                : captureResponse.username ?? null;
-
-              void clearPendingSaveDraft(tabId).then(() => {
-                sendResponse({
-                  ok: true,
-                  response: {
-                    type: "captured_login",
-                    candidate: {
-                      username: mergedUsername,
-                      password: captureResponse.password!,
-                      url,
-                    },
-                    usedStoredUsername: useStoredUsername,
-                  },
-                });
-              });
-            });
-          }
-        )
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.content.inspectPageContext") {
-      void Promise.all([getCurrentTabId(), getCurrentTabUrl()])
-        .then(([tabId, url]) =>
-          ensureContentScript(tabId).then(() =>
-            Promise.all([
-              sendMessageToTab<{
-                ok: boolean;
-              error?: string;
-              intent?: PopupPageIntent;
-              visibleUsername?: string | null;
-              hasPasswordField?: boolean;
-              hasConfirmationPasswordField?: boolean;
-              canGeneratePassword?: boolean;
-            }>(tabId, {
-              type: "termkey.inspectPageContext",
-            }),
-              readPendingSaveDraft(tabId),
-            ]).then(([pageContext, draft]) => ({ pageContext, draft, url }))
-          )
-        )
-        .then(
-          ({
-            pageContext,
-            draft,
-            url,
-          }: {
-            pageContext: {
-              ok: boolean;
-              error?: string;
-              intent?: PopupPageIntent;
-              visibleUsername?: string | null;
-              hasPasswordField?: boolean;
-              hasConfirmationPasswordField?: boolean;
-              canGeneratePassword?: boolean;
-            };
-            draft: PendingSaveDraft | null;
-            url: string;
-          }) => {
-            if (!pageContext?.ok) {
-              sendResponse({
-                ok: false,
-                error:
-                  pageContext?.error ??
-                  "Could not inspect the current page.",
-              });
-              return;
-            }
-
-            const reusableDraft = canReusePendingSaveDraft(url, draft) ? draft : null;
-            sendResponse({
-              ok: true,
-              response: {
-                type: "page_context",
-                context: {
-                  intent: pageContext.intent ?? "unknown",
-                  visibleUsername: pageContext.visibleUsername ?? null,
-                  hasPasswordField: pageContext.hasPasswordField === true,
-                  hasConfirmationPasswordField:
-                    pageContext.hasConfirmationPasswordField === true,
-                  canGeneratePassword: pageContext.canGeneratePassword === true,
-                  hasPendingSaveUsername: reusableDraft !== null,
-                  pendingUsername: reusableDraft?.username ?? null,
-                },
-              },
-            });
-          }
-        )
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.passwords.generateForPage") {
-      void Promise.all([
-        getCurrentTabId(),
-        getCurrentTabUrl(),
-        enqueueNativeHostRequest({ type: "generate_password" }),
-      ])
-        .then(([tabId, url, nativeResponse]) => {
-          if (!nativeResponse.ok) {
-            sendResponse(nativeResponse);
-            return;
-          }
-
-          if (nativeResponse.response.type !== "generated_password") {
-            sendResponse({
-              ok: false,
-              error: "Native host returned the wrong response type for password generation.",
-            });
-            return;
-          }
-
-          const generatedPassword = (
-            nativeResponse.response as Extract<
-              NativeHostResponse,
-              { type: "generated_password" }
-            >
-          ).password;
-
-          void ensureContentScript(tabId)
-            .then(() =>
-              sendMessageToTab<{
-                ok: boolean;
-                error?: string;
-                username?: string | null;
-                filledPasswordFields?: number;
-              }>(tabId, {
-                type: "termkey.fillGeneratedPassword",
-                password: generatedPassword,
-              })
-            )
-            .then((fillResponse) => {
-              if (!fillResponse?.ok) {
-                sendResponse({
-                  ok: false,
-                  error:
-                    fillResponse?.error ??
-                    "Content script could not fill generated password fields.",
-                });
-                return;
-              }
-
-              sendResponse({
-                ok: true,
-                response: {
-                  type: "generated_password",
-                  candidate: {
-                    username: fillResponse.username ?? null,
-                    password: generatedPassword,
-                    url,
-                  },
-                  filledPasswordFields: fillResponse.filledPasswordFields ?? 0,
-                },
-              });
-            })
-            .catch((error: Error) => {
-              sendResponse({ ok: false, error: error.message });
-            });
-        })
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.autofill.fillSelectedMatch") {
-      void getCurrentTabId()
-        .then((tabId) =>
-          enqueueNativeHostRequest({
-            type: "get_autofill_entry",
-            id: message.entryId,
-            password: message.password,
-            secondaryPassword: message.secondaryPassword,
-          }).then(
-            (response): {
-              response: PopupToBackgroundResponse;
-              tabId: number;
-            } => ({ response, tabId })
-          )
-        )
-        .then(({ response, tabId }: { response: PopupToBackgroundResponse; tabId: number }) => {
-          if (!response.ok) {
-            sendResponse(response);
-            return;
-          }
-
-          if (response.response.type !== "autofill_entry") {
-            sendResponse({
-              ok: false,
-              error: "Native host returned the wrong response type for autofill.",
-            });
-            return;
-          }
-
-          const autofillEntry = response.response.entry;
-
-          void ensureContentScript(tabId)
-            .then(() =>
-              sendMessageToTab<any>(tabId, {
-                type: "termkey.fillCredentials",
-                entry: autofillEntry,
-              })
-            )
-            .then((fillResponse) => {
-              if (!fillResponse?.ok) {
-                sendResponse({
-                  ok: false,
-                  error:
-                    fillResponse?.error ??
-                    "Content script could not fill the page.",
-                });
-                return;
-              }
-
-              sendResponse({
-                ok: true,
-                response: {
-                  type: "fill_result",
-                  entryName: autofillEntry.name,
-                  filledFields: fillResponse.filledFields ?? 0,
-                  filledUsername: fillResponse.filledUsername === true,
-                  filledPassword: fillResponse.filledPassword === true,
-                },
-              });
-            })
-            .catch((error: Error) => {
-              sendResponse({ ok: false, error: error.message });
-            });
-        })
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.nativeHost.savePasswordEntry") {
-      void enqueueNativeHostRequest({
-        type: "save_password_entry",
-        name: message.name,
-        username: message.username,
-        password: message.password,
-        url: message.url,
-        masterPassword: message.masterPassword,
-        secondaryPassword: message.secondaryPassword,
-      })
-        .then((response) => {
-          if (!response.ok) {
-            sendResponse(response);
-            return;
-          }
-
-          if (response.response.type !== "save_entry") {
-            sendResponse({
-              ok: false,
-              error: "Native host returned the wrong response type for save.",
-            });
-            return;
-          }
-
-          sendResponse({
-            ok: true,
-            response: {
-              type: "save_entry_result",
-              entryName: response.response.entryName,
-            },
-          });
-        })
-        .catch((error: Error) => {
-          sendResponse({ ok: false, error: error.message });
-        });
-      return true;
-    }
-
-    if (message?.type === "termkey.nativeHost.unlock") {
-      void enqueueNativeHostRequest({
-        type: "unlock",
-        password: message.password,
-      }).then(sendResponse);
-      return true;
-    }
-
-    return false;
   }
-);
+
+  async function validateGrant(grant: MatchGrant, entryId: string) {
+    if (
+      grant.entryId !== entryId ||
+      grant.expiresAt <= now()
+    ) {
+      throw new Error("The selected login match expired. Refresh the popup.");
+    }
+
+    const tab = await chromeApi.tabs.get(grant.tabId);
+    if (tab.id !== grant.tabId || typeof tab.url !== "string") {
+      throw new Error("The matched tab is no longer available.");
+    }
+    if (canonicalizeHttpsOrigin(tab.url) !== grant.origin) {
+      throw new Error("The matched tab navigated to a different origin.");
+    }
+    const documentToken = await probeDocument(grant.tabId);
+    if (documentToken !== grant.documentToken) {
+      throw new Error("The matched page document changed.");
+    }
+  }
+
+  function readPendingSaveDraft(tabId: number) {
+    if (!storageArea) {
+      return Promise.resolve<PendingSaveDraft | null>(null);
+    }
+    return new Promise<PendingSaveDraft | null>((resolve) => {
+      const key = getPendingSaveKey(tabId);
+      storageArea.get([key], (result) => {
+        resolve((result[key] as PendingSaveDraft | undefined) ?? null);
+      });
+    });
+  }
+
+  function writePendingSaveDraft(tabId: number, draft: PendingSaveDraft) {
+    if (!storageArea) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      storageArea.set({ [getPendingSaveKey(tabId)]: draft }, resolve);
+    });
+  }
+
+  function clearPendingSaveDraft(tabId: number) {
+    if (!storageArea) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      storageArea.remove(getPendingSaveKey(tabId), resolve);
+    });
+  }
+
+  function canReusePendingSaveDraft(
+    origin: string,
+    draft: PendingSaveDraft | null
+  ) {
+    if (!draft) {
+      return false;
+    }
+    try {
+      return canonicalizeHttpsOrigin(draft.url) === origin;
+    } catch {
+      return false;
+    }
+  }
+
+  async function findSiteMatches() {
+    const page = await getActiveTabOnce();
+    const documentToken = await ensureContentScript(page.tabId);
+    const nativeResponse = await nativeClient.request({
+      type: "find_site_matches",
+      url: page.origin,
+    });
+    if (!nativeResponse.ok) {
+      return nativeResponse;
+    }
+    if (nativeResponse.response.type !== "site_matches") {
+      return {
+        ok: false as const,
+        error: "Native host returned the wrong response type.",
+      };
+    }
+    if (
+      canonicalizeHttpsOrigin(nativeResponse.response.siteOrigin) !==
+      page.origin
+    ) {
+      return {
+        ok: false as const,
+        error: "Native host returned matches for a different origin.",
+      };
+    }
+
+    grants.removeTab(page.tabId);
+    const matches = nativeResponse.response.matches.map((match) => ({
+      ...match,
+      grantId: grants.add(
+        generateGrantId(),
+        page.tabId,
+        documentToken,
+        page.origin,
+        match.id
+      ),
+    }));
+    return {
+      ok: true as const,
+      response: {
+        ...nativeResponse.response,
+        siteUrl: page.origin,
+        siteOrigin: page.origin,
+        siteHostname: new URL(page.origin).hostname,
+        matches,
+      },
+    };
+  }
+
+  async function captureVisibleCredentials() {
+    const page = await getActiveTabOnce();
+    const documentToken = await ensureContentScript(page.tabId);
+    const captureResponse = await chromeApi.tabs.sendMessage(
+      page.tabId,
+      { type: "termkey.captureVisibleCredentials", documentToken },
+      { frameId: 0 }
+    );
+    if (!isRecord(captureResponse) || captureResponse.ok !== true) {
+      return {
+        ok: false as const,
+        error:
+          isRecord(captureResponse) &&
+          typeof captureResponse.error === "string"
+            ? captureResponse.error
+            : "Could not read the current login fields from this page.",
+      };
+    }
+
+    if (
+      captureResponse.captureState === "username_only" &&
+      typeof captureResponse.username === "string" &&
+      captureResponse.username
+    ) {
+      await writePendingSaveDraft(page.tabId, {
+        username: captureResponse.username,
+        url: page.origin,
+      });
+      return {
+        ok: true as const,
+        response: {
+          type: "captured_login_step" as const,
+          step: "username_only" as const,
+          username: captureResponse.username,
+          url: page.origin,
+        },
+      };
+    }
+
+    if (typeof captureResponse.password !== "string") {
+      return {
+        ok: false as const,
+        error: "Could not read the current login password from this page.",
+      };
+    }
+    const draft = await readPendingSaveDraft(page.tabId);
+    const capturedUsername =
+      typeof captureResponse.username === "string"
+        ? captureResponse.username
+        : null;
+    const useStoredUsername =
+      !capturedUsername && canReusePendingSaveDraft(page.origin, draft);
+    await clearPendingSaveDraft(page.tabId);
+    return {
+      ok: true as const,
+      response: {
+        type: "captured_login" as const,
+        candidate: {
+          username: useStoredUsername
+            ? draft?.username ?? null
+            : capturedUsername,
+          password: captureResponse.password,
+          url: page.origin,
+        },
+        usedStoredUsername: useStoredUsername,
+      },
+    };
+  }
+
+  async function inspectPageContext() {
+    const page = await getActiveTabOnce();
+    const documentToken = await ensureContentScript(page.tabId);
+    const [context, draft] = await Promise.all([
+      chromeApi.tabs.sendMessage(
+        page.tabId,
+        { type: "termkey.inspectPageContext" },
+        { frameId: 0 }
+      ),
+      readPendingSaveDraft(page.tabId),
+    ]);
+    if (
+      !isRecord(context) ||
+      context.ok !== true ||
+      context.documentToken !== documentToken
+    ) {
+      return {
+        ok: false as const,
+        error: "Could not inspect the current page.",
+      };
+    }
+    const intent: PopupPageIntent =
+      context.intent === "login" ||
+      context.intent === "signup" ||
+      context.intent === "password_change"
+        ? context.intent
+        : "unknown";
+    const reusableDraft = canReusePendingSaveDraft(page.origin, draft)
+      ? draft
+      : null;
+    return {
+      ok: true as const,
+      response: {
+        type: "page_context" as const,
+        context: {
+          intent,
+          visibleUsername:
+            typeof context.visibleUsername === "string"
+              ? context.visibleUsername
+              : null,
+          hasPasswordField: context.hasPasswordField === true,
+          hasConfirmationPasswordField:
+            context.hasConfirmationPasswordField === true,
+          canGeneratePassword: context.canGeneratePassword === true,
+          hasPendingSaveUsername: reusableDraft !== null,
+          pendingUsername: reusableDraft?.username ?? null,
+        },
+      },
+    };
+  }
+
+  async function generateForPage() {
+    const page = await getActiveTabOnce();
+    const documentToken = await ensureContentScript(page.tabId);
+    const generated = await nativeClient.request({ type: "generate_password" });
+    if (!generated.ok) {
+      return generated;
+    }
+    if (generated.response.type !== "generated_password") {
+      return {
+        ok: false as const,
+        error: "Native host returned the wrong response type.",
+      };
+    }
+    const tab = await chromeApi.tabs.get(page.tabId);
+    if (
+      typeof tab.url !== "string" ||
+      canonicalizeHttpsOrigin(tab.url) !== page.origin ||
+      (await probeDocument(page.tabId)) !== documentToken
+    ) {
+      return {
+        ok: false as const,
+        error: "The page changed before the generated password could be filled.",
+      };
+    }
+    const fillResponse = await chromeApi.tabs.sendMessage(
+      page.tabId,
+      {
+        type: "termkey.fillGeneratedPassword",
+        documentToken,
+        password: generated.response.password,
+      },
+      { frameId: 0 }
+    );
+    if (!isRecord(fillResponse) || fillResponse.ok !== true) {
+      return {
+        ok: false as const,
+        error:
+          isRecord(fillResponse) && typeof fillResponse.error === "string"
+            ? fillResponse.error
+            : "Content script could not fill generated password fields.",
+      };
+    }
+    return {
+      ok: true as const,
+      response: {
+        type: "generated_password" as const,
+        candidate: {
+          username:
+            typeof fillResponse.username === "string"
+              ? fillResponse.username
+              : null,
+          password: generated.response.password,
+          url: page.origin,
+        },
+        filledPasswordFields:
+          typeof fillResponse.filledPasswordFields === "number"
+            ? fillResponse.filledPasswordFields
+            : 0,
+      },
+    };
+  }
+
+  async function fillSelectedMatch(
+    message: Extract<
+      PopupToBackgroundMessage,
+      { type: "termkey.autofill.fillSelectedMatch" }
+    >
+  ) {
+    const grant = grants.reserve(message.grantId);
+    if (!grant) {
+      return {
+        ok: false as const,
+        error: "This login match is already in use or no longer available.",
+      };
+    }
+
+    try {
+      await validateGrant(grant, message.entryId);
+    } catch (error) {
+      grants.invalidate(message.grantId);
+      throw error;
+    }
+    const nativeResponse = await nativeClient.request({
+      type: "get_autofill_entry",
+      id: grant.entryId,
+      origin: grant.origin,
+      secondaryPassword: message.secondaryPassword,
+    });
+    if (!nativeResponse.ok) {
+      grants.release(message.grantId);
+      return nativeResponse;
+    }
+    if (
+      nativeResponse.response.type !== "autofill_entry" ||
+      nativeResponse.response.entry.id !== grant.entryId
+    ) {
+      grants.invalidate(message.grantId);
+      return {
+        ok: false as const,
+        error: "Native host returned the wrong autofill entry.",
+      };
+    }
+
+    try {
+      await validateGrant(grant, message.entryId);
+    } catch (error) {
+      grants.invalidate(message.grantId);
+      throw error;
+    }
+    if (!grants.consume(message.grantId)) {
+      return {
+        ok: false as const,
+        error: "The selected login match expired before delivery.",
+      };
+    }
+    const fillResponse = await chromeApi.tabs.sendMessage(
+      grant.tabId,
+      {
+        type: "termkey-fill-credentials",
+        documentToken: grant.documentToken,
+        username: nativeResponse.response.entry.username ?? undefined,
+        password: nativeResponse.response.entry.password,
+      },
+      { frameId: 0 }
+    );
+    if (!isRecord(fillResponse) || fillResponse.ok !== true) {
+      return {
+        ok: false as const,
+        error:
+          isRecord(fillResponse) && typeof fillResponse.error === "string"
+            ? fillResponse.error
+            : "Content script could not fill the page.",
+      };
+    }
+    return {
+      ok: true as const,
+      response: {
+        type: "fill_result" as const,
+        entryName: nativeResponse.response.entry.name,
+        filledFields:
+          typeof fillResponse.filledFields === "number"
+            ? fillResponse.filledFields
+            : 0,
+        filledUsername: fillResponse.filledUsername === true,
+        filledPassword: fillResponse.filledPassword === true,
+      },
+    };
+  }
+
+  async function handleTrustedMessage(
+    message: PopupToBackgroundMessage
+  ): Promise<PopupToBackgroundResponse> {
+    switch (message.type) {
+      case "termkey.nativeHost.ping":
+        return nativeClient.request({
+          type: "ping",
+          protocolVersion: NATIVE_PROTOCOL_VERSION,
+        });
+      case "termkey.nativeHost.status":
+        return nativeClient.request({
+          type: "status",
+          protocolVersion: NATIVE_PROTOCOL_VERSION,
+        });
+      case "termkey.nativeHost.findSiteMatches":
+        return findSiteMatches();
+      case "termkey.content.captureVisibleCredentials":
+        return captureVisibleCredentials();
+      case "termkey.content.inspectPageContext":
+        return inspectPageContext();
+      case "termkey.passwords.generateForPage":
+        return generateForPage();
+      case "termkey.autofill.fillSelectedMatch":
+        return fillSelectedMatch(message);
+      case "termkey.nativeHost.savePasswordEntry": {
+        const url =
+          message.url === undefined
+            ? undefined
+            : canonicalizeHttpsOrigin(message.url);
+        const response = await nativeClient.request({
+          type: "save_password_entry",
+          name: message.name,
+          username: message.username,
+          password: message.password,
+          url,
+          secondaryPassword: message.secondaryPassword,
+        });
+        if (!response.ok) {
+          return response;
+        }
+        if (response.response.type !== "save_entry") {
+          return {
+            ok: false,
+            error: "Native host returned the wrong response type.",
+          };
+        }
+        return {
+          ok: true,
+          response: {
+            type: "save_entry_result",
+            entryName: response.response.entryName,
+          },
+        };
+      }
+      case "termkey.nativeHost.unlock":
+        return nativeClient.request({
+          type: "unlock",
+          password: message.password,
+        });
+    }
+  }
+
+  async function handleMessage(
+    message: PopupToBackgroundMessage,
+    sender: MessageSender
+  ): Promise<PopupToBackgroundResponse> {
+    if (!isTrustedExtensionPageSender(sender, chromeApi)) {
+      return {
+        ok: false,
+        error: "Unauthorized extension message sender.",
+      };
+    }
+    if (!isKnownPopupMessage(message)) {
+      return { ok: false, error: "Unsupported extension message." };
+    }
+    try {
+      return await handleTrustedMessage(message);
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "The extension request failed.",
+      };
+    }
+  }
+
+  return {
+    handleMessage,
+    handleTabRemoved(tabId: number) {
+      grants.removeTab(tabId);
+      void clearPendingSaveDraft(tabId);
+    },
+  };
+}
+
+const runtimeChrome =
+  typeof chrome === "undefined"
+    ? undefined
+    : (chrome as unknown as BackgroundChrome);
+
+if (runtimeChrome?.runtime?.onMessage) {
+  const service = createBackgroundService(runtimeChrome);
+  runtimeChrome.tabs.onRemoved?.addListener((tabId) => {
+    service.handleTabRemoved(tabId);
+  });
+  runtimeChrome.runtime.onMessage.addListener(
+    (message, sender, sendResponse) => {
+      if (!isKnownPopupMessage(message)) {
+        return false;
+      }
+      void service.handleMessage(message, sender).then(sendResponse);
+      return true;
+    }
+  );
+  console.log("Core connected:", coreReady);
+  console.log("Extension ID:", runtimeChrome.runtime.id);
+}

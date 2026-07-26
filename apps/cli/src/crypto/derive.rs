@@ -1,10 +1,12 @@
-use crate::error::{Result, TermKeyError};
+use crate::error::Result;
+#[cfg(any(feature = "derive-eth", feature = "derive-btc", feature = "derive-sol"))]
+use crate::error::TermKeyError;
 use crate::vault::model::SecretType;
 
 /// Derive a public address from a secret (private key or seed phrase).
 /// Returns Ok(None) for unsupported network/type combos.
 pub fn derive_address(
-    secret: &str,
+    _secret: &str,
     secret_type: &SecretType,
     network: &str,
 ) -> Result<Option<String>> {
@@ -12,22 +14,22 @@ pub fn derive_address(
 
     match (secret_type, network_lower.as_str()) {
         #[cfg(feature = "derive-eth")]
-        (SecretType::PrivateKey, "ethereum" | "eth") => derive_eth_from_privkey(secret).map(Some),
+        (SecretType::PrivateKey, "ethereum" | "eth") => derive_eth_from_privkey(_secret).map(Some),
 
         #[cfg(feature = "derive-eth")]
-        (SecretType::SeedPhrase, "ethereum" | "eth") => derive_eth_from_seed(secret).map(Some),
+        (SecretType::SeedPhrase, "ethereum" | "eth") => derive_eth_from_seed(_secret).map(Some),
 
         #[cfg(feature = "derive-btc")]
-        (SecretType::PrivateKey, "bitcoin" | "btc") => derive_btc_from_privkey(secret).map(Some),
+        (SecretType::PrivateKey, "bitcoin" | "btc") => derive_btc_from_privkey(_secret).map(Some),
 
         #[cfg(feature = "derive-btc")]
-        (SecretType::SeedPhrase, "bitcoin" | "btc") => derive_btc_from_seed(secret).map(Some),
+        (SecretType::SeedPhrase, "bitcoin" | "btc") => derive_btc_from_seed(_secret).map(Some),
 
         #[cfg(feature = "derive-sol")]
-        (SecretType::PrivateKey, "solana" | "sol") => derive_sol_from_privkey(secret).map(Some),
+        (SecretType::PrivateKey, "solana" | "sol") => derive_sol_from_privkey(_secret).map(Some),
 
         #[cfg(feature = "derive-sol")]
-        (SecretType::SeedPhrase, "solana" | "sol") => derive_sol_from_seed(secret).map(Some),
+        (SecretType::SeedPhrase, "solana" | "sol") => derive_sol_from_seed(_secret).map(Some),
 
         _ => Ok(None),
     }

@@ -2,8 +2,8 @@ use colored::{ColoredString, Colorize};
 
 use crate::error::{Result, TermKeyError};
 use crate::ui::borders::{print_table_box, truncate_display};
-use crate::vault::model::EntryMeta;
-use crate::vault::storage;
+use crate::vault::model::{EntryMeta, VaultData};
+use crate::vault::session::VaultSession;
 
 fn display_name(entry: &EntryMeta) -> String {
     if entry.has_secondary_password {
@@ -14,8 +14,12 @@ fn display_name(entry: &EntryMeta) -> String {
 }
 
 pub fn run(query: &str) -> Result<()> {
-    let meta = storage::read_vault_metadata()?;
-    run_with_meta(&meta, query)
+    let session = VaultSession::prompt_and_open()?.session;
+    run_with_vault(&session.vault, query)
+}
+
+pub(crate) fn run_with_vault(vault: &VaultData, query: &str) -> Result<()> {
+    run_with_meta(&vault.metadata(), query)
 }
 
 fn run_with_meta(meta: &[EntryMeta], query: &str) -> Result<()> {
@@ -33,10 +37,10 @@ fn run_with_meta(meta: &[EntryMeta], query: &str) -> Result<()> {
                 || e.notes.to_lowercase().contains(&query_lower)
                 || e.username
                     .as_deref()
-                    .map_or(false, |u| u.to_lowercase().contains(&query_lower))
+                    .is_some_and(|u| u.to_lowercase().contains(&query_lower))
                 || e.url
                     .as_deref()
-                    .map_or(false, |u| u.to_lowercase().contains(&query_lower))
+                    .is_some_and(|u| u.to_lowercase().contains(&query_lower))
         })
         .collect();
 

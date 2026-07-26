@@ -7,20 +7,21 @@ use crate::error::{Result, TermKeyError};
 use crate::ui::borders::print_success;
 use crate::ui::theme::heading;
 use crate::vault::model::{SecretType, VaultData};
-use crate::vault::storage;
+use crate::vault::session::VaultSession;
 
 pub fn run(name: &str) -> Result<()> {
-    let (mut vault, password) = storage::prompt_and_unlock()?;
-    run_with_vault(&mut vault, name)?;
+    let mut session = VaultSession::prompt_and_open()?.session;
+    run_with_vault(&mut session.vault, name)?;
     eprintln!("Saving vault...");
-    storage::save_vault(&vault, password.as_bytes())?;
+    session.save()?;
     Ok(())
 }
 
 /// Core edit logic without prompt_and_unlock or save (for REPL mode).
 pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
     let entry = vault
-        .find_entry_mut_by_id(name)
+        .find_entry_by_id(name)
+        .cloned()
         .ok_or_else(|| TermKeyError::EntryNotFound(name.to_string()))?;
 
     println!();
@@ -35,20 +36,11 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
         .with_prompt(format!("Name [{}]", entry.name))
         .default(entry.name.clone())
         .interact_text()
-        .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
 
     let new_name = new_name.trim().to_string();
 
     // Check for duplicate if name changed
-    if new_name.to_lowercase() != entry.name.to_lowercase() && vault.has_entry(&new_name) {
-        return Err(TermKeyError::EntryAlreadyExists(new_name));
-    }
-
-    // Re-fetch the entry after borrow checker satisfaction
-    let entry = vault
-        .find_entry_mut_by_id(name)
-        .ok_or_else(|| TermKeyError::EntryNotFound(name.to_string()))?;
-
     // Secret type
     let current_type_idx = match entry.secret_type {
         SecretType::PrivateKey => 0,
@@ -62,7 +54,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
         .items(type_options)
         .default(current_type_idx)
         .interact()
-        .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
 
     if type_idx == 4 {
         return Err(TermKeyError::Cancelled);
@@ -88,7 +80,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
                 ))
                 .default(current_other)
                 .interact_text()
-                .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
             let custom_type = custom_type.trim().to_string();
             if custom_type.is_empty() {
                 return Err(TermKeyError::Cancelled);
@@ -105,7 +97,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
         .with_prompt("Change secret?")
         .default(false)
         .interact()
-        .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
 
     let new_secret = if change_secret {
         let secret = Zeroizing::new(
@@ -147,7 +139,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
             ))
             .default(current_uname)
             .interact_text()
-            .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
         let uname = uname.trim().to_string();
 
         let url_val: String = Input::new()
@@ -161,7 +153,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
             ))
             .default(current_url)
             .interact_text()
-            .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
         let url_val = url_val.trim().to_string();
 
         (
@@ -193,7 +185,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
             ))
             .default(default_network)
             .interact_text()
-            .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
 
         let new_public_address = if new_type == SecretType::PrivateKey {
             let current = if old_type.is_crypto_type() {
@@ -217,7 +209,7 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
                 ))
                 .default(default_addr)
                 .interact_text()
-                .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+                .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
             let trimmed = addr.trim().to_string();
             if trimmed.is_empty() {
                 None
@@ -250,20 +242,29 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
         ))
         .default(entry.notes.clone())
         .interact_text()
-        .map_err(|e| TermKeyError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| TermKeyError::Io(std::io::Error::other(e)))?;
 
     // Apply changes
-    entry.name = new_name.clone();
-    entry.secret_type = new_type;
-    if let Some(secret) = new_secret {
-        entry.secret = secret.to_string();
-    }
-    entry.network = new_network;
-    entry.public_address = new_public_address;
-    entry.username = new_username;
-    entry.url = new_url;
-    entry.notes = new_notes.trim().to_string();
-    entry.updated_at = Utc::now();
+    let original_name = entry.name.clone();
+    let secondary_password = super::prompt_secondary_password(&entry)?;
+    let mut updated = entry;
+    updated.name = new_name.clone();
+    updated.secret_type = new_type;
+    updated.network = new_network;
+    updated.public_address = new_public_address;
+    updated.username = new_username;
+    updated.url = new_url;
+    updated.notes = new_notes.trim().to_string();
+
+    apply_entry_edit(
+        vault,
+        &original_name,
+        updated,
+        new_secret.as_ref().map(|secret| secret.as_str()),
+        secondary_password
+            .as_ref()
+            .map(|password| password.as_str()),
+    )?;
 
     print_success(&format!(
         "Entry '{}' updated successfully.",
@@ -271,4 +272,56 @@ pub fn run_with_vault(vault: &mut VaultData, name: &str) -> Result<()> {
     ));
 
     Ok(())
+}
+
+fn apply_entry_edit(
+    vault: &mut VaultData,
+    original_name: &str,
+    mut updated: crate::vault::model::Entry,
+    new_secret: Option<&str>,
+    secondary_password: Option<&str>,
+) -> Result<()> {
+    if let Some(secret) = new_secret {
+        updated.replace_secret(secret, secondary_password)?;
+    } else {
+        updated.updated_at = Utc::now();
+    }
+    vault.replace_entry_authorized(original_name, updated, secondary_password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_entry_edit;
+    use crate::commands::test_support::protected_entry;
+    use crate::vault::model::VaultData;
+
+    #[test]
+    fn cli_edit_protected_entry_updates_encrypted_value() {
+        let entry = protected_entry("Protected", "old-secret", "view-pass");
+        let original_ciphertext = entry.encrypted_secret.clone();
+        let mut vault = VaultData {
+            entries: vec![entry.clone()],
+            version: 1,
+            revision: 0,
+        };
+        let mut updated = entry;
+        updated.notes = "edited".to_string();
+
+        apply_entry_edit(
+            &mut vault,
+            "Protected",
+            updated,
+            Some("new-secret"),
+            Some("view-pass"),
+        )
+        .unwrap();
+
+        let saved = vault.find_entry("Protected").unwrap();
+        assert_ne!(saved.encrypted_secret, original_ciphertext);
+        assert_eq!(
+            &*saved.reveal_secret(Some("view-pass")).unwrap(),
+            "new-secret"
+        );
+        assert_eq!(saved.secret, "[encrypted]");
+    }
 }

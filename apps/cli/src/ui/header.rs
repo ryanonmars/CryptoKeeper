@@ -32,7 +32,7 @@ fn print_wide_header(width: usize) {
     let tagline = "Encrypted vault for private keys & seed phrases";
 
     // Top border
-    let title_embed = format!(" TermKey ");
+    let title_embed = " TermKey ".to_string();
     let title_dw = display_width(&title_embed);
     let remaining = (inner + 2).saturating_sub(title_dw + 1);
     println!(
@@ -75,11 +75,9 @@ fn print_narrow_header(width: usize) {
     let side = width.saturating_sub(text_dw + 2) / 2;
     let right_side = width.saturating_sub(text_dw + 2 + side);
     println!(
-        "{}{}{}{}{}",
+        "{} {} {}",
         dim_border(&"─".repeat(side)),
-        " ",
         text.cyan().bold(),
-        " ",
         dim_border(&"─".repeat(right_side))
     );
 }

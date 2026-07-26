@@ -14,6 +14,12 @@ pub struct LoginScreen {
     password_field: PasswordField,
 }
 
+impl Default for LoginScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoginScreen {
     pub fn new() -> Self {
         Self {
@@ -27,7 +33,7 @@ impl LoginScreen {
         modifiers: KeyModifiers,
     ) -> Option<Zeroizing<String>> {
         match self.password_field.handle_key(key, modifiers) {
-            PasswordAction::Submit(password) => Some(Zeroizing::new(password)),
+            PasswordAction::Submit(password) => Some(password),
             PasswordAction::Cancel => None,
             PasswordAction::Continue => None,
         }

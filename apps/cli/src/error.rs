@@ -14,11 +14,26 @@ pub enum TermKeyError {
     #[error("Invalid vault file — corrupted or wrong format.")]
     InvalidVaultFormat,
 
+    #[error("Unsupported vault format version: {0}.")]
+    UnsupportedVaultVersion(u32),
+
+    #[error("Vault KDF parameters are outside the accepted policy.")]
+    KdfParametersOutOfPolicy,
+
+    #[error("Vault ciphertext exceeds the maximum supported size.")]
+    VaultTooLarge,
+
+    #[error("Vault changed on disk. Reopen it before saving.")]
+    VaultConflict,
+
     #[error("Entry '{0}' not found. Use `termkey list` to see entries with their index numbers.")]
     EntryNotFound(String),
 
     #[error("Entry '{0}' already exists.")]
     EntryAlreadyExists(String),
+
+    #[error("Invalid entry: {0}")]
+    InvalidEntry(String),
 
     #[error("No entries match '{0}'.")]
     NoSearchResults(String),
@@ -55,6 +70,11 @@ pub enum TermKeyError {
 
     #[error("Password recovery is not configured. Set it up via settings or `termkey init`.")]
     RecoveryNotConfigured,
+
+    #[error(
+        "Legacy security-question recovery is no longer supported. Unlock with your master password, then configure a new recovery phrase."
+    )]
+    LegacyRecoveryUnsupported,
 
     #[error("Recovery failed: {0}")]
     RecoveryFailed(String),

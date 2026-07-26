@@ -1,0 +1,82 @@
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate and audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate
+        run: npm run validate
+
+      - name: Test Node scripts
+        run: node --test scripts/*.test.mjs
+
+      - name: Audit JavaScript dependencies
+        run: npm audit
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.2
+
+      - name: Audit Rust dependencies
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps > /dev/null
+          cargo audit --file Cargo.lock
+
+  rust-platforms:
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: Linux x86_64
+          - os: macos-15-intel
+            platform: macOS Intel
+          - os: macos-15
+            platform: macOS ARM
+          - os: windows-latest
+            platform: Windows x86_64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Check Rust workspace
+        run: cargo check --workspace --all-targets --all-features --locked
+
+      - name: Test Rust workspace
+        run: cargo test --workspace --all-targets --all-features --locked

@@ -6,11 +6,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use std::borrow::Cow;
+use zeroize::Zeroizing;
 
 pub struct InputScreen {
     title: String,
     prompt: String,
-    value: String,
+    value: Zeroizing<String>,
     is_password: bool,
 }
 
@@ -19,7 +21,7 @@ impl InputScreen {
         Self {
             title: title.to_string(),
             prompt: prompt.to_string(),
-            value: String::new(),
+            value: Zeroizing::new(String::new()),
             is_password,
         }
     }
@@ -36,7 +38,7 @@ impl InputScreen {
             }
             KeyCode::Enter => {
                 if !self.value.is_empty() {
-                    Some(InputResult::Submit(self.value.clone()))
+                    Some(InputResult::Submit(std::mem::take(&mut self.value)))
                 } else {
                     None
                 }
@@ -68,10 +70,10 @@ impl InputScreen {
             )
             .border_style(Style::default().fg(Color::Cyan));
 
-        let display_value = if self.is_password {
-            "•".repeat(self.value.len())
+        let display_value: Cow<'_, str> = if self.is_password {
+            Cow::Owned("•".repeat(self.value.chars().count()))
         } else {
-            self.value.clone()
+            Cow::Borrowed(self.value.as_str())
         };
 
         let text = vec![
@@ -95,6 +97,28 @@ impl InputScreen {
 }
 
 pub enum InputResult {
-    Submit(String),
+    Submit(Zeroizing<String>),
     Cancel,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn password_submit_transfers_zeroizing_input_without_leaving_a_copy() {
+        let mut screen = InputScreen::new("Backup", "Password:", true);
+        for character in "backup-secret".chars() {
+            screen.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+
+        let Some(InputResult::Submit(value)) =
+            screen.handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        else {
+            panic!("password was not submitted");
+        };
+        let _: Zeroizing<String> = value;
+        assert!(screen.value.is_empty());
+    }
 }

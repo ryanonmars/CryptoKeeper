@@ -6,16 +6,17 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use zeroize::Zeroizing;
 
 pub struct PasswordField {
-    buffer: String,
+    buffer: Zeroizing<String>,
     prompt: String,
 }
 
 impl PasswordField {
     pub fn new(prompt: &str) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: Zeroizing::new(String::new()),
             prompt: prompt.to_string(),
         }
     }
@@ -44,7 +45,7 @@ impl PasswordField {
                 if self.buffer.is_empty() {
                     PasswordAction::Continue
                 } else {
-                    PasswordAction::Submit(self.buffer.clone())
+                    PasswordAction::Submit(std::mem::take(&mut self.buffer))
                 }
             }
             KeyCode::Esc => PasswordAction::Cancel,
@@ -95,6 +96,27 @@ impl PasswordField {
 
 pub enum PasswordAction {
     Continue,
-    Submit(String),
+    Submit(Zeroizing<String>),
     Cancel,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn submit_transfers_zeroizing_password_without_leaving_a_copy() {
+        let mut field = PasswordField::new("Password:");
+        for character in "master-secret".chars() {
+            field.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+
+        let PasswordAction::Submit(password) = field.handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        else {
+            panic!("password was not submitted");
+        };
+        let _: Zeroizing<String> = password;
+        assert!(field.buffer.is_empty());
+    }
 }

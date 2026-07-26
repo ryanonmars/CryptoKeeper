@@ -58,6 +58,12 @@ impl Drop for AddEntryScreen {
     }
 }
 
+impl Default for AddEntryScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AddEntryScreen {
     pub fn new() -> Self {
         Self {
@@ -493,7 +499,7 @@ impl AddEntryScreen {
     }
 
     fn move_cursor_right(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_right(cursor, value));
+        self.with_active_cursor(text_edit::move_right);
     }
 
     fn move_cursor_home(&mut self) {
@@ -501,23 +507,23 @@ impl AddEntryScreen {
     }
 
     fn move_cursor_end(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_end(cursor, value));
+        self.with_active_cursor(text_edit::move_end);
     }
 
     fn move_cursor_word_left(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_word_left(cursor, value));
+        self.with_active_cursor(text_edit::move_word_left);
     }
 
     fn move_cursor_word_right(&mut self) {
-        self.with_active_cursor(|cursor, value| text_edit::move_word_right(cursor, value));
+        self.with_active_cursor(text_edit::move_word_right);
     }
 
     fn backspace_word(&mut self) {
-        self.with_active_string(|value, cursor| text_edit::backspace_word(value, cursor));
+        self.with_active_string(text_edit::backspace_word);
     }
 
     fn delete_word(&mut self) {
-        self.with_active_string(|value, cursor| text_edit::delete_word(value, cursor));
+        self.with_active_string(text_edit::delete_word);
     }
 
     fn with_active_cursor(&mut self, mut edit: impl FnMut(&mut usize, &str)) {
@@ -741,12 +747,11 @@ impl AddEntryScreen {
             return AddEntryAction::Continue;
         }
 
-        if self.use_secondary_password {
-            if self.secondary_password.is_empty()
-                || self.secondary_password != self.secondary_password_confirm
-            {
-                return AddEntryAction::Continue;
-            }
+        if self.use_secondary_password
+            && (self.secondary_password.is_empty()
+                || self.secondary_password != self.secondary_password_confirm)
+        {
+            return AddEntryAction::Continue;
         }
 
         let network = self.effective_network();
@@ -756,10 +761,8 @@ impl AddEntryScreen {
 
         // Auto-derive public address for crypto types
         let public_address = if self.is_crypto_type() {
-            match derive_address(&self.secret, &self.secret_type, &network) {
-                Ok(addr) => addr,
-                Err(_) => None, // Bad key format — save with no address
-            }
+            // Bad key formats are still saved without a derived address.
+            derive_address(&self.secret, &self.secret_type, &network).unwrap_or_default()
         } else {
             None
         };
@@ -827,7 +830,7 @@ impl AddEntryScreen {
             encrypted_secret_nonce,
         };
 
-        AddEntryAction::Save(entry)
+        AddEntryAction::Save(Box::new(entry))
     }
 
     pub fn render(&self, frame: &mut Frame) {
@@ -1014,9 +1017,9 @@ impl AddEntryScreen {
         lines.push(Line::from(""));
         lines.push(Line::from(""));
 
-        let help_text = if self.current_field == 1 {
-            "\u{2191}\u{2193}: Scroll \u{2502} Enter: Select \u{2502} Tab: Next \u{2502} Esc: Cancel"
-        } else if self.is_crypto_type() && self.current_field == self.network_field() {
+        let help_text = if self.current_field == 1
+            || (self.is_crypto_type() && self.current_field == self.network_field())
+        {
             "\u{2191}\u{2193}: Scroll \u{2502} Enter: Select \u{2502} Tab: Next \u{2502} Esc: Cancel"
         } else if self.has_generate_password_field()
             && self.current_field == self.generate_password_field()
@@ -1161,7 +1164,7 @@ fn centered_rect(percent: u16, r: Rect) -> Rect {
 
 pub enum AddEntryAction {
     Continue,
-    Save(Entry),
+    Save(Box<Entry>),
     Cancel,
 }
 

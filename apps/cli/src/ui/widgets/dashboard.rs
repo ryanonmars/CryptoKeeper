@@ -38,7 +38,7 @@ impl Dashboard {
 
     pub fn render(&mut self, frame: &mut Frame, update_status: &UpdateStatus) {
         let area = frame.area();
-        let menu_lines = self.menu_bar.lines_for_width(area.width).max(1).min(3);
+        let menu_lines = self.menu_bar.lines_for_width(area.width).clamp(1, 3);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)

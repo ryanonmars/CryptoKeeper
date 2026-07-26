@@ -1,15 +1,14 @@
-declare const chrome: any;
-
+(() => {
 type FillCredentialsMessage = {
-  type: "termkey.fillCredentials";
-  entry: {
-    username: string | null;
-    password: string;
-  };
+  type: "termkey-fill-credentials";
+  documentToken: string;
+  username?: string;
+  password: string;
 };
 
 type FillGeneratedPasswordMessage = {
   type: "termkey.fillGeneratedPassword";
+  documentToken: string;
   password: string;
 };
 
@@ -19,6 +18,7 @@ type ContentScriptProbeMessage = {
 
 type CaptureVisibleCredentialsMessage = {
   type: "termkey.captureVisibleCredentials";
+  documentToken: string;
 };
 
 type InspectPageContextMessage = {
@@ -31,7 +31,35 @@ type FillAttemptResult = {
   filledPassword: boolean;
 };
 
+type LoginTargets = {
+  passwordInput?: HTMLInputElement;
+  usernameInput?: HTMLInputElement;
+};
+
+type GeneratedPasswordTargets = {
+  ambiguous?: boolean;
+  primaryPasswordInput?: HTMLInputElement;
+  confirmationPasswordInput?: HTMLInputElement;
+  usernameInput?: HTMLInputElement;
+  primaryScore?: number;
+};
+
 const FILL_RETRY_DELAYS_MS = [0, 150, 350, 700] as const;
+const DOCUMENT_TOKEN = Array.from(
+  crypto.getRandomValues(new Uint8Array(32)),
+  (byte) => byte.toString(16).padStart(2, "0")
+).join("");
+const runtimeChrome = typeof chrome === "undefined" ? undefined : chrome;
+const contentGlobal = globalThis as typeof globalThis & {
+  __termkeyContentScriptLoaded?: boolean;
+};
+
+if (runtimeChrome?.runtime && contentGlobal.__termkeyContentScriptLoaded) {
+  return;
+}
+if (runtimeChrome?.runtime) {
+  contentGlobal.__termkeyContentScriptLoaded = true;
+}
 
 function sleep(delayMs: number) {
   return new Promise<void>((resolve) => {
@@ -157,9 +185,14 @@ function getCandidateRoot(element: HTMLElement | null | undefined) {
   );
 }
 
-function getCandidateRootText(input: HTMLInputElement) {
-  const root = getCandidateRoot(input);
-  return (root?.textContent ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+function getCandidateContext(element: HTMLElement) {
+  const candidateRoot = getCandidateRoot(element);
+  if (candidateRoot) {
+    return candidateRoot;
+  }
+
+  const treeRoot = element.getRootNode();
+  return treeRoot instanceof ShadowRoot ? treeRoot : document.body;
 }
 
 function getContextBoost(input: HTMLInputElement) {
@@ -275,6 +308,16 @@ function getPasswordCandidateScore(input: HTMLInputElement) {
 
   const autocompleteTokens = getAutocompleteTokens(input);
   const descriptor = getInputDescriptor(input);
+
+  if (
+    autocompleteTokens.includes("one-time-code") ||
+    autocompleteTokens.includes("new-password") ||
+    /confirm|confirmation|repeat|verify|re-enter/.test(descriptor) ||
+    /otp|one.?time|2fa|verification.?code/.test(descriptor)
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
   let score = 0;
 
   if (autocompleteTokens.includes("current-password")) {
@@ -304,28 +347,12 @@ function getPasswordCandidateScore(input: HTMLInputElement) {
   return score + getContextBoost(input);
 }
 
-function findBestPasswordInput(inputs: HTMLInputElement[]) {
-  const passwordCandidates = inputs
-    .map((input) => ({
-      input,
-      score: getPasswordCandidateScore(input),
-    }))
-    .filter(
-      (
-        candidate
-      ): candidate is { input: HTMLInputElement; score: number } =>
-        Number.isFinite(candidate.score)
-    )
-    .sort((left, right) => right.score - left.score);
-
-  return passwordCandidates[0]?.input;
-}
-
-function findBestUsernameInput(
+function findBestUsernameCandidate(
   inputs: HTMLInputElement[],
-  passwordInput: HTMLInputElement | undefined
+  passwordInput: HTMLInputElement | undefined,
+  requireSharedContext: boolean
 ) {
-  const usernameCandidates = inputs
+  return inputs
     .map((input) => ({
       input,
       score: getUsernameCandidateScore(input, passwordInput),
@@ -334,11 +361,24 @@ function findBestUsernameInput(
       (
         candidate
       ): candidate is { input: HTMLInputElement; score: number } =>
-        Number.isFinite(candidate.score) && candidate.score > 0
+        Number.isFinite(candidate.score) &&
+        candidate.score > 0 &&
+        (!requireSharedContext ||
+          sharesCandidateContext(candidate.input, passwordInput))
     )
-    .sort((left, right) => right.score - left.score);
+    .sort((left, right) => right.score - left.score)[0];
+}
 
-  return usernameCandidates[0]?.input;
+function findBestUsernameInput(
+  inputs: HTMLInputElement[],
+  passwordInput: HTMLInputElement | undefined,
+  requireSharedContext = false
+) {
+  return findBestUsernameCandidate(
+    inputs,
+    passwordInput,
+    requireSharedContext
+  )?.input;
 }
 
 function sharesCandidateContext(
@@ -349,13 +389,134 @@ function sharesCandidateContext(
     return false;
   }
 
-  if (left.form && right.form && left.form === right.form) {
-    return true;
+  if (left.form || right.form) {
+    return Boolean(left.form && right.form && left.form === right.form);
   }
 
-  const leftRoot = getCandidateRoot(left);
-  const rightRoot = getCandidateRoot(right);
-  return Boolean(leftRoot && rightRoot && leftRoot === rightRoot);
+  return getCandidateContext(left) === getCandidateContext(right);
+}
+
+function compareLoginGroups(
+  left: {
+    usernameInput?: HTMLInputElement;
+    groupScore: number;
+  },
+  right: {
+    usernameInput?: HTMLInputElement;
+    groupScore: number;
+  }
+) {
+  const pairDifference =
+    Number(Boolean(right.usernameInput)) -
+    Number(Boolean(left.usernameInput));
+  return pairDifference || right.groupScore - left.groupScore;
+}
+
+function findBestLoginTargets(inputs: HTMLInputElement[]): LoginTargets {
+  const groups = inputs
+    .map((passwordInput) => ({
+      passwordInput,
+      passwordScore: getPasswordCandidateScore(passwordInput),
+    }))
+    .filter(
+      (
+        candidate
+      ): candidate is {
+        passwordInput: HTMLInputElement;
+        passwordScore: number;
+      } =>
+        Number.isFinite(candidate.passwordScore) &&
+        candidate.passwordScore >= 0
+    )
+    .map((candidate) => {
+      const usernameCandidate = findBestUsernameCandidate(
+        inputs,
+        candidate.passwordInput,
+        true
+      );
+      return {
+        ...candidate,
+        usernameInput: usernameCandidate?.input,
+        groupScore:
+          candidate.passwordScore + (usernameCandidate?.score ?? 0),
+      };
+    })
+    .sort(compareLoginGroups);
+
+  if (
+    groups.length > 1 &&
+    compareLoginGroups(groups[0], groups[1]) === 0
+  ) {
+    return {};
+  }
+
+  return groups[0] ?? {};
+}
+
+function hasGeneratedPasswordSemanticSignal(text: string) {
+  return /(?:new|create|choose|set|reset|change|update)[\s_-]{0,3}(?:your[\s_-]+)?(?:pass(?:word|code)?|secret|credential)|(?:pass(?:word|code)?|secret|credential)[\s_-]{0,3}(?:new|reset|change|update)|sign.?up|signup|register|registration|create[\s_-]+(?:your[\s_-]+)?account|add[\s_-]+(?:member|user|account)|invite/.test(
+    text
+  );
+}
+
+function getGeneratedFieldIntentText(input: HTMLInputElement) {
+  const labels = new Set<string>();
+  input.labels?.forEach((label) => {
+    if (!label.querySelector("a, nav, [role='link'], [role='navigation']")) {
+      labels.add(label.textContent ?? "");
+    }
+  });
+
+  return [
+    input.name,
+    input.id,
+    input.placeholder,
+    input.autocomplete,
+    getInputText(input, "aria-label"),
+    getInputText(input, "data-testid"),
+    getInputText(input, "data-qa"),
+    getInputText(input, "data-test"),
+    ...labels,
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function getGeneratedStructuralIntentText(input: HTMLInputElement) {
+  const root = input.form ?? getCandidateRoot(input);
+  if (!root) {
+    return "";
+  }
+
+  const intentText = [
+    root.getAttribute("id") ?? "",
+    root.getAttribute("name") ?? "",
+    root.getAttribute("aria-label") ?? "",
+  ];
+  root
+    .querySelectorAll<HTMLElement>(
+      "h1, h2, h3, h4, h5, h6, legend, button:not([type]), button[type='submit'], input[type='submit']"
+    )
+    .forEach((element) => {
+      if (
+        element.closest("a, nav, [role='link'], [role='navigation']") ||
+        element.querySelector("a, nav, [role='link'], [role='navigation']")
+      ) {
+        return;
+      }
+
+      intentText.push(
+        element instanceof HTMLInputElement
+          ? element.value
+          : element.textContent ?? ""
+      );
+    });
+
+  return intentText.join(" ").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function hasLoginSemanticSignal(text: string) {
+  return /sign.?in|log.?in|login/.test(text);
 }
 
 function getGeneratedPasswordCandidateScore(input: HTMLInputElement) {
@@ -365,38 +526,59 @@ function getGeneratedPasswordCandidateScore(input: HTMLInputElement) {
 
   const autocompleteTokens = getAutocompleteTokens(input);
   const descriptor = getInputDescriptor(input);
-  const rootText = getCandidateRootText(input);
-  let score = 0;
+  const fieldIntentText = getGeneratedFieldIntentText(input);
+  const structuralIntentText = getGeneratedStructuralIntentText(input);
 
+  if (
+    autocompleteTokens.includes("one-time-code") ||
+    autocompleteTokens.includes("current-password") ||
+    /current|old|existing/.test(descriptor) ||
+    /otp|one.?time|2fa|code|pin|verification/.test(descriptor)
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const hasStrongFieldSignal =
+    autocompleteTokens.includes("new-password") ||
+    hasGeneratedPasswordSemanticSignal(fieldIntentText);
+  const hasStructuralGeneratedSignal =
+    hasGeneratedPasswordSemanticSignal(structuralIntentText);
+  const hasStructuralLoginSignal =
+    hasLoginSemanticSignal(structuralIntentText);
+  if (
+    !hasStrongFieldSignal &&
+    (!hasStructuralGeneratedSignal || hasStructuralLoginSignal)
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let semanticScore = 0;
   if (autocompleteTokens.includes("new-password")) {
-    score += 20;
+    semanticScore += 20;
   }
 
-  if (/new|create|choose|set|signup|sign.?up|register/.test(descriptor)) {
-    score += 10;
+  if (hasGeneratedPasswordSemanticSignal(fieldIntentText)) {
+    semanticScore += 10;
   }
 
-  if (/create|new|add|invite|register|sign.?up|member|user|account/.test(rootText)) {
-    score += 10;
+  if (
+    hasStructuralGeneratedSignal &&
+    (!hasStructuralLoginSignal || hasStrongFieldSignal)
+  ) {
+    semanticScore += 10;
   }
+
+  if (semanticScore === 0) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = semanticScore;
 
   if (/confirm|confirmation|repeat|verify|re-enter/.test(descriptor)) {
     score -= 8;
   }
 
-  if (autocompleteTokens.includes("current-password")) {
-    score -= 18;
-  }
-
-  if (/current|old|existing/.test(descriptor)) {
-    score -= 18;
-  }
-
-  if (/sign.?in|log.?in|login/.test(rootText)) {
-    score -= 12;
-  }
-
-  if (/otp|one.?time|2fa|code|search|coupon|promo/.test(descriptor)) {
+  if (hasStructuralLoginSignal) {
     score -= 12;
   }
 
@@ -417,9 +599,34 @@ function getConfirmationPasswordScore(
 
   const autocompleteTokens = getAutocompleteTokens(input);
   const descriptor = getInputDescriptor(input);
+
+  if (
+    !sharesCandidateContext(input, primaryPasswordInput) ||
+    autocompleteTokens.includes("one-time-code") ||
+    autocompleteTokens.includes("current-password") ||
+    /current|old|existing/.test(descriptor) ||
+    /otp|one.?time|2fa|code|pin|verification/.test(descriptor)
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const hasConfirmationDescriptor =
+    /confirm|confirmation|repeat|verify|re-enter|match/.test(descriptor);
+  const followsPrimary = Boolean(
+    primaryPasswordInput &&
+      input.compareDocumentPosition(primaryPasswordInput) &
+        Node.DOCUMENT_POSITION_PRECEDING
+  );
+  if (
+    !hasConfirmationDescriptor &&
+    !(autocompleteTokens.includes("new-password") && followsPrimary)
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
   let score = 0;
 
-  if (/confirm|confirmation|repeat|verify|re-enter|match/.test(descriptor)) {
+  if (hasConfirmationDescriptor) {
     score += 18;
   }
 
@@ -427,35 +634,19 @@ function getConfirmationPasswordScore(
     score += 8;
   }
 
-  if (sharesCandidateContext(input, primaryPasswordInput)) {
-    score += 8;
-  }
+  score += 8;
 
-  if (
-    primaryPasswordInput &&
-    input.compareDocumentPosition(primaryPasswordInput) &
-      Node.DOCUMENT_POSITION_PRECEDING
-  ) {
+  if (followsPrimary) {
     score += 6;
-  }
-
-  if (autocompleteTokens.includes("current-password")) {
-    score -= 18;
-  }
-
-  if (/current|old|existing/.test(descriptor)) {
-    score -= 18;
-  }
-
-  if (/otp|one.?time|2fa|code|search|coupon|promo/.test(descriptor)) {
-    score -= 12;
   }
 
   return score + getContextBoost(input);
 }
 
-function findGeneratedPasswordTargets(inputs: HTMLInputElement[]) {
-  const passwordCandidates = inputs
+function findGeneratedPasswordTargets(
+  inputs: HTMLInputElement[]
+): GeneratedPasswordTargets {
+  const primaryCandidates = inputs
     .map((input) => ({
       input,
       score: getGeneratedPasswordCandidateScore(input),
@@ -464,51 +655,84 @@ function findGeneratedPasswordTargets(inputs: HTMLInputElement[]) {
       (
         candidate
       ): candidate is { input: HTMLInputElement; score: number } =>
-        Number.isFinite(candidate.score)
+        Number.isFinite(candidate.score) &&
+        candidate.score > 0 &&
+        !looksLikeConfirmationPassword(candidate.input)
     )
     .sort((left, right) => right.score - left.score);
 
-  const primaryPasswordInput = passwordCandidates[0]?.input;
-  if (!primaryPasswordInput) {
+  if (primaryCandidates.length === 0) {
     return {};
   }
 
-  const confirmationCandidates = inputs
-    .map((input) => ({
-      input,
-      score: getConfirmationPasswordScore(input, primaryPasswordInput),
-    }))
-    .filter(
-      (
-        candidate
-      ): candidate is { input: HTMLInputElement; score: number } =>
-        Number.isFinite(candidate.score)
-    )
-    .sort((left, right) => right.score - left.score);
+  const groups = primaryCandidates
+    .map((primaryCandidate) => {
+      const confirmationCandidate = inputs
+        .map((input) => ({
+          input,
+          score: getConfirmationPasswordScore(
+            input,
+            primaryCandidate.input
+          ),
+        }))
+        .filter(
+          (
+            candidate
+          ): candidate is { input: HTMLInputElement; score: number } =>
+            Number.isFinite(candidate.score) && candidate.score > 0
+        )
+        .sort((left, right) => right.score - left.score)[0];
+      const usernameCandidate = findBestUsernameCandidate(
+        inputs,
+        primaryCandidate.input,
+        true
+      );
+      return {
+        primaryPasswordInput: primaryCandidate.input,
+        confirmationPasswordInput: confirmationCandidate?.input,
+        usernameInput: usernameCandidate?.input,
+        primaryScore: primaryCandidate.score,
+        groupScore:
+          primaryCandidate.score +
+          (confirmationCandidate?.score ?? 0) +
+          (usernameCandidate?.score ?? 0),
+      };
+    })
+    .sort(compareGeneratedPasswordGroups);
 
-  let confirmationPasswordInput = confirmationCandidates[0]?.input;
   if (
-    !confirmationPasswordInput &&
-    passwordCandidates.length > 1 &&
-    sharesCandidateContext(passwordCandidates[1].input, primaryPasswordInput)
+    groups.length > 1 &&
+    compareGeneratedPasswordGroups(groups[0], groups[1]) === 0
   ) {
-    confirmationPasswordInput = passwordCandidates[1].input;
+    return { ambiguous: true };
   }
 
-  return {
-    primaryPasswordInput,
-    confirmationPasswordInput,
-    usernameInput: findBestUsernameInput(inputs, primaryPasswordInput),
-    primaryScore: passwordCandidates[0]?.score ?? Number.NEGATIVE_INFINITY,
-  };
+  return groups[0] ?? {};
+}
+
+function compareGeneratedPasswordGroups(
+  left: {
+    confirmationPasswordInput?: HTMLInputElement;
+    groupScore: number;
+  },
+  right: {
+    confirmationPasswordInput?: HTMLInputElement;
+    groupScore: number;
+  }
+) {
+  const pairDifference =
+    Number(Boolean(right.confirmationPasswordInput)) -
+    Number(Boolean(left.confirmationPasswordInput));
+  return pairDifference || right.groupScore - left.groupScore;
 }
 
 function canGeneratePasswordForInputs(inputs: HTMLInputElement[]) {
   const targets = findGeneratedPasswordTargets(inputs);
   return Boolean(
     targets.primaryPasswordInput &&
+      typeof targets.primaryScore === "number" &&
       Number.isFinite(targets.primaryScore) &&
-      targets.primaryScore >= 0
+      targets.primaryScore > 0
   );
 }
 
@@ -526,24 +750,31 @@ function looksLikeConfirmationPassword(input: HTMLInputElement) {
 }
 
 function inferPageIntent(inputs: HTMLInputElement[]) {
-  const visiblePasswordInputs = inputs.filter(
-    (input) => isVisibleInput(input) && getInputType(input) === "password"
+  const loginTargets = findBestLoginTargets(inputs);
+  const generatedTargets = findGeneratedPasswordTargets(inputs);
+  const hasPasswordField = Boolean(
+    loginTargets.passwordInput || generatedTargets.primaryPasswordInput
   );
-  const hasPasswordField = visiblePasswordInputs.length > 0;
-  const hasCurrentPassword = visiblePasswordInputs.some((input) =>
-    hasAutocompleteToken(input, "current-password")
+  const hasConfirmationPasswordField = Boolean(
+    generatedTargets.confirmationPasswordInput
   );
-  const hasNewPassword = visiblePasswordInputs.some((input) =>
-    hasAutocompleteToken(input, "new-password")
-  );
-  const hasConfirmationPasswordField = visiblePasswordInputs.some(
-    looksLikeConfirmationPassword
+  const hasCurrentPasswordInGeneratedContext = inputs.some(
+    (input) =>
+      isVisibleInput(input) &&
+      getInputType(input) === "password" &&
+      hasAutocompleteToken(input, "current-password") &&
+      sharesCandidateContext(input, generatedTargets.primaryPasswordInput)
   );
   const hasUsernameField = Boolean(
-    findBestUsernameInput(inputs, findBestPasswordInput(inputs))
+    loginTargets.usernameInput ||
+      generatedTargets.usernameInput ||
+      findBestUsernameInput(inputs, undefined)
   );
 
-  if (hasCurrentPassword && (hasNewPassword || hasConfirmationPasswordField)) {
+  if (
+    generatedTargets.primaryPasswordInput &&
+    hasCurrentPasswordInGeneratedContext
+  ) {
     return {
       intent: "password_change" as const,
       hasPasswordField,
@@ -551,7 +782,7 @@ function inferPageIntent(inputs: HTMLInputElement[]) {
     };
   }
 
-  if (hasNewPassword || hasConfirmationPasswordField) {
+  if (generatedTargets.primaryPasswordInput) {
     return {
       intent: "signup" as const,
       hasPasswordField,
@@ -578,21 +809,22 @@ function fillVisibleCredentials(
   message: FillCredentialsMessage
 ): FillAttemptResult {
   const inputs = collectInputElements();
-  const passwordInput = findBestPasswordInput(inputs);
-  const usernameInput = message.entry.username
-    ? findBestUsernameInput(inputs, passwordInput)
+  const targets = findBestLoginTargets(inputs);
+  const passwordInput = targets.passwordInput;
+  const usernameInput = message.username
+    ? targets.usernameInput
     : undefined;
 
   let filledUsername = false;
   let filledPassword = false;
 
-  if (message.entry.username && usernameInput) {
-    setInputValue(usernameInput, message.entry.username);
+  if (message.username && usernameInput) {
+    setInputValue(usernameInput, message.username);
     filledUsername = true;
   }
 
   if (passwordInput) {
-    setInputValue(passwordInput, message.entry.password);
+    setInputValue(passwordInput, message.password);
     filledPassword = true;
   }
 
@@ -623,7 +855,7 @@ async function fillCredentials(message: FillCredentialsMessage) {
 
   const filledFields = Number(filledUsername) + Number(filledPassword);
   if (filledFields === 0) {
-    if (message.entry.username) {
+    if (message.username) {
       return {
         ok: false,
         error: "No visible username or password field was found on this page.",
@@ -646,8 +878,25 @@ async function fillCredentials(message: FillCredentialsMessage) {
 
 function captureVisibleCredentials() {
   const inputs = collectInputElements();
-  const passwordInput = findBestPasswordInput(inputs);
-  const usernameInput = findBestUsernameInput(inputs, passwordInput);
+  const inferred = inferPageIntent(inputs);
+  const loginTargets = findBestLoginTargets(inputs);
+  const generatedTargets = findGeneratedPasswordTargets(inputs);
+  if (generatedTargets.ambiguous) {
+    return {
+      ok: false,
+      error: "No visible password field was found on this page.",
+    };
+  }
+  const useGeneratedTargets =
+    inferred.intent === "signup" || inferred.intent === "password_change";
+  const passwordInput = useGeneratedTargets
+    ? generatedTargets.primaryPasswordInput
+    : loginTargets.passwordInput;
+  const usernameInput =
+    (useGeneratedTargets
+      ? generatedTargets.usernameInput
+      : loginTargets.usernameInput) ??
+    (passwordInput ? undefined : findBestUsernameInput(inputs, undefined));
   const username = usernameInput?.value.trim() || null;
 
   if (!passwordInput) {
@@ -724,9 +973,14 @@ function fillGeneratedPassword(message: FillGeneratedPasswordMessage) {
 
 function inspectPageContext() {
   const inputs = collectInputElements();
-  const passwordInput = findBestPasswordInput(inputs);
-  const usernameInput = findBestUsernameInput(inputs, passwordInput);
   const inferred = inferPageIntent(inputs);
+  const loginTargets = findBestLoginTargets(inputs);
+  const generatedTargets = findGeneratedPasswordTargets(inputs);
+  const usernameInput =
+    inferred.intent === "signup" || inferred.intent === "password_change"
+      ? generatedTargets.usernameInput
+      : loginTargets.usernameInput ??
+        findBestUsernameInput(inputs, undefined);
 
   return {
     ok: true,
@@ -738,7 +992,7 @@ function inspectPageContext() {
   };
 }
 
-chrome.runtime.onMessage.addListener(
+runtimeChrome?.runtime?.onMessage?.addListener(
   (
     message:
       | FillCredentialsMessage
@@ -746,11 +1000,28 @@ chrome.runtime.onMessage.addListener(
       | ContentScriptProbeMessage
       | CaptureVisibleCredentialsMessage
       | InspectPageContextMessage,
-    _sender: unknown,
+    sender: { id?: string },
     sendResponse: (response: unknown) => void
   ) => {
+    if (sender.id !== runtimeChrome.runtime.id) {
+      return false;
+    }
+
     if (message?.type === "termkey.contentScriptProbe") {
-      sendResponse({ ok: true });
+      sendResponse({ ok: true, documentToken: DOCUMENT_TOKEN });
+      return true;
+    }
+
+    if (
+      (message?.type === "termkey.captureVisibleCredentials" ||
+        message?.type === "termkey.fillGeneratedPassword" ||
+        message?.type === "termkey-fill-credentials") &&
+      message.documentToken !== DOCUMENT_TOKEN
+    ) {
+      sendResponse({
+        ok: false,
+        error: "The page document changed before delivery.",
+      });
       return true;
     }
 
@@ -760,7 +1031,10 @@ chrome.runtime.onMessage.addListener(
     }
 
     if (message?.type === "termkey.inspectPageContext") {
-      sendResponse(inspectPageContext());
+      sendResponse({
+        ...inspectPageContext(),
+        documentToken: DOCUMENT_TOKEN,
+      });
       return true;
     }
 
@@ -769,7 +1043,7 @@ chrome.runtime.onMessage.addListener(
       return true;
     }
 
-    if (message?.type !== "termkey.fillCredentials") {
+    if (message?.type !== "termkey-fill-credentials") {
       return false;
     }
 
@@ -789,4 +1063,7 @@ chrome.runtime.onMessage.addListener(
   }
 );
 
-console.log("TermKey content script running");
+if (runtimeChrome?.runtime) {
+  console.log("TermKey content script running");
+}
+})();

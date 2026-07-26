@@ -1,168 +1,106 @@
 use crossterm::event::{KeyCode, KeyModifiers};
+use rand::seq::SliceRandom;
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::config::model::RECOVERY_QUESTIONS;
-use crate::crypto::recovery;
-
-#[derive(Clone, Copy, PartialEq)]
-enum Step {
-    SelectQuestion,
-    EnterAnswer,
-    ConfirmAnswer,
+enum SetupStep {
+    Display,
+    Confirm,
 }
 
 pub struct RecoverySetupScreen {
-    step: Step,
-    question_index: usize,
-    answer: String,
-    confirm_answer: String,
-    error_message: Option<String>,
-}
-
-impl Drop for RecoverySetupScreen {
-    fn drop(&mut self) {
-        self.answer.zeroize();
-        self.confirm_answer.zeroize();
-    }
+    phrase: Zeroizing<String>,
+    words: Vec<Zeroizing<String>>,
+    positions: [usize; 3],
+    confirmation_index: usize,
+    input: Zeroizing<String>,
+    step: SetupStep,
+    error: Option<String>,
 }
 
 pub enum RecoverySetupAction {
     Continue,
     Cancel,
-    /// Setup complete: (question_index, normalized_answer)
-    Complete {
-        question_index: u8,
-        answer: String,
-    },
+    Confirmed(Zeroizing<String>),
 }
 
 impl RecoverySetupScreen {
-    pub fn new() -> Self {
+    pub fn new(phrase: Zeroizing<String>) -> Self {
+        let mut positions: Vec<usize> = (0..24).collect();
+        positions.shuffle(&mut rand::thread_rng());
+        Self::with_confirmation_positions(phrase, [positions[0], positions[1], positions[2]])
+    }
+
+    fn with_confirmation_positions(phrase: Zeroizing<String>, positions: [usize; 3]) -> Self {
+        let words = phrase
+            .split_whitespace()
+            .map(|word| Zeroizing::new(word.to_string()))
+            .collect();
         Self {
-            step: Step::SelectQuestion,
-            question_index: 0,
-            answer: String::new(),
-            confirm_answer: String::new(),
-            error_message: None,
+            phrase,
+            words,
+            positions,
+            confirmation_index: 0,
+            input: Zeroizing::new(String::new()),
+            step: SetupStep::Display,
+            error: None,
         }
     }
 
     pub fn handle_key(&mut self, key: KeyCode, modifiers: KeyModifiers) -> RecoverySetupAction {
         if key == KeyCode::Esc {
-            match self.step {
-                Step::SelectQuestion => return RecoverySetupAction::Cancel,
-                Step::EnterAnswer => {
-                    self.answer.zeroize();
-                    self.answer = String::new();
-                    self.step = Step::SelectQuestion;
-                    self.error_message = None;
-                    return RecoverySetupAction::Continue;
-                }
-                Step::ConfirmAnswer => {
-                    self.confirm_answer.zeroize();
-                    self.confirm_answer = String::new();
-                    self.step = Step::EnterAnswer;
-                    self.error_message = None;
-                    return RecoverySetupAction::Continue;
-                }
-            }
+            return RecoverySetupAction::Cancel;
         }
-
-        self.error_message = None;
 
         match self.step {
-            Step::SelectQuestion => match key {
-                KeyCode::Up => {
-                    if self.question_index > 0 {
-                        self.question_index -= 1;
-                    }
-                    RecoverySetupAction::Continue
+            SetupStep::Display => {
+                if key == KeyCode::Enter {
+                    self.step = SetupStep::Confirm;
                 }
-                KeyCode::Down => {
-                    if self.question_index < RECOVERY_QUESTIONS.len() - 1 {
-                        self.question_index += 1;
-                    }
-                    RecoverySetupAction::Continue
-                }
-                KeyCode::Enter => {
-                    self.step = Step::EnterAnswer;
-                    RecoverySetupAction::Continue
-                }
-                _ => RecoverySetupAction::Continue,
-            },
-            Step::EnterAnswer => match key {
-                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.answer.push(c);
-                    RecoverySetupAction::Continue
+            }
+            SetupStep::Confirm => match key {
+                KeyCode::Char(character) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.input.push(character);
+                    self.error = None;
                 }
                 KeyCode::Backspace => {
-                    self.answer.pop();
-                    RecoverySetupAction::Continue
+                    self.input.pop();
+                    self.error = None;
                 }
                 KeyCode::Enter => {
-                    let trimmed = self.answer.trim();
-                    if trimmed.len() < 3 {
-                        self.error_message =
-                            Some("Answer must be at least 3 characters.".to_string());
-                        RecoverySetupAction::Continue
-                    } else {
-                        self.step = Step::ConfirmAnswer;
-                        RecoverySetupAction::Continue
+                    let position = self.positions[self.confirmation_index];
+                    if self.input.trim() != self.words[position].as_str() {
+                        self.input.zeroize();
+                        self.error = Some(format!(
+                            "That word is incorrect. Enter word #{} again.",
+                            position + 1
+                        ));
+                        return RecoverySetupAction::Continue;
+                    }
+
+                    self.input.zeroize();
+                    self.confirmation_index += 1;
+                    if self.confirmation_index == self.positions.len() {
+                        self.words.zeroize();
+                        return RecoverySetupAction::Confirmed(std::mem::take(&mut self.phrase));
                     }
                 }
-                _ => RecoverySetupAction::Continue,
-            },
-            Step::ConfirmAnswer => match key {
-                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.confirm_answer.push(c);
-                    RecoverySetupAction::Continue
-                }
-                KeyCode::Backspace => {
-                    self.confirm_answer.pop();
-                    RecoverySetupAction::Continue
-                }
-                KeyCode::Enter => {
-                    let a = recovery::normalize_answer(&self.answer);
-                    let b = recovery::normalize_answer(&self.confirm_answer);
-                    if a != b {
-                        self.error_message = Some("Answers do not match.".to_string());
-                        self.confirm_answer.zeroize();
-                        self.confirm_answer = String::new();
-                        RecoverySetupAction::Continue
-                    } else {
-                        RecoverySetupAction::Complete {
-                            question_index: self.question_index as u8,
-                            answer: a,
-                        }
-                    }
-                }
-                _ => RecoverySetupAction::Continue,
+                _ => {}
             },
         }
+        RecoverySetupAction::Continue
     }
 
     pub fn render(&self, frame: &mut Frame) {
-        let area = frame.area();
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(14),
-                Constraint::Min(1),
-            ])
-            .split(area);
-
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Set Up Recovery Question ")
+            .title(" Recovery Phrase Setup ")
             .title_style(
                 Style::default()
                     .fg(Color::Yellow)
@@ -170,142 +108,126 @@ impl RecoverySetupScreen {
             )
             .border_style(Style::default().fg(Color::Yellow));
 
-        let inner_area = chunks[1];
-        let centered = centered_rect(90, inner_area);
-
-        match self.step {
-            Step::SelectQuestion => {
-                let mut lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Select a recovery question:",
-                        Style::default().fg(Color::White),
-                    )),
-                    Line::from(""),
-                ];
-
-                for (i, question) in RECOVERY_QUESTIONS.iter().enumerate() {
-                    let style = if i == self.question_index {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-                    let prefix = if i == self.question_index {
-                        " \u{25b8} "
-                    } else {
-                        "   "
-                    };
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{}", prefix, question),
-                        style,
-                    )));
-                }
-
-                lines.push(Line::from(""));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  \u{2191}/\u{2193}: Navigate | Enter: Select | Esc: Cancel",
+        let lines = match self.step {
+            SetupStep::Display => vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Write down this recovery phrase. It will only be shown once.",
+                    Style::default().fg(Color::White),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    self.phrase.as_str(),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Press Enter when you have saved it, or Esc to cancel.",
                     Style::default().fg(Color::DarkGray),
-                )));
-
-                let paragraph = Paragraph::new(lines)
-                    .block(block)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, centered);
-            }
-            Step::EnterAnswer => {
-                let question = RECOVERY_QUESTIONS[self.question_index];
-                let masked = "\u{2022}".repeat(self.answer.len());
-
+                )),
+            ],
+            SetupStep::Confirm => {
+                let position = self.positions[self.confirmation_index];
                 let mut lines = vec![
                     Line::from(""),
                     Line::from(Span::styled(
-                        question,
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(""),
-                    Line::from(vec![
-                        Span::styled("  Your answer: ", Style::default().fg(Color::White)),
-                        Span::styled(masked, Style::default().fg(Color::Yellow)),
-                        Span::styled("\u{2588}", Style::default().fg(Color::Cyan)),
-                    ]),
-                    Line::from(Span::styled(
-                        "  (minimum 3 characters)",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ];
-
-                if let Some(ref error) = self.error_message {
-                    lines.push(Line::from(""));
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", error),
-                        Style::default().fg(Color::Red),
-                    )));
-                }
-
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  Enter: Submit | Esc: Back",
-                    Style::default().fg(Color::DarkGray),
-                )));
-
-                let paragraph = Paragraph::new(lines)
-                    .block(block)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, centered);
-            }
-            Step::ConfirmAnswer => {
-                let masked = "\u{2022}".repeat(self.confirm_answer.len());
-
-                let mut lines = vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Re-enter your answer to confirm:",
+                        format!(
+                            "Confirm word #{} ({}/3):",
+                            position + 1,
+                            self.confirmation_index + 1
+                        ),
                         Style::default().fg(Color::White),
                     )),
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled("  Confirm: ", Style::default().fg(Color::White)),
-                        Span::styled(masked, Style::default().fg(Color::Yellow)),
-                        Span::styled("\u{2588}", Style::default().fg(Color::Cyan)),
+                        Span::raw("  "),
+                        Span::raw(self.input.as_str()),
+                        Span::raw("█"),
                     ]),
                 ];
-
-                if let Some(ref error) = self.error_message {
+                if let Some(error) = &self.error {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", error),
+                        error.as_str(),
                         Style::default().fg(Color::Red),
                     )));
                 }
-
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  Enter: Submit | Esc: Back",
-                    Style::default().fg(Color::DarkGray),
-                )));
-
-                let paragraph = Paragraph::new(lines)
-                    .block(block)
-                    .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, centered);
+                lines
             }
-        }
+        };
+
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .alignment(ratatui::layout::Alignment::Center);
+        frame.render_widget(paragraph, centered_rect(80, frame.area()));
     }
 }
 
-fn centered_rect(percent: u16, r: Rect) -> Rect {
-    let width = r.width * percent / 100;
-    let x = r.x + (r.width - width) / 2;
+impl Drop for RecoverySetupScreen {
+    fn drop(&mut self) {
+        self.input.zeroize();
+        self.words.zeroize();
+    }
+}
+
+fn centered_rect(percent: u16, area: Rect) -> Rect {
+    let width = area.width * percent / 100;
+    let x = area.x + (area.width - width) / 2;
     Rect {
         x,
-        y: r.y,
+        y: area.y,
         width,
-        height: r.height,
+        height: area.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_confirmation_rejects_wrong_words() {
+        let phrase = crate::crypto::recovery::generate_recovery_phrase().unwrap();
+        let words: Vec<_> = phrase.split_whitespace().map(str::to_string).collect();
+        let mut screen = RecoverySetupScreen::with_confirmation_positions(
+            Zeroizing::new(phrase.to_string()),
+            [0, 5, 23],
+        );
+
+        assert!(matches!(
+            screen.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            RecoverySetupAction::Continue
+        ));
+        for character in "wrong".chars() {
+            screen.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+        assert!(matches!(
+            screen.handle_key(KeyCode::Enter, KeyModifiers::NONE),
+            RecoverySetupAction::Continue
+        ));
+
+        for position in [0, 5, 23] {
+            for character in words[position].chars() {
+                screen.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+            }
+            let action = screen.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            if position != 23 {
+                assert!(matches!(action, RecoverySetupAction::Continue));
+            } else {
+                assert!(matches!(action, RecoverySetupAction::Confirmed(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_render_borrows_the_zeroizing_input() {
+        let source = include_str!("recovery_setup.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(!production.contains("Line::from(format!(\"  {}█\""));
+        assert!(production.contains("Span::raw(self.input.as_str())"));
     }
 }

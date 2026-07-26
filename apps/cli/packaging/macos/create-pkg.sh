@@ -34,6 +34,22 @@ uninstaller_source="$script_dir/Uninstaller.swift"
 swift_cache_dir="$staging_dir/swift-cache"
 native_host_binary_path=${TERMKEY_NATIVE_HOST_BINARY:-"$(cd "$(dirname "$binary_path")" && pwd)/termkey-native-host"}
 extension_source_dir=${TERMKEY_EXTENSION_DIR:-"$repo_root/apps/extension"}
+apple_signing_enabled=${APPLE_SIGNING_ENABLED:-false}
+: "${TERMKEY_MACOS_ARCH:?TERMKEY_MACOS_ARCH must be x86_64 or arm64}"
+: "${MACOSX_DEPLOYMENT_TARGET:?MACOSX_DEPLOYMENT_TARGET is required}"
+
+case "$TERMKEY_MACOS_ARCH" in
+  x86_64 | arm64) ;;
+  *)
+    echo "unsupported macOS architecture: $TERMKEY_MACOS_ARCH" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! "$MACOSX_DEPLOYMENT_TARGET" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
+  echo "invalid macOS deployment target: $MACOSX_DEPLOYMENT_TARGET" >&2
+  exit 1
+fi
 
 if [[ ! -f "$native_host_binary_path" ]]; then
   echo "native host binary not found: $native_host_binary_path" >&2
@@ -64,7 +80,9 @@ create_app_bundle() {
 
   CLANG_MODULE_CACHE_PATH="$swift_cache_dir" \
   SWIFT_MODULE_CACHE_PATH="$swift_cache_dir" \
-  swiftc -O -o "$app_executable" "$source_path"
+  swiftc -O -target "${TERMKEY_MACOS_ARCH}-apple-macosx${MACOSX_DEPLOYMENT_TARGET}" \
+    -o "$app_executable" \
+    "$source_path"
   chmod 755 "$app_executable"
 
   if [[ "$bundle_cli_binary" == "yes" ]]; then
@@ -87,6 +105,46 @@ create_app_bundle() {
   fi
 }
 
+verify_macho_target() {
+  local executable_path=$1
+  local actual_architecture
+  local minimum_version
+
+  actual_architecture=$(lipo -archs "$executable_path")
+  if [[ "$actual_architecture" != "$TERMKEY_MACOS_ARCH" ]]; then
+    echo "unexpected Mach-O architecture for $executable_path: $actual_architecture" >&2
+    exit 1
+  fi
+
+  minimum_version=$(
+    otool -l "$executable_path" | awk '
+      $1 == "cmd" && $2 == "LC_BUILD_VERSION" {
+        command = "build"
+        next
+      }
+      $1 == "cmd" && $2 == "LC_VERSION_MIN_MACOSX" {
+        command = "legacy"
+        next
+      }
+      command == "build" && $1 == "minos" {
+        print $2
+        exit
+      }
+      command == "legacy" && $1 == "version" {
+        print $2
+        exit
+      }
+    '
+  )
+  case "$minimum_version" in
+    "$MACOSX_DEPLOYMENT_TARGET" | "$MACOSX_DEPLOYMENT_TARGET.0") ;;
+    *)
+      echo "unexpected minimum macOS version for $executable_path: ${minimum_version:-missing}" >&2
+      exit 1
+      ;;
+  esac
+}
+
 mkdir -p "$cli_install_dir" "$output_dir"
 mkdir -p "$swift_cache_dir"
 
@@ -97,9 +155,44 @@ chmod 755 "$cli_install_dir/termkey-native-host"
 create_app_bundle "$termkey_app_bundle_dir" "TermKey" "$launcher_source" "$plist_template" yes
 create_app_bundle "$uninstall_app_bundle_dir" "UninstallTermKey" "$uninstaller_source" "$uninstaller_plist_template" no
 
+verify_macho_target "$cli_install_dir/termkey"
+verify_macho_target "$cli_install_dir/termkey-native-host"
+verify_macho_target "$termkey_app_bundle_dir/Contents/Resources/bin/termkey"
+verify_macho_target "$termkey_app_bundle_dir/Contents/Resources/bin/termkey-native-host"
+verify_macho_target "$termkey_app_bundle_dir/Contents/MacOS/TermKey"
+verify_macho_target "$uninstall_app_bundle_dir/Contents/MacOS/UninstallTermKey"
+
 xattr -cr "$payload_root" 2>/dev/null || true
 find "$payload_root" -name '._*' -delete 2>/dev/null || true
 dot_clean -m "$payload_root" 2>/dev/null || true
+
+if [[ "$apple_signing_enabled" == "true" ]]; then
+  : "${APPLE_APPLICATION_SIGNING_IDENTITY:?APPLE_APPLICATION_SIGNING_IDENTITY is required when Apple signing is enabled}"
+  : "${APPLE_INSTALLER_SIGNING_IDENTITY:?APPLE_INSTALLER_SIGNING_IDENTITY is required when Apple signing is enabled}"
+
+  sign_application_item() {
+    local item_path=$1
+    codesign --force --options runtime --timestamp \
+      --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" \
+      "$item_path"
+    codesign --verify --strict --verbose=2 "$item_path"
+  }
+
+  sign_application_item "$cli_install_dir/termkey"
+  sign_application_item "$cli_install_dir/termkey-native-host"
+  sign_application_item "$termkey_app_bundle_dir/Contents/Resources/bin/termkey"
+  sign_application_item "$termkey_app_bundle_dir/Contents/Resources/bin/termkey-native-host"
+  sign_application_item "$termkey_app_bundle_dir/Contents/MacOS/TermKey"
+  sign_application_item "$termkey_app_bundle_dir"
+  sign_application_item "$uninstall_app_bundle_dir/Contents/MacOS/UninstallTermKey"
+  sign_application_item "$uninstall_app_bundle_dir"
+fi
+
+package_output="$output_dir/${package_name}.pkg"
+package_build_output=$package_output
+if [[ "$apple_signing_enabled" == "true" ]]; then
+  package_build_output="$staging_dir/${package_name}-unsigned.pkg"
+fi
 
 COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 pkgbuild \
   --root "$payload_root" \
@@ -107,5 +200,13 @@ COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 pkgbuild \
   --version "$version" \
   --install-location "/" \
   --scripts "$script_dir/scripts" \
-  "$output_dir/${package_name}.pkg" \
+  "$package_build_output" \
   >/dev/null
+
+if [[ "$apple_signing_enabled" == "true" ]]; then
+  productsign --sign "$APPLE_INSTALLER_SIGNING_IDENTITY" --timestamp \
+    "$package_build_output" \
+    "$package_output" \
+    >/dev/null
+  pkgutil --check-signature "$package_output"
+fi

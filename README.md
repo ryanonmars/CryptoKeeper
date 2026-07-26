@@ -9,7 +9,7 @@ Local-only, encrypted vault for private keys, seed phrases, and passwords. Run `
 - **Vault path:** `~/.termkey/`
 - **Secret types:** private keys, seed phrases, passwords
 - **Networks:** Ethereum, Bitcoin, Solana, or a custom network label
-- **Extras:** encrypted backup/import, optional recovery question, strong password generation for password entries, address derivation for supported crypto entries
+- **Extras:** encrypted backup/import, optional random recovery phrase, strong password generation for password entries, address derivation for supported crypto entries
 
 ---
 
@@ -145,9 +145,14 @@ On first launch, TermKey opens a setup wizard where you:
 
 1. Create your master password
 2. Create the local vault
-3. Optionally set up a recovery question
+3. Optionally set up a random 24-word recovery phrase
 
 After setup, you land on the login screen and then the dashboard.
+
+The recovery phrase is shown once. Store it offline and never share it. Vaults
+upgraded from the legacy format no longer use security-question recovery; after
+the first successful upgrade, follow the unlock notice and configure a new
+recovery phrase in Settings.
 
 Inside the TUI you can:
 
@@ -196,7 +201,7 @@ termkey browser repair
 Notes:
 
 - `termkey export <directory>` writes an encrypted `backup.ck` file into that directory.
-- `termkey recover` uses your configured recovery question flow.
+- `termkey recover` uses your configured 24-word recovery phrase.
 - `termkey update` checks the latest GitHub release. On Homebrew installs it runs the Homebrew update flow; on installer/manual/source installs it prints the correct release download page.
 - `termkey derive` saves a public address for supported Ethereum, Bitcoin, and Solana key or seed entries.
 

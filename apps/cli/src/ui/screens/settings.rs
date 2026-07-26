@@ -22,7 +22,7 @@ const FIELDS: [SettingsField; 2] = [
 
 pub enum SettingsAction {
     Continue,
-    Save(Config),
+    SaveClipboardTimeout(u64),
     Cancel,
     SetupRecovery,
 }
@@ -78,8 +78,12 @@ impl SettingsScreen {
                 }
                 SettingsAction::Continue
             }
-            KeyCode::Esc => SettingsAction::Save(self.config.clone()),
-            KeyCode::Char('q') => SettingsAction::Save(self.config.clone()),
+            KeyCode::Esc => {
+                SettingsAction::SaveClipboardTimeout(self.config.clipboard_timeout_secs)
+            }
+            KeyCode::Char('q') => {
+                SettingsAction::SaveClipboardTimeout(self.config.clipboard_timeout_secs)
+            }
             _ => SettingsAction::Continue,
         }
     }
@@ -182,7 +186,7 @@ impl SettingsScreen {
             "Not set"
         };
         lines.push(Line::from(Span::styled(
-            format!("  Recovery question: {}", recovery_status),
+            format!("  Recovery phrase: {}", recovery_status),
             recovery_style,
         )));
 
@@ -218,5 +222,41 @@ impl SettingsScreen {
             .wrap(Wrap { trim: false });
 
         frame.render_widget(paragraph, chunks[1]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SettingsAction, SettingsScreen};
+    use crate::config::model::{Config, RecoveryConfig, RecoveryConfigV2};
+    use crate::vault::format::VaultId;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    #[test]
+    fn closing_stale_settings_emits_only_the_intended_clipboard_field() {
+        let stale = Config {
+            clipboard_timeout_secs: 10,
+            recovery: Some(RecoveryConfig::V2(RecoveryConfigV2 {
+                version: 2,
+                vault_id: VaultId([0x11; 16]),
+                salt: vec![0x22; 32],
+                nonce: vec![0x33; 24],
+                wrapped_dek: vec![0x44; 48],
+            })),
+            ..Config::default()
+        };
+        let mut settings = SettingsScreen::new(stale);
+
+        settings.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        settings.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        settings.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        settings.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+        settings.handle_key(KeyCode::Char('5'), KeyModifiers::NONE);
+        settings.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(matches!(
+            settings.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+            SettingsAction::SaveClipboardTimeout(25)
+        ));
     }
 }
