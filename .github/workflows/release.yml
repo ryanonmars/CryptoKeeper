@@ -544,11 +544,10 @@ jobs:
           class Termkey < Formula
             desc "CLI encrypted storage for private keys and seed phrases"
             homepage "https://github.com/ryanonmars/termkey"
-            version "${VER}"
-            license "MIT"
-
             url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-linux-x86_64.zip"
+            version "${VER}"
             sha256 "${SHA_LINUX}"
+            license "MIT"
 
             on_macos do
               on_intel do
@@ -616,11 +615,10 @@ jobs:
           class Termkey < Formula
             desc "CLI encrypted storage for private keys and seed phrases"
             homepage "https://github.com/ryanonmars/termkey"
-            version "${VER}"
-            license "MIT"
-
             url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-linux-x86_64.zip"
+            version "${VER}"
             sha256 "${SHA_LINUX}"
+            license "MIT"
 
             on_macos do
               on_intel do
