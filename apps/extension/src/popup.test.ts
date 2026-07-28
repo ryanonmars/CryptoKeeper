@@ -10,7 +10,6 @@ afterEach(() => {
 });
 
 it.each([
-  ["HTTP", "http://example.test/login"],
   ["URL userinfo", "https://user:password@example.test/login"],
   ["malformed", "https://[invalid/login"],
 ])("rejects %s active tab URLs", async (_caseName, activeUrl) => {
@@ -59,6 +58,50 @@ it.each([
   expect(sendMessage.mock.calls.map(([message]) => message.type)).toEqual([
     "termkey.nativeHost.status",
   ]);
+});
+
+it("supports an HTTP active tab", async () => {
+  const sendMessage = vi.fn(
+    (
+      message: { type: string },
+      callback: (response: unknown) => void
+    ) => {
+      if (message.type === "termkey.nativeHost.status") {
+        callback({
+          ok: true,
+          response: {
+            type: "status",
+            app: "termkey",
+            version: "1.0.0",
+            vaultPath: "/vault",
+            vaultExists: true,
+            firstRunComplete: true,
+            recoveryConfigured: true,
+            locked: true,
+          },
+        });
+      }
+    }
+  );
+  vi.stubGlobal("chrome", {
+    runtime: {
+      lastError: undefined,
+      sendMessage,
+    },
+    tabs: {
+      query: (
+        _query: unknown,
+        callback: (tabs: Array<{ url?: string }>) => void
+      ) => callback([{ url: "http://qbittorrent.truenas/" }]),
+    },
+  });
+
+  await import("./popup");
+
+  expect(document.querySelector<HTMLElement>("#site-panel")?.hidden).toBe(false);
+  expect(document.querySelector("#site-hostname")?.textContent).toBe(
+    "http://qbittorrent.truenas"
+  );
 });
 
 it("retries a protected fill with the same grant after a wrong secondary password", async () => {

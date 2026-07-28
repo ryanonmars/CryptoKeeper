@@ -706,7 +706,7 @@ function primeCurrentSite() {
       try {
         const parsedUrl = new URL(url);
         if (
-          parsedUrl.protocol !== "https:" ||
+          (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
           parsedUrl.username !== "" ||
           parsedUrl.password !== ""
         ) {
