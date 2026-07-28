@@ -18,7 +18,7 @@ pub struct HttpsOrigin(String);
 
 impl HttpsOrigin {
     pub fn parse(input: &str) -> Result<Self> {
-        let url = parse_https_url(input, false)?;
+        let url = parse_web_url(input, false)?;
         Ok(Self(url.origin().ascii_serialization()))
     }
 
@@ -145,7 +145,7 @@ fn effective_rules(entry: &Entry) -> Vec<SiteRule> {
 }
 
 fn default_origin_from_entry_url(input: &str) -> Option<HttpsOrigin> {
-    parse_https_url(input, true)
+    parse_web_url(input, true)
         .ok()
         .map(|url| HttpsOrigin(url.origin().ascii_serialization()))
 }
@@ -186,7 +186,7 @@ fn registrable_domain(host: &Host<String>) -> Option<String> {
     psl2::registrable_domain(domain)
 }
 
-fn parse_https_url(input: &str, allow_page_components: bool) -> Result<Url> {
+fn parse_web_url(input: &str, allow_page_components: bool) -> Result<Url> {
     if input.is_empty() || input.trim() != input || contains_ambiguous_raw_char(input) {
         return Err(invalid_origin());
     }
@@ -205,7 +205,7 @@ fn parse_https_url(input: &str, allow_page_components: bool) -> Result<Url> {
     }
 
     let mut url = Url::parse(input).map_err(|_| invalid_origin())?;
-    if url.scheme() != "https"
+    if !matches!(url.scheme(), "http" | "https")
         || url.cannot_be_a_base()
         || url.host().is_none()
         || !url.username().is_empty()
@@ -253,7 +253,7 @@ fn match_rank(match_type: &str) -> u8 {
 }
 
 fn invalid_origin() -> TermKeyError {
-    TermKeyError::InvalidEntry("site origin must be a canonical HTTPS origin".to_string())
+    TermKeyError::InvalidEntry("site origin must be a canonical HTTP or HTTPS origin".to_string())
 }
 
 #[cfg(test)]
@@ -287,20 +287,49 @@ mod tests {
     }
 
     #[test]
-    fn rejects_http_and_urls_with_userinfo() {
-        assert!(HttpsOrigin::parse("http://example.com").is_err());
+    fn rejects_urls_with_userinfo() {
         assert!(HttpsOrigin::parse("https://user@example.com").is_err());
         assert!(HttpsOrigin::parse("https://user:password@example.com").is_err());
         assert!(HttpsOrigin::parse("https://@example.com").is_err());
 
         let origin = HttpsOrigin::parse("https://example.com").unwrap();
         assert!(!entry_authorizes_origin(
-            &password_entry("HTTP", Some("http://example.com"), &[]),
-            &origin
-        ));
-        assert!(!entry_authorizes_origin(
             &password_entry("Userinfo", Some("https://user@example.com"), &[]),
             &origin
+        ));
+    }
+
+    #[test]
+    fn http_origins_are_canonical_and_do_not_match_https() {
+        assert_eq!(
+            HttpsOrigin::parse("http://EXAMPLE.test:80/")
+                .unwrap()
+                .as_str(),
+            "http://example.test"
+        );
+
+        let entry = password_entry("HTTP", Some("http://example.test/login"), &[]);
+        assert!(entry_authorizes_origin(
+            &entry,
+            &HttpsOrigin::parse("http://example.test").unwrap()
+        ));
+        assert!(!entry_authorizes_origin(
+            &entry,
+            &HttpsOrigin::parse("https://example.test").unwrap()
+        ));
+    }
+
+    #[test]
+    fn http_ip_origin_preserves_non_default_port() {
+        let entry = password_entry("qBittorrent", Some("http://192.168.4.64:8080"), &[]);
+
+        assert!(entry_authorizes_origin(
+            &entry,
+            &HttpsOrigin::parse("http://192.168.4.64:8080").unwrap()
+        ));
+        assert!(!entry_authorizes_origin(
+            &entry,
+            &HttpsOrigin::parse("http://192.168.4.64").unwrap()
         ));
     }
 

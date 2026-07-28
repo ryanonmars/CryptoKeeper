@@ -664,7 +664,7 @@ function generateOpaqueGrantId() {
   ).join("");
 }
 
-export function canonicalizeHttpsOrigin(url: string) {
+export function canonicalizeWebOrigin(url: string) {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -672,8 +672,8 @@ export function canonicalizeHttpsOrigin(url: string) {
     throw new Error("Current tab URL is invalid.");
   }
 
-  if (parsed.protocol !== "https:") {
-    throw new Error("Current tab must use HTTPS.");
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Current tab must use HTTP or HTTPS.");
   }
   if (parsed.username !== "" || parsed.password !== "") {
     throw new Error("Current tab URL must not contain user information.");
@@ -793,7 +793,7 @@ export function createBackgroundService(
     }
     return {
       tabId: tab.id,
-      origin: canonicalizeHttpsOrigin(tab.url),
+      origin: canonicalizeWebOrigin(tab.url),
     };
   }
 
@@ -849,7 +849,7 @@ export function createBackgroundService(
     if (tab.id !== grant.tabId || typeof tab.url !== "string") {
       throw new Error("The matched tab is no longer available.");
     }
-    if (canonicalizeHttpsOrigin(tab.url) !== grant.origin) {
+    if (canonicalizeWebOrigin(tab.url) !== grant.origin) {
       throw new Error("The matched tab navigated to a different origin.");
     }
     const documentToken = await probeDocument(grant.tabId);
@@ -896,7 +896,7 @@ export function createBackgroundService(
       return false;
     }
     try {
-      return canonicalizeHttpsOrigin(draft.url) === origin;
+      return canonicalizeWebOrigin(draft.url) === origin;
     } catch {
       return false;
     }
@@ -919,7 +919,7 @@ export function createBackgroundService(
       };
     }
     if (
-      canonicalizeHttpsOrigin(nativeResponse.response.siteOrigin) !==
+      canonicalizeWebOrigin(nativeResponse.response.siteOrigin) !==
       page.origin
     ) {
       return {
@@ -1087,7 +1087,7 @@ export function createBackgroundService(
     const tab = await chromeApi.tabs.get(page.tabId);
     if (
       typeof tab.url !== "string" ||
-      canonicalizeHttpsOrigin(tab.url) !== page.origin ||
+      canonicalizeWebOrigin(tab.url) !== page.origin ||
       (await probeDocument(page.tabId)) !== documentToken
     ) {
       return {
@@ -1248,7 +1248,7 @@ export function createBackgroundService(
         const url =
           message.url === undefined
             ? undefined
-            : canonicalizeHttpsOrigin(message.url);
+            : canonicalizeWebOrigin(message.url);
         const response = await nativeClient.request({
           type: "save_password_entry",
           name: message.name,

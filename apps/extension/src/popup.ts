@@ -1523,9 +1523,12 @@ function findSiteMatches() {
 
     setCurrentSiteMatches(response.response.matches);
     setSiteVisibility(true);
+    const matchSummary = describeMatches(response.response.matches);
     renderSite(
       response.response.siteOrigin,
-      describeMatches(response.response.matches)
+      response.response.siteOrigin.startsWith("http://")
+        ? `Unencrypted HTTP site. ${matchSummary}`
+        : matchSummary
     );
 
     if (response.response.matches.length === 0) {

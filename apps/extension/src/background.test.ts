@@ -125,8 +125,19 @@ describe("background security boundaries", () => {
     vi.useRealTimers();
   });
 
-  it("rejects HTTP tabs", async () => {
+  it("discovers HTTP tabs using their canonical origin", async () => {
     const mock = createChromeMock({ id: 7, url: "http://example.test/login" });
+    installHappyPathResponders(mock);
+    mock.setNativeResponder((request) => {
+      if ((request as { type?: string }).type === "find_site_matches") {
+        return {
+          ...siteMatchesResponse,
+          siteUrl: "http://example.test",
+          siteOrigin: "http://example.test",
+        };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
     const service = createBackgroundService(mock.chrome);
 
     const result = await service.handleMessage(
@@ -134,12 +145,11 @@ describe("background security boundaries", () => {
       mock.extensionSender
     );
 
-    expect(result).toEqual({
-      ok: false,
-      error: "Current tab must use HTTPS.",
+    expect(result).toMatchObject({
+      ok: true,
+      response: { type: "site_matches" },
     });
-    expect(mock.chrome.scripting.executeScript).not.toHaveBeenCalled();
-    expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
+    expect(mock.chrome.runtime.connectNative).toHaveBeenCalledTimes(1);
   });
 
   it("rejects HTTPS tabs containing user information", async () => {
@@ -162,8 +172,13 @@ describe("background security boundaries", () => {
     expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
   });
 
-  it("rejects an HTTP URL at the privileged save boundary", async () => {
+  it("persists an HTTP origin at the privileged save boundary", async () => {
     const mock = createChromeMock();
+    let nativeRequest: unknown;
+    mock.setNativeResponder((request) => {
+      nativeRequest = request;
+      return { type: "save_entry", entryName: "Example" };
+    });
     const service = createBackgroundService(mock.chrome);
 
     const result = await service.handleMessage(
@@ -176,11 +191,14 @@ describe("background security boundaries", () => {
       mock.extensionSender
     );
 
-    expect(result).toEqual({
-      ok: false,
-      error: "Current tab must use HTTPS.",
+    expect(result).toMatchObject({
+      ok: true,
+      response: { type: "save_entry_result", entryName: "Example" },
     });
-    expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
+    expect(nativeRequest).toMatchObject({
+      type: "save_password_entry",
+      url: "http://example.test",
+    });
   });
 
   it("rejects URL user information at the privileged save boundary", async () => {

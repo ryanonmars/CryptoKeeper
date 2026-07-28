@@ -382,7 +382,7 @@ fn find_site_matches(state: &mut HostState, site_url: String) -> NativeResponse 
         Ok(origin) => origin,
         Err(_) => {
             return NativeResponse::Error {
-                message: "Current tab origin is not a supported HTTPS origin.".to_string(),
+                message: "Current tab origin is not a supported HTTP or HTTPS origin.".to_string(),
             }
         }
     };
@@ -395,9 +395,9 @@ fn find_site_matches(state: &mut HostState, site_url: String) -> NativeResponse 
         authorized_site_matches(&session.vault, &origin)
     };
     let site_hostname = url::Url::parse(origin.as_str())
-        .expect("HttpsOrigin always contains a parsed URL")
+        .expect("site origin always contains a parsed URL")
         .host_str()
-        .expect("HttpsOrigin always contains a host")
+        .expect("site origin always contains a host")
         .to_string();
     let now = Instant::now();
     state.issued_matches.clear();
@@ -466,7 +466,7 @@ fn get_autofill_entry(
         Ok(origin) => origin,
         Err(_) => {
             return NativeResponse::Error {
-                message: "Current tab origin is not a supported HTTPS origin.".to_string(),
+                message: "Current tab origin is not a supported HTTP or HTTPS origin.".to_string(),
             }
         }
     };
@@ -531,7 +531,7 @@ fn get_autofill_entry(
 
     if !entry_authorizes_origin(entry, &origin) {
         return NativeResponse::Error {
-            message: "Selected entry is not authorized for the current HTTPS origin.".to_string(),
+            message: "Selected entry is not authorized for the current site origin.".to_string(),
         };
     }
 
@@ -627,7 +627,8 @@ fn build_password_entry(
             HttpsOrigin::parse(&url)
                 .map(|origin| origin.as_str().to_string())
                 .map_err(|_| NativeResponse::Error {
-                    message: "Saved login URL must be a canonical HTTPS origin.".to_string(),
+                    message: "Saved login URL must be a canonical HTTP or HTTPS origin."
+                        .to_string(),
                 })
                 .map(Some)
         })
@@ -1305,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn autofill_requires_https_origin() {
+    fn autofill_rejects_invalid_requests() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
         write_vault(
@@ -1645,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn site_matches_reject_http_and_page_urls() {
+    fn site_matches_support_http_origins_but_reject_page_urls() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
@@ -1665,7 +1666,10 @@ mod tests {
             br#"{"type":"find_site_matches","url":"https://example.com/login"}"#,
         );
 
-        assert!(matches!(http, NativeResponse::Error { .. }));
+        match http {
+            NativeResponse::SiteMatches(matches) => assert!(matches.matches.is_empty()),
+            other => panic!("unexpected response: {:?}", other),
+        }
         assert!(matches!(page_url, NativeResponse::Error { .. }));
     }
 
@@ -1787,7 +1791,6 @@ mod tests {
         let mut state = unlocked_state(&path);
 
         for (index, url) in [
-            "http://example.com",
             "https://user@example.com",
             "https://user:password@example.com",
             "https://example.com/login",
@@ -1815,6 +1818,46 @@ mod tests {
             );
         }
         assert!(state.session.as_ref().unwrap().vault.entries.is_empty());
+    }
+
+    #[test]
+    fn native_save_persists_canonical_http_origin() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(&VaultData::new(), b"correct horse battery staple", &path).unwrap();
+
+        let response = handle_request(
+            &mut unlocked_state(&path),
+            br#"{"type":"save_password_entry","name":"qBittorrent","password":"secret","url":"http://192.168.4.64:8080/"}"#,
+        );
+
+        assert!(matches!(response, NativeResponse::SaveEntry { .. }));
+        let vault = read_vault(b"correct horse battery staple", &path).unwrap();
+        assert_eq!(
+            vault.entries[0].url.as_deref(),
+            Some("http://192.168.4.64:8080")
+        );
+    }
+
+    #[test]
+    fn native_host_discovers_and_fills_http_origin_exactly() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        let mut vault = test_vault_with_entry();
+        vault.entries[0].url = Some("http://192.168.4.64:8080".into());
+        write_vault(&vault, b"correct horse battery staple", &path).unwrap();
+        let mut state = unlocked_state(&path);
+
+        let id = discover_first_match_id(&mut state, "http://192.168.4.64:8080");
+        let response = handle_request(
+            &mut state,
+            format!(
+                r#"{{"type":"get_autofill_entry","id":"{id}","origin":"http://192.168.4.64:8080"}}"#
+            )
+            .as_bytes(),
+        );
+
+        assert!(matches!(response, NativeResponse::AutofillEntry { .. }));
     }
 
     #[test]
