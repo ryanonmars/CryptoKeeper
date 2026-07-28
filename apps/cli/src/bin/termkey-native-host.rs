@@ -130,7 +130,11 @@ struct AutofillEntryResponse {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum NativeResponse {
     Pong {
         app: &'static str,
@@ -2175,6 +2179,22 @@ mod tests {
 
         assert_eq!(decoded["type"], "pong");
         assert_eq!(decoded["app"], "termkey");
+    }
+
+    #[test]
+    fn native_handshake_uses_camel_case_protocol_version() {
+        let request_id = "a".repeat(64);
+        let response = handle_wire_request(
+            &mut HostState::default(),
+            format!(r#"{{"type":"ping","protocolVersion":2,"requestId":"{request_id}"}}"#)
+                .as_bytes(),
+        );
+
+        let encoded = serde_json::to_value(response).unwrap();
+
+        assert_eq!(encoded["type"], "pong");
+        assert_eq!(encoded["protocolVersion"], NATIVE_PROTOCOL_VERSION);
+        assert!(encoded.get("protocol_version").is_none());
     }
 
     #[test]
