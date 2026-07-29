@@ -9,7 +9,6 @@ import type {
 } from "@termkey/types";
 
 const NATIVE_HOST_NAME = "com.ryanonmars.termkey";
-const PENDING_SAVE_KEY_PREFIX = "pending-save:";
 const MATCH_GRANT_TTL_MS = 30_000;
 const PENDING_LOGIN_TTL_MS = 120_000;
 const MAX_MATCH_GRANTS = 100;
@@ -69,11 +68,6 @@ type NativeResponseForRequest<TRequest extends NativeHostRequest> =
 type NativeClientResponseFor<TRequest extends NativeHostRequest> =
   | { ok: true; response: NativeResponseForRequest<TRequest> }
   | { ok: false; error: string };
-
-type PendingSaveDraft = {
-  username: string;
-  url: string;
-};
 
 type PendingLogin = {
   tabId: number;
@@ -145,24 +139,6 @@ type BackgroundChrome = {
       target: { tabId: number; frameIds: [0] };
       files: ["dist/content.js"];
     }): Promise<unknown>;
-  };
-  storage?: {
-    session?: {
-      get(
-        keys: string[],
-        callback: (result: Record<string, unknown>) => void
-      ): void;
-      set(value: Record<string, unknown>, callback: () => void): void;
-      remove(key: string, callback: () => void): void;
-    };
-    local?: {
-      get(
-        keys: string[],
-        callback: (result: Record<string, unknown>) => void
-      ): void;
-      set(value: Record<string, unknown>, callback: () => void): void;
-      remove(key: string, callback: () => void): void;
-    };
   };
 };
 
@@ -826,7 +802,6 @@ function isKnownPopupMessage(
     message.type === "termkey.nativeHost.ping" ||
     message.type === "termkey.nativeHost.status" ||
     message.type === "termkey.nativeHost.findSiteMatches" ||
-    message.type === "termkey.content.captureVisibleCredentials" ||
     message.type === "termkey.content.inspectPageContext" ||
     message.type === "termkey.pendingLogin.get" ||
     message.type === "termkey.pendingLogin.dismiss" ||
@@ -882,10 +857,6 @@ export function isTrustedExtensionPageSender(
   }
 }
 
-function getPendingSaveKey(tabId: number) {
-  return `${PENDING_SAVE_KEY_PREFIX}${tabId}`;
-}
-
 export function createBackgroundService(
   chromeApi: BackgroundChrome,
   options: {
@@ -909,8 +880,6 @@ export function createBackgroundService(
         chromeApi.runtime.lastError?.message ??
         "Native host disconnected. Please try again."
     );
-  const storageArea =
-    chromeApi.storage?.session ?? chromeApi.storage?.local;
   const contentScriptAttempts = new Map<number, Promise<string>>();
   const generateGrantId = options.generateGrantId ?? generateOpaqueGrantId;
 
@@ -990,50 +959,6 @@ export function createBackgroundService(
     }
   }
 
-  function readPendingSaveDraft(tabId: number) {
-    if (!storageArea) {
-      return Promise.resolve<PendingSaveDraft | null>(null);
-    }
-    return new Promise<PendingSaveDraft | null>((resolve) => {
-      const key = getPendingSaveKey(tabId);
-      storageArea.get([key], (result) => {
-        resolve((result[key] as PendingSaveDraft | undefined) ?? null);
-      });
-    });
-  }
-
-  function writePendingSaveDraft(tabId: number, draft: PendingSaveDraft) {
-    if (!storageArea) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      storageArea.set({ [getPendingSaveKey(tabId)]: draft }, resolve);
-    });
-  }
-
-  function clearPendingSaveDraft(tabId: number) {
-    if (!storageArea) {
-      return Promise.resolve();
-    }
-    return new Promise<void>((resolve) => {
-      storageArea.remove(getPendingSaveKey(tabId), resolve);
-    });
-  }
-
-  function canReusePendingSaveDraft(
-    origin: string,
-    draft: PendingSaveDraft | null
-  ) {
-    if (!draft) {
-      return false;
-    }
-    try {
-      return canonicalizeWebOrigin(draft.url) === origin;
-    } catch {
-      return false;
-    }
-  }
-
   async function findSiteMatches() {
     const page = await getActiveTabOnce();
     const documentToken = await ensureContentScript(page.tabId);
@@ -1083,86 +1008,14 @@ export function createBackgroundService(
     };
   }
 
-  async function captureVisibleCredentials() {
-    const page = await getActiveTabOnce();
-    const documentToken = await ensureContentScript(page.tabId);
-    const captureResponse = await chromeApi.tabs.sendMessage(
-      page.tabId,
-      { type: "termkey.captureVisibleCredentials", documentToken },
-      { frameId: 0 }
-    );
-    if (!isRecord(captureResponse) || captureResponse.ok !== true) {
-      return {
-        ok: false as const,
-        error:
-          isRecord(captureResponse) &&
-          typeof captureResponse.error === "string"
-            ? captureResponse.error
-            : "Could not read the current login fields from this page.",
-      };
-    }
-
-    if (
-      captureResponse.captureState === "username_only" &&
-      typeof captureResponse.username === "string" &&
-      captureResponse.username
-    ) {
-      await writePendingSaveDraft(page.tabId, {
-        username: captureResponse.username,
-        url: page.origin,
-      });
-      return {
-        ok: true as const,
-        response: {
-          type: "captured_login_step" as const,
-          step: "username_only" as const,
-          username: captureResponse.username,
-          url: page.origin,
-        },
-      };
-    }
-
-    if (typeof captureResponse.password !== "string") {
-      return {
-        ok: false as const,
-        error: "Could not read the current login password from this page.",
-      };
-    }
-    const draft = await readPendingSaveDraft(page.tabId);
-    const capturedUsername =
-      typeof captureResponse.username === "string"
-        ? captureResponse.username
-        : null;
-    const useStoredUsername =
-      !capturedUsername && canReusePendingSaveDraft(page.origin, draft);
-    await clearPendingSaveDraft(page.tabId);
-    return {
-      ok: true as const,
-      response: {
-        type: "captured_login" as const,
-        candidate: {
-          username: useStoredUsername
-            ? draft?.username ?? null
-            : capturedUsername,
-          password: captureResponse.password,
-          url: page.origin,
-        },
-        usedStoredUsername: useStoredUsername,
-      },
-    };
-  }
-
   async function inspectPageContext() {
     const page = await getActiveTabOnce();
     const documentToken = await ensureContentScript(page.tabId);
-    const [context, draft] = await Promise.all([
-      chromeApi.tabs.sendMessage(
-        page.tabId,
-        { type: "termkey.inspectPageContext" },
-        { frameId: 0 }
-      ),
-      readPendingSaveDraft(page.tabId),
-    ]);
+    const context = await chromeApi.tabs.sendMessage(
+      page.tabId,
+      { type: "termkey.inspectPageContext" },
+      { frameId: 0 }
+    );
     if (
       !isRecord(context) ||
       context.ok !== true ||
@@ -1179,9 +1032,6 @@ export function createBackgroundService(
       context.intent === "password_change"
         ? context.intent
         : "unknown";
-    const reusableDraft = canReusePendingSaveDraft(page.origin, draft)
-      ? draft
-      : null;
     return {
       ok: true as const,
       response: {
@@ -1196,8 +1046,6 @@ export function createBackgroundService(
           hasConfirmationPasswordField:
             context.hasConfirmationPasswordField === true,
           canGeneratePassword: context.canGeneratePassword === true,
-          hasPendingSaveUsername: reusableDraft !== null,
-          pendingUsername: reusableDraft?.username ?? null,
         },
       },
     };
@@ -1695,8 +1543,6 @@ export function createBackgroundService(
         });
       case "termkey.nativeHost.findSiteMatches":
         return findSiteMatches();
-      case "termkey.content.captureVisibleCredentials":
-        return captureVisibleCredentials();
       case "termkey.content.captureSubmittedLogin":
         return {
           ok: false,
@@ -1783,7 +1629,6 @@ export function createBackgroundService(
     handleTabRemoved(tabId: number) {
       grants.removeTab(tabId);
       pendingLogins.removeTab(tabId);
-      void clearPendingSaveDraft(tabId);
     },
     handleTabUpdated,
   };

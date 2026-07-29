@@ -16,11 +16,6 @@ type ContentScriptProbeMessage = {
   type: "termkey.contentScriptProbe";
 };
 
-type CaptureVisibleCredentialsMessage = {
-  type: "termkey.captureVisibleCredentials";
-  documentToken: string;
-};
-
 type CaptureSubmittedLoginMessage = {
   type: "termkey.captureSubmittedLogin";
   documentToken: string;
@@ -895,67 +890,6 @@ async function fillCredentials(message: FillCredentialsMessage) {
   };
 }
 
-function captureVisibleCredentials() {
-  const inputs = collectInputElements();
-  const inferred = inferPageIntent(inputs);
-  const loginTargets = findBestLoginTargets(inputs);
-  const generatedTargets = findGeneratedPasswordTargets(inputs);
-  if (generatedTargets.ambiguous) {
-    return {
-      ok: false,
-      error: "No visible password field was found on this page.",
-    };
-  }
-  const useGeneratedTargets =
-    inferred.intent === "signup" || inferred.intent === "password_change";
-  const passwordInput = useGeneratedTargets
-    ? generatedTargets.primaryPasswordInput
-    : loginTargets.passwordInput;
-  const usernameInput =
-    (useGeneratedTargets
-      ? generatedTargets.usernameInput
-      : loginTargets.usernameInput) ??
-    (passwordInput ? undefined : findBestUsernameInput(inputs, undefined));
-  const username = usernameInput?.value.trim() || null;
-
-  if (!passwordInput) {
-    if (username) {
-      return {
-        ok: true,
-        captureState: "username_only" as const,
-        username,
-      };
-    }
-
-    return {
-      ok: false,
-      error: "No visible password field was found on this page.",
-    };
-  }
-
-  if (!passwordInput.value) {
-    if (username) {
-      return {
-        ok: true,
-        captureState: "username_only" as const,
-        username,
-      };
-    }
-
-    return {
-      ok: false,
-      error: "Type your password into the page before saving this login.",
-    };
-  }
-
-  return {
-    ok: true,
-    captureState: username ? ("complete" as const) : ("password_only" as const),
-    username,
-    password: passwordInput.value,
-  };
-}
-
 function captureSubmittedLoginFromInputs(inputs: HTMLInputElement[]): SubmittedLoginCapture {
   const inferred = inferPageIntent(inputs);
   const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
@@ -1088,7 +1022,6 @@ runtimeChrome?.runtime?.onMessage?.addListener(
       | FillCredentialsMessage
       | FillGeneratedPasswordMessage
       | ContentScriptProbeMessage
-      | CaptureVisibleCredentialsMessage
       | CaptureSubmittedLoginMessage
       | InspectPageContextMessage,
     sender: { id?: string },
@@ -1104,8 +1037,7 @@ runtimeChrome?.runtime?.onMessage?.addListener(
     }
 
     if (
-      (message?.type === "termkey.captureVisibleCredentials" ||
-        message?.type === "termkey.captureSubmittedLogin" ||
+      (message?.type === "termkey.captureSubmittedLogin" ||
         message?.type === "termkey.fillGeneratedPassword" ||
         message?.type === "termkey-fill-credentials") &&
       message.documentToken !== DOCUMENT_TOKEN
@@ -1114,11 +1046,6 @@ runtimeChrome?.runtime?.onMessage?.addListener(
         ok: false,
         error: "The page document changed before delivery.",
       });
-      return true;
-    }
-
-    if (message?.type === "termkey.captureVisibleCredentials") {
-      sendResponse(captureVisibleCredentials());
       return true;
     }
 

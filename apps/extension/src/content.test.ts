@@ -69,7 +69,6 @@ function dispatch(message: unknown, sender = { id: "extension-id" }) {
     "type" in message &&
     ((message as { type?: string }).type === "termkey-fill-credentials" ||
       (message as { type?: string }).type === "termkey.fillGeneratedPassword" ||
-      (message as { type?: string }).type === "termkey.captureVisibleCredentials" ||
       (message as { type?: string }).type === "termkey.captureSubmittedLogin") &&
     !("documentToken" in message)
   ) {
@@ -304,25 +303,6 @@ it("allows a strong new-password field despite mixed structural intent", () => {
   expect(input("#mixed-new-password").value).toBe("generated-secret");
 });
 
-it("does not capture the old password during password change", () => {
-  document.body.innerHTML = `
-    <form id="password-change" aria-label="Change password">
-      <input id="old-password" type="password" autocomplete="current-password" value="old-secret">
-      <input id="new-password" type="password" autocomplete="new-password" value="new-secret">
-      <input id="confirm-password" type="password" autocomplete="new-password" aria-label="Confirm password" value="new-secret">
-    </form>
-  `;
-
-  const result = dispatch({ type: "termkey.captureVisibleCredentials" });
-
-  expect(result.response).toEqual({
-    ok: true,
-    captureState: "password_only",
-    username: null,
-    password: "new-secret",
-  });
-});
-
 it("captures an unambiguous submitted login with its document token", () => {
   document.body.innerHTML = `
     <form>
@@ -511,11 +491,6 @@ it("does not treat OTP input as a password", async () => {
     error: "No visible password field was found on this page.",
   });
   expect(input("#challenge-code").value).toBe("123456");
-  expect(dispatch({ type: "termkey.captureVisibleCredentials" }).response).toEqual({
-    ok: true,
-    captureState: "username_only",
-    username: "person@example.test",
-  });
 });
 
 it("keeps username and password within the same form", async () => {
@@ -558,26 +533,6 @@ it("does not pair explicit different form owners during fill", async () => {
     filledPassword: true,
   });
   expect(input("#owned-username").value).toBe("");
-  expect(input("#owned-password").value).toBe("login-secret");
-});
-
-it("does not pair explicit different form owners during capture", () => {
-  document.body.innerHTML = `
-    <section id="shared-login-context">
-      <form id="username-form"></form>
-      <form id="password-form"></form>
-      <input id="owned-username" form="username-form" autocomplete="username" value="person@example.test">
-      <input id="owned-password" form="password-form" type="password" autocomplete="current-password" value="login-secret">
-    </section>
-  `;
-
-  expect(dispatch({ type: "termkey.captureVisibleCredentials" }).response).toEqual({
-    ok: true,
-    captureState: "password_only",
-    username: null,
-    password: "login-secret",
-  });
-  expect(input("#owned-username").value).toBe("person@example.test");
   expect(input("#owned-password").value).toBe("login-secret");
 });
 
@@ -651,24 +606,6 @@ it("rejects equally ranked generated groups instead of using DOM order", () => {
   expect(input("#confirm-one").value).toBe("");
   expect(input("#new-two").value).toBe("");
   expect(input("#confirm-two").value).toBe("");
-});
-
-it("fails closed when password-change capture has tied new groups", () => {
-  document.body.innerHTML = `
-    <form id="password-change">
-      <input id="old-password" type="password" autocomplete="current-password" value="old-secret">
-      <input id="change-new-one" type="password" aria-label="New password" value="new-one-secret">
-      <input id="change-new-two" type="password" aria-label="New password" value="new-two-secret">
-    </form>
-  `;
-
-  expect(dispatch({ type: "termkey.captureVisibleCredentials" }).response).toEqual({
-    ok: false,
-    error: "No visible password field was found on this page.",
-  });
-  expect(input("#old-password").value).toBe("old-secret");
-  expect(input("#change-new-one").value).toBe("new-one-secret");
-  expect(input("#change-new-two").value).toBe("new-two-secret");
 });
 
 it("finds fields inside an open shadow root", async () => {
@@ -793,19 +730,6 @@ it("does not choose OTP or confirmation fields as login passwords", async () => 
     (document.querySelector("#confirm-password") as HTMLInputElement).value
   ).toBe("");
 
-  document.body.innerHTML = `
-    <form>
-      <input type="password" autocomplete="one-time-code" aria-label="OTP code" value="123456">
-      <input type="password" autocomplete="new-password" aria-label="Confirm password" value="not-a-login">
-    </form>
-  `;
-  const capture = dispatch({
-    type: "termkey.captureVisibleCredentials",
-  });
-  expect(capture.response).toMatchObject({
-    ok: false,
-    error: "No visible password field was found on this page.",
-  });
 });
 
 it("returns a stable cryptographic document token from probe and context", () => {
@@ -857,12 +781,6 @@ it.each([
       type: "termkey.fillGeneratedPassword",
       documentToken: "0".repeat(64),
       password: "must-not-be-filled",
-    },
-  ],
-  [
-    {
-      type: "termkey.captureVisibleCredentials",
-      documentToken: "0".repeat(64),
     },
   ],
   [

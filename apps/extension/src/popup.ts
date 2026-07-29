@@ -1,7 +1,5 @@
 import type {
   PopupSiteMatch,
-  PopupCapturedLoginResponse,
-  PopupCapturedLoginStepResponse,
   PopupFillResultResponse,
   PopupGeneratedPasswordResponse,
   PopupPendingLoginResponse,
@@ -224,7 +222,6 @@ document.body.innerHTML = `
 
     .fill-button,
     .generate-button,
-    .save-button,
     .unlock-button {
       border: 0;
       border-radius: 12px;
@@ -245,16 +242,8 @@ document.body.innerHTML = `
       color: #062033;
     }
 
-    .save-button {
-      padding: 10px 14px;
-      background: rgba(15, 23, 42, 0.9);
-      color: #dbeafe;
-      border: 1px solid rgba(125, 211, 252, 0.26);
-    }
-
     .fill-button,
-    .generate-button,
-    .save-button {
+    .generate-button {
       flex: 1 1 calc(50% - 4px);
       min-width: 0;
       white-space: nowrap;
@@ -274,14 +263,12 @@ document.body.innerHTML = `
 
     .fill-button:hover:not(:disabled),
     .generate-button:hover:not(:disabled),
-    .save-button:hover:not(:disabled),
     .unlock-button:hover:not(:disabled) {
       transform: translateY(-1px);
     }
 
     .fill-button:disabled,
     .generate-button:disabled,
-    .save-button:disabled,
     .unlock-button:disabled {
       opacity: 0.45;
       cursor: not-allowed;
@@ -422,7 +409,6 @@ document.body.innerHTML = `
         </div>
         <div class="site-actions">
           <button id="generate-password" class="generate-button" disabled>Generate</button>
-          <button id="save-login" class="save-button" disabled>Save</button>
           <button id="fill-best-match" class="fill-button" disabled>Fill</button>
         </div>
       </div>
@@ -527,8 +513,6 @@ const backendLabelEl = document.querySelector<HTMLSpanElement>("#backend-label")
 const sitePanelEl = document.querySelector<HTMLElement>("#site-panel");
 const generatePasswordButtonEl =
   document.querySelector<HTMLButtonElement>("#generate-password");
-const saveLoginButtonEl =
-  document.querySelector<HTMLButtonElement>("#save-login");
 const fillBestMatchButton =
   document.querySelector<HTMLButtonElement>("#fill-best-match");
 const saveSectionEl =
@@ -583,7 +567,6 @@ if (
   !backendLabelEl ||
   !sitePanelEl ||
   !generatePasswordButtonEl ||
-  !saveLoginButtonEl ||
   !fillBestMatchButton ||
   !saveSectionEl ||
   !savePanelLabelEl ||
@@ -615,12 +598,12 @@ if (
 }
 
 type MessageTone = "neutral" | "success" | "error";
+type SaveCandidate = PopupGeneratedPasswordResponse["candidate"];
 
 const backendDot = backendDotEl;
 const backendLabel = backendLabelEl;
 const sitePanel = sitePanelEl;
 const generatePasswordButton = generatePasswordButtonEl;
-const saveLoginButton = saveLoginButtonEl;
 const fillButton = fillBestMatchButton;
 const saveSection = saveSectionEl;
 const savePanelLabel = savePanelLabelEl;
@@ -650,11 +633,10 @@ const secondaryPasswordGroup = secondaryPasswordGroupEl;
 
 let currentSiteMatches: PopupSiteMatch[] = [];
 let pendingFillMatch: PopupSiteMatch | null = null;
-let pendingSaveCandidate: PopupCapturedLoginResponse["candidate"] | null = null;
+let pendingSaveCandidate: SaveCandidate | null = null;
 let pendingLoginCandidate: PopupPendingLoginResponse["candidate"] = null;
 let pendingLoginMode: "save" | "update" | null = null;
 let fillingEntryId: string | null = null;
-let captureInFlight = false;
 let generationInFlight = false;
 let saveInFlight = false;
 let backendConnected = false;
@@ -667,8 +649,6 @@ let pageContext: PopupPageContextResponse["context"] = {
   hasPasswordField: false,
   hasConfirmationPasswordField: false,
   canGeneratePassword: false,
-  hasPendingSaveUsername: false,
-  pendingUsername: null,
 };
 let siteDetails = {
   hostname: "Waiting for page...",
@@ -685,8 +665,6 @@ function setSiteVisibility(visible: boolean) {
       hasPasswordField: false,
       hasConfirmationPasswordField: false,
       canGeneratePassword: false,
-      hasPendingSaveUsername: false,
-      pendingUsername: null,
     });
     setCurrentSiteMatches([]);
     clearPendingSave();
@@ -759,32 +737,13 @@ function suggestEntryName(hostnameText: string, username: string | null) {
   return hostnameText;
 }
 
-function normalizedUsername(value: string | null | undefined) {
-  return value?.trim().toLowerCase() ?? "";
-}
-
-function hasMatchingSavedUsername(username: string | null | undefined) {
-  const normalized = normalizedUsername(username);
-  if (!normalized) {
-    return false;
-  }
-
-  return currentSiteMatches.some(
-    (match) => normalizedUsername(match.username) === normalized
-  );
-}
-
-function getActionableUsername() {
-  return pageContext.visibleUsername ?? pageContext.pendingUsername;
-}
-
 function setPageContext(context: PopupPageContextResponse["context"]) {
   pageContext = context;
   updateFillButtonState();
 }
 
 function stageSaveCandidate(
-  candidate: PopupCapturedLoginResponse["candidate"],
+  candidate: SaveCandidate,
   hintText: string
 ) {
   pendingSaveCandidate = candidate;
@@ -824,22 +783,11 @@ function stagePendingLogin(
 
 function updateFillButtonState() {
   const singleMatch = currentSiteMatches.length === 1;
-  const actionableUsername = getActionableUsername();
-  const knownUsername = hasMatchingSavedUsername(actionableUsername);
   const showGenerateAction = pageContext.canGeneratePassword;
   const showFillAction =
     pageContext.intent !== "signup" &&
     pageContext.intent !== "password_change" &&
     singleMatch;
-  const showSaveAction =
-    vaultExists &&
-    (pendingSaveCandidate !== null ||
-      pendingLoginCandidate !== null ||
-      pageContext.intent === "signup" ||
-      (pageContext.intent === "login" &&
-        (currentSiteMatches.length === 0 ||
-          (Boolean(actionableUsername) && !knownUsername))));
-
   fillButton.hidden = !showFillAction;
   fillButton.disabled =
     !hasSupportedPage ||
@@ -853,7 +801,6 @@ function updateFillButtonState() {
     !hasSupportedPage ||
     !backendConnected ||
     !showGenerateAction ||
-    captureInFlight ||
     generationInFlight ||
     saveInFlight ||
     fillingEntryId !== null;
@@ -861,20 +808,6 @@ function updateFillButtonState() {
     ? "Generating..."
     : "Generate";
 
-  saveLoginButton.hidden = !showSaveAction;
-  saveLoginButton.disabled =
-    !hasSupportedPage ||
-    !backendConnected ||
-    !showSaveAction ||
-    captureInFlight ||
-    generationInFlight ||
-    saveInFlight ||
-    fillingEntryId !== null;
-  saveLoginButton.textContent = captureInFlight
-    ? "Reading..."
-    : currentSiteMatches.length > 0 && pageContext.intent === "login"
-      ? "Save Another"
-      : "Save";
 }
 
 function resetMatches(summaryText: string) {
@@ -896,7 +829,7 @@ function clearPendingSave() {
   saveSection.hidden = true;
   savePanelLabel.textContent = "Save login";
   savePanelHint.textContent =
-    "Reads the username and password currently typed into this page for this save request.";
+    "The submitted password remains in the extension background until you choose an action.";
 }
 
 function renderPasswordPrompt() {
@@ -958,7 +891,6 @@ function renderSavePrompt() {
     !backendConnected ||
     vaultLocked ||
     saveInFlight ||
-    captureInFlight ||
     generationInFlight;
   saveEntryNameInput.disabled = saveInFlight;
   saveUsernameInput.disabled = saveInFlight;
@@ -1109,78 +1041,6 @@ function beginFill(match: PopupSiteMatch) {
   const input = vaultLocked ? masterPasswordInput : secondaryPasswordInput;
   input.focus();
   input.select();
-}
-
-function beginSave() {
-  if (!backendConnected) {
-    renderMessage("Reconnect the extension backend before saving a login.", "error");
-    return;
-  }
-
-  if (!vaultExists) {
-    renderMessage("Create your vault before saving a login.", "error");
-    return;
-  }
-
-  if (pendingLoginCandidate) {
-    dismissPendingLogin(beginSave);
-    return;
-  }
-
-  pendingFillMatch = null;
-  renderPasswordPrompt();
-  captureInFlight = true;
-  clearPendingSave();
-  updateFillButtonState();
-  renderMessage("Reading the current login fields from this page...");
-
-  sendMessage(
-    {
-      type: "termkey.content.captureVisibleCredentials",
-    },
-    (response) => {
-      captureInFlight = false;
-      updateFillButtonState();
-
-      if (!response.ok) {
-        renderSavePrompt();
-        renderMessage(`Could not read this login yet: ${response.error}`, "error");
-        return;
-      }
-
-      if (response.response.type === "captured_login_step") {
-        const partialCapture = response.response as PopupCapturedLoginStepResponse;
-        renderSavePrompt();
-        renderMessage(
-          `Saved ${partialCapture.username} for this sign-in step. Continue to the password page, then click Save again.`,
-          "success"
-        );
-        return;
-      }
-
-      if (response.response.type !== "captured_login") {
-        renderSavePrompt();
-        renderMessage(
-          "Background returned the wrong response type for login capture.",
-          "error"
-        );
-        return;
-      }
-
-      const captured = response.response as PopupCapturedLoginResponse;
-      stageSaveCandidate(
-        captured.candidate,
-        `Saving for ${siteDetails.hostname}. The password is taken from the current page only for this request.`
-      );
-      renderMessage(
-        captured.usedStoredUsername
-          ? `Ready to save a new login for ${siteDetails.hostname}. Username restored from the previous sign-in step.`
-          : `Ready to save a new login for ${siteDetails.hostname}.`
-      );
-      saveEntryNameInput.focus();
-      saveEntryNameInput.select();
-    }
-  );
 }
 
 function formatGeneratedPasswordMessage(filledPasswordFields: number) {
@@ -1558,8 +1418,6 @@ function inspectPageContext() {
       hasPasswordField: false,
       hasConfirmationPasswordField: false,
       canGeneratePassword: false,
-      hasPendingSaveUsername: false,
-      pendingUsername: null,
     });
     return;
   }
@@ -1716,7 +1574,6 @@ fillButton.addEventListener("click", () => {
 });
 
 generatePasswordButton.addEventListener("click", beginGeneratedPasswordFlow);
-saveLoginButton.addEventListener("click", beginSave);
 cancelSaveButton.addEventListener("click", cancelPendingSave);
 submitSaveButton.addEventListener("click", submitPendingSave);
 unlockVaultButton.addEventListener("click", submitPendingFill);

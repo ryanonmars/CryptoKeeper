@@ -9,6 +9,22 @@ afterEach(() => {
   vi.resetModules();
 });
 
+it("does not expose a manual save action", async () => {
+  vi.stubGlobal("chrome", {
+    runtime: { lastError: undefined, sendMessage: vi.fn() },
+    tabs: {
+      query: (
+        _query: unknown,
+        callback: (tabs: Array<{ url?: string }>) => void
+      ) => callback([{ url: "https://example.test/account" }]),
+    },
+  });
+
+  await import("./popup");
+
+  expect(document.querySelector("#save-login")).toBeNull();
+});
+
 type PendingLoginPopupOptions = {
   canGeneratePassword?: boolean;
   matches?: Array<{
@@ -70,8 +86,6 @@ async function openPendingLoginPopup(
               hasPasswordField: false,
               hasConfirmationPasswordField: false,
               canGeneratePassword: options.canGeneratePassword ?? false,
-              hasPendingSaveUsername: false,
-              pendingUsername: null,
             },
           },
         });
@@ -235,8 +249,6 @@ it("offers a submitted login for saving without receiving its password", async (
               hasPasswordField: false,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
-              hasPendingSaveUsername: false,
-              pendingUsername: null,
             },
           },
         });
@@ -321,8 +333,6 @@ it("labels a submitted login that matches an existing username as an update", as
               hasPasswordField: false,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
-              hasPendingSaveUsername: false,
-              pendingUsername: null,
             },
           },
         });
@@ -460,11 +470,6 @@ it("keeps the submitted login prompt available after a save failure", async () =
 
 it.each([
   {
-    actionSelector: "#save-login",
-    requestType: "termkey.content.captureVisibleCredentials",
-    options: {},
-  },
-  {
     actionSelector: "#generate-password",
     requestType: "termkey.passwords.generateForPage",
     options: { canGeneratePassword: true },
@@ -549,22 +554,8 @@ it.each([
   }
 );
 
-it.each([
-  {
-    actionSelector: "#save-login",
-    responseType: "captured_login",
-    requestType: "termkey.content.captureVisibleCredentials",
-    candidate: { password: "captured-password", url: "https://example.test" },
-  },
-  {
-    actionSelector: "#generate-password",
-    responseType: "generated_password",
-    requestType: "termkey.passwords.generateForPage",
-    candidate: { password: "generated-password", url: "https://example.test" },
-  },
-])(
-  "saves a manually $responseType candidate through the native save request",
-  async ({ actionSelector, responseType, requestType, candidate }) => {
+it("saves a generated-password candidate through the native save request", async () => {
+    const candidate = { password: "generated-password", url: "https://example.test" };
     let nativeSave: unknown;
     await openPendingLoginPopup(
       "save",
@@ -577,29 +568,18 @@ it.each([
           });
           return;
         }
-        if (message.type === requestType) {
+        if (message.type === "termkey.passwords.generateForPage") {
           callback({
             ok: true,
-            response:
-              responseType === "captured_login"
-                ? {
-                    type: "captured_login",
-                    candidate: {
-                      username: "manual@example.test",
-                      password: candidate.password,
-                      url: candidate.url,
-                    },
-                    usedStoredUsername: false,
-                  }
-                : {
-                    type: "generated_password",
-                    candidate: {
-                      username: "manual@example.test",
-                      password: candidate.password,
-                      url: candidate.url,
-                    },
-                    filledPasswordFields: 1,
-                  },
+            response: {
+              type: "generated_password",
+              candidate: {
+                username: "manual@example.test",
+                password: candidate.password,
+                url: candidate.url,
+              },
+              filledPasswordFields: 1,
+            },
           });
           return;
         }
@@ -611,10 +591,10 @@ it.each([
           });
         }
       },
-      { canGeneratePassword: responseType === "generated_password" }
+      { canGeneratePassword: true }
     );
 
-    document.querySelector<HTMLButtonElement>(actionSelector)?.click();
+    document.querySelector<HTMLButtonElement>("#generate-password")?.click();
     document.querySelector<HTMLButtonElement>("#submit-save")?.click();
 
     expect(nativeSave).toMatchObject({
@@ -622,8 +602,7 @@ it.each([
       password: candidate.password,
       url: candidate.url,
     });
-  }
-);
+  });
 
 it("retries a protected fill with the same grant after a wrong secondary password", async () => {
   const sendMessage = vi.fn(
@@ -658,8 +637,6 @@ it("retries a protected fill with the same grant after a wrong secondary passwor
               hasPasswordField: true,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
-              hasPendingSaveUsername: false,
-              pendingUsername: null,
             },
           },
         });
@@ -817,8 +794,6 @@ it("keeps a recovery notice visible after unlock refreshes the page state", asyn
               hasPasswordField: true,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
-              hasPendingSaveUsername: false,
-              pendingUsername: null,
             },
           },
         });

@@ -121,16 +121,6 @@ export type FillCredentialsMessage = {
   password: string;
 };
 
-export type PopupCapturedLoginResponse = {
-  type: "captured_login";
-  candidate: {
-    username: string | null;
-    password: string;
-    url: string;
-  };
-  usedStoredUsername?: boolean;
-};
-
 export type PopupPageIntent =
   | "login"
   | "signup"
@@ -145,16 +135,7 @@ export type PopupPageContextResponse = {
     hasPasswordField: boolean;
     hasConfirmationPasswordField: boolean;
     canGeneratePassword: boolean;
-    hasPendingSaveUsername: boolean;
-    pendingUsername: string | null;
   };
-};
-
-export type PopupCapturedLoginStepResponse = {
-  type: "captured_login_step";
-  step: "username_only";
-  username: string;
-  url: string;
 };
 
 export type PopupPendingLoginResponse = {
@@ -239,9 +220,6 @@ export type PopupToBackgroundMessage =
       type: "termkey.nativeHost.findSiteMatches";
     }
   | {
-      type: "termkey.content.captureVisibleCredentials";
-    }
-  | {
       type: "termkey.content.captureSubmittedLogin";
     }
   | {
@@ -287,9 +265,7 @@ export type PopupToBackgroundResponse =
       response:
         | Exclude<NativeHostResponse, { type: "site_matches" }>
         | PopupSiteMatchesResponse
-        | PopupCapturedLoginResponse
         | PopupPageContextResponse
-        | PopupCapturedLoginStepResponse
         | PopupPendingLoginResponse
         | PopupGeneratedPasswordResponse
         | PopupFillResultResponse

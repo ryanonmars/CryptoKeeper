@@ -1160,7 +1160,7 @@ describe("background security boundaries", () => {
     });
   });
 
-  it("stores only an HTTPS origin without path query or fragment", async () => {
+  it("uses only an HTTPS origin without path query or fragment for generated passwords", async () => {
     const mock = createChromeMock({
       id: 7,
       url: "https://EXAMPLE.test:443/account/login?next=%2Fvault#password",
@@ -1169,14 +1169,6 @@ describe("background security boundaries", () => {
       const type = (message as { type?: string }).type;
       if (type === "termkey.contentScriptProbe") {
         return { ok: true, documentToken: "a".repeat(64) };
-      }
-      if (type === "termkey.captureVisibleCredentials") {
-        return {
-          ok: true,
-          captureState: "complete",
-          username: "person@example.test",
-          password: "captured-secret",
-        };
       }
       if (type === "termkey.fillGeneratedPassword") {
         return {
@@ -1195,22 +1187,6 @@ describe("background security boundaries", () => {
     });
     const service = createBackgroundService(mock.chrome);
 
-    await expect(
-      service.handleMessage(
-        { type: "termkey.content.captureVisibleCredentials" },
-        mock.extensionSender
-      )
-    ).resolves.toMatchObject({
-      ok: true,
-      response: {
-        type: "captured_login",
-        candidate: {
-          username: "person@example.test",
-          password: "captured-secret",
-          url: "https://example.test",
-        },
-      },
-    });
     await expect(
       service.handleMessage(
         { type: "termkey.passwords.generateForPage" },
