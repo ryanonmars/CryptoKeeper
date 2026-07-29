@@ -417,6 +417,42 @@ it("does not report a visible failure alert on a signup page", () => {
   });
 });
 
+it("reports an empty eligible password field as fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username" value="sam"><input type="password" autocomplete="current-password"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: true,
+  });
+});
+
+it("reports an empty eligible username field as fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username"><input type="password" autocomplete="current-password" value="secret"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: true,
+  });
+});
+
+it("reports a filled eligible login form as not fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username" value="sam"><input type="password" autocomplete="current-password" value="secret"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: false,
+  });
+});
+
 it("notifies the background of a submitted login without credentials", () => {
   document.body.innerHTML = `
     <form>

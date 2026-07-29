@@ -143,6 +143,7 @@ export type PopupPageContextResponse = {
     intent: PopupPageIntent;
     visibleUsername: string | null;
     hasPasswordField: boolean;
+    hasEmptyLoginField: boolean;
     hasConfirmationPasswordField: boolean;
     canGeneratePassword: boolean;
     hasPendingSaveUsername: boolean;

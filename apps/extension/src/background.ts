@@ -1193,6 +1193,7 @@ export function createBackgroundService(
               ? context.visibleUsername
               : null,
           hasPasswordField: context.hasPasswordField === true,
+          hasEmptyLoginField: context.hasEmptyLoginField === true,
           hasConfirmationPasswordField:
             context.hasConfirmationPasswordField === true,
           canGeneratePassword: context.canGeneratePassword === true,

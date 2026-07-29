@@ -127,6 +127,42 @@ describe("background security boundaries", () => {
     vi.useRealTimers();
   });
 
+  it("forwards empty eligible login-field metadata from the content script", async () => {
+    const mock = createChromeMock();
+    mock.setTabMessageHandler((_tabId, message) => {
+      if ((message as { type?: string }).type === "termkey.contentScriptProbe") {
+        return { ok: true, documentToken: "a".repeat(64) };
+      }
+      if ((message as { type?: string }).type === "termkey.inspectPageContext") {
+        return {
+          ok: true,
+          documentToken: "a".repeat(64),
+          intent: "login",
+          visibleUsername: null,
+          hasPasswordField: true,
+          hasEmptyLoginField: true,
+          hasConfirmationPasswordField: false,
+          canGeneratePassword: false,
+        };
+      }
+      throw new Error("Unexpected content-script message.");
+    });
+    const service = createBackgroundService(mock.chrome);
+
+    const response = await service.handleMessage(
+      { type: "termkey.content.inspectPageContext" },
+      mock.extensionSender
+    );
+
+    expect(response).toMatchObject({
+      ok: true,
+      response: {
+        type: "page_context",
+        context: { hasEmptyLoginField: true },
+      },
+    });
+  });
+
   it("returns no pending login when the extension has not captured one", async () => {
     expectTypeOf<PopupPendingLoginResponse["candidate"]>().toEqualTypeOf<
       | {
