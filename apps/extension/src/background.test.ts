@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import type { PopupPendingLoginResponse } from "@termkey/types";
 
 import {
   NATIVE_REQUEST_TIMEOUT_MS,
@@ -126,6 +127,15 @@ describe("background security boundaries", () => {
   });
 
   it("returns no pending login when the extension has not captured one", async () => {
+    expectTypeOf<PopupPendingLoginResponse["candidate"]>().toEqualTypeOf<
+      | {
+          username: string | null;
+          url: string;
+          mode: "save" | "update";
+        }
+      | null
+    >();
+
     const mock = createChromeMock();
     const service = createBackgroundService(mock.chrome);
 

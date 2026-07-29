@@ -151,7 +151,6 @@ export type PopupPendingLoginResponse = {
   type: "pending_login";
   candidate: {
     username: string | null;
-    password: string;
     url: string;
     mode: "save" | "update";
   } | null;
@@ -243,6 +242,12 @@ export type PopupToBackgroundMessage =
     }
   | {
       type: "termkey.pendingLogin.dismiss";
+    }
+  | {
+      type: "termkey.pendingLogin.save";
+      name: string;
+      username?: string;
+      secondaryPassword?: string;
     }
   | {
       type: "termkey.passwords.generateForPage";
