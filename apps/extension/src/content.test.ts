@@ -466,6 +466,27 @@ it("snapshots submitted credentials before a site handler clears the form", () =
   expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
 });
 
+it("captures a login when a non-submit button handles authentication", () => {
+  document.body.innerHTML = `
+    <section id="login-panel">
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <button type="button">Login</button>
+    </section>
+  `;
+  const button = document.querySelector("button");
+  if (!button) throw new Error("Missing login button fixture.");
+
+  button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+  expect(dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response)
+    .toEqual({ ok: true, username: "sam", password: "secret" });
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+  });
+});
+
 it("emits a token-bound page-context event after a history API transition", async () => {
   history.pushState({}, "", "/signed-in");
 
