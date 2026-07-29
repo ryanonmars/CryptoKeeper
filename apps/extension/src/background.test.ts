@@ -1085,6 +1085,43 @@ describe("background security boundaries", () => {
     });
   });
 
+  it("rejects a concurrent unlock-and-save transaction for the same pending login", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({ ok: true, username: "captured-user", password: "website-secret" });
+    mock.setPageContext({ intent: "unknown", hasPasswordField: false, hasVisibleLoginFailure: false });
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      switch ((request as { type?: string }).type) {
+        case "unlock": return { type: "unlock", unlocked: true };
+        case "find_site_matches": return { ...siteMatchesResponse, matches: [] };
+        case "save_password_entry": return { type: "save_entry", entryName: "Example account" };
+        default: return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage({ type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) }, 7);
+    await mock.dispatchContentMessage({ type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) }, 7);
+    const message = {
+      type: "termkey.pendingLogin.unlockAndSave" as const,
+      name: "Example account",
+      masterPassword: "master-secret",
+    };
+
+    const first = service.handleMessage(message, mock.extensionSender);
+    const second = service.handleMessage(message, mock.extensionSender);
+
+    await expect(first).resolves.toMatchObject({
+      ok: true,
+      response: { type: "unlock_and_save_result", unlocked: true, saved: true },
+    });
+    await expect(second).resolves.toEqual({
+      ok: false,
+      error: "A pending login save is already in progress.",
+    });
+    expect(nativeRequests.filter((request) => request.type === "save_password_entry")).toHaveLength(1);
+  });
+
   it("updates the matched login instead of appending a duplicate", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({

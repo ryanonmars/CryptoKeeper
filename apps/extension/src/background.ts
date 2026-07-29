@@ -873,6 +873,7 @@ export function createBackgroundService(
     options.grantTtlMs ?? MATCH_GRANT_TTL_MS
   );
   const pendingLogins = new PendingLoginStore(now, PENDING_LOGIN_TTL_MS);
+  const pendingLoginTransactions = new WeakSet<PendingLogin>();
   const nativeClient =
     options.nativeClient ??
     new NativeHostClient(
@@ -1555,38 +1556,46 @@ export function createBackgroundService(
   ) {
     const candidate = await getActivePendingLogin(true);
     if (!candidate) return { ok: false as const, error: "No pending login is available to save." };
-    const unlock = await nativeClient.request({ type: "unlock", password: message.masterPassword });
-    if (!unlock.ok || unlock.response.type !== "unlock") {
-      return {
-        ok: true as const,
-        response: {
-          type: "unlock_and_save_result" as const,
-          unlocked: false,
-          saved: false,
-          error: unlock.ok ? "Native host returned the wrong response type." : unlock.error,
-        },
-      };
+    if (pendingLoginTransactions.has(candidate)) {
+      return { ok: false as const, error: "A pending login save is already in progress." };
     }
-    const mode = await resolvePendingLogin(candidate);
-    if (mode === null) {
-      return { ok: false as const, error: "No pending login is available to save." };
-    }
-    if (typeof mode !== "string") {
-      return {
-        ok: true as const,
-        response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, error: mode.error },
-      };
-    }
-    const save = await saveResolvedPendingLogin(candidate, message);
-    return save.ok
-      ? {
+    pendingLoginTransactions.add(candidate);
+    try {
+      const unlock = await nativeClient.request({ type: "unlock", password: message.masterPassword });
+      if (!unlock.ok || unlock.response.type !== "unlock") {
+        return {
           ok: true as const,
-          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: true, mode, entryName: save.entryName },
-        }
-      : {
-          ok: true as const,
-          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, mode, error: save.error },
+          response: {
+            type: "unlock_and_save_result" as const,
+            unlocked: false,
+            saved: false,
+            error: unlock.ok ? "Native host returned the wrong response type." : unlock.error,
+          },
         };
+      }
+      const mode = await resolvePendingLogin(candidate);
+      if (mode === null) {
+        return { ok: false as const, error: "No pending login is available to save." };
+      }
+      if (typeof mode !== "string") {
+        return {
+          ok: true as const,
+          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, error: mode.error },
+        };
+      }
+      const save = await saveResolvedPendingLogin(candidate, message);
+      return save.ok
+        ? {
+            ok: true as const,
+            response: { type: "unlock_and_save_result" as const, unlocked: true, saved: true, mode, entryName: save.entryName },
+          }
+        : {
+            ok: true as const,
+            response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, mode, error: save.error },
+          };
+    } finally {
+      pendingLoginTransactions.delete(candidate);
+    }
   }
 
   async function handleTrustedMessage(
