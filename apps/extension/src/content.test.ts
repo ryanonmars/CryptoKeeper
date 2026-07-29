@@ -375,6 +375,22 @@ it("reports a visible invalid-login alert only on a login page", () => {
   });
 });
 
+it("does not report an invalid-login alert hidden by an ancestor", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <div hidden><p role="alert">Invalid password</p></div>
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasVisibleLoginFailure: false,
+  });
+});
+
 it("does not report a visible failure alert on a signup page", () => {
   document.body.innerHTML = `
     <form aria-label="Create account">

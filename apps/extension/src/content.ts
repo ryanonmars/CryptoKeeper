@@ -1026,17 +1026,33 @@ function hasVisibleLoginFailure() {
   return Array.from(
     document.querySelectorAll<HTMLElement>("[role='alert'], .error, .alert")
   ).some((element) => {
-    const style = window.getComputedStyle(element);
     const text = element.textContent?.trim() ?? "";
     return (
-      !element.hidden &&
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      style.opacity !== "0" &&
-      !element.closest("[aria-hidden='true']") &&
+      isVisibleElement(element) &&
       /invalid|incorrect|failed|try again/i.test(text)
     );
   });
+}
+
+function isVisibleElement(element: HTMLElement) {
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    const style = window.getComputedStyle(current);
+    if (
+      current.hidden ||
+      current.getAttribute("aria-hidden") === "true" ||
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 runtimeChrome?.runtime?.onMessage?.addListener(
