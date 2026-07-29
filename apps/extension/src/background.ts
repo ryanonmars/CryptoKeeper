@@ -680,7 +680,14 @@ class MatchGrantStore {
 }
 
 class PendingLoginStore {
-  private readonly candidates = new Map<number, PendingLogin>();
+  private readonly candidates = new Map<
+    number,
+    {
+      candidate: PendingLogin;
+      deadlineId: symbol;
+      timerId: ReturnType<typeof setTimeout>;
+    }
+  >();
 
   constructor(
     private readonly now: () => number,
@@ -694,6 +701,11 @@ class PendingLoginStore {
     username: string | null,
     password: string
   ) {
+    const previous = this.candidates.get(tabId);
+    if (previous) {
+      clearTimeout(previous.timerId);
+      previous.candidate.password = "";
+    }
     const candidate: PendingLogin = {
       tabId,
       sourceDocumentToken,
@@ -703,31 +715,47 @@ class PendingLoginStore {
       expiresAt: this.now() + this.ttlMs,
       ready: false,
     };
-    this.candidates.set(tabId, candidate);
+    const deadlineId = Symbol();
+    const timerId = setTimeout(() => {
+      const current = this.candidates.get(tabId);
+      if (current?.deadlineId === deadlineId) {
+        current.candidate.password = "";
+        this.candidates.delete(tabId);
+      }
+    }, this.ttlMs);
+    this.candidates.set(tabId, { candidate, deadlineId, timerId });
     return candidate;
   }
 
   get(tabId: number) {
-    const candidate = this.candidates.get(tabId);
+    const candidate = this.candidates.get(tabId)?.candidate;
     if (candidate && candidate.expiresAt <= this.now()) {
-      this.candidates.delete(tabId);
+      this.remove(candidate);
       return undefined;
     }
     return candidate;
   }
 
   markReady(candidate: PendingLogin) {
-    if (this.candidates.get(candidate.tabId) === candidate) {
+    if (this.candidates.get(candidate.tabId)?.candidate === candidate) {
       candidate.ready = true;
     }
   }
 
   removeTab(tabId: number) {
+    const current = this.candidates.get(tabId);
+    if (current) {
+      clearTimeout(current.timerId);
+      current.candidate.password = "";
+    }
     this.candidates.delete(tabId);
   }
 
   remove(candidate: PendingLogin) {
-    if (this.candidates.get(candidate.tabId) === candidate) {
+    const current = this.candidates.get(candidate.tabId);
+    if (current?.candidate === candidate) {
+      clearTimeout(current.timerId);
+      current.candidate.password = "";
       this.candidates.delete(candidate.tabId);
     }
   }
@@ -1435,7 +1463,11 @@ export function createBackgroundService(
     }
 
     const candidate = pendingLogins.get(page.tabId);
-    if (candidate && candidate.origin === page.origin) {
+    if (
+      candidate &&
+      candidate.origin === page.origin &&
+      candidate.sourceDocumentToken === message.documentToken
+    ) {
       await inspectPendingLogin(candidate, message.documentToken);
     }
     return { ok: true as const };
@@ -1496,6 +1528,13 @@ export function createBackgroundService(
       pendingLogins.remove(candidate);
       return undefined;
     }
+    const current = pendingLogins.get(candidate.tabId);
+    if (
+      current !== candidate ||
+      (requireReady && !current.ready)
+    ) {
+      return undefined;
+    }
     return candidate;
   }
 
@@ -1524,6 +1563,15 @@ export function createBackgroundService(
       return {
         ok: false as const,
         error: "Native host returned matches for a different origin.",
+      };
+    }
+    if ((await getActivePendingLogin(true)) !== candidate) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login" as const,
+          candidate: null,
+        },
       };
     }
     const mode: "save" | "update" =
