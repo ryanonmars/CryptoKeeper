@@ -647,6 +647,7 @@ let pageContext: PopupPageContextResponse["context"] = {
   intent: "unknown",
   visibleUsername: null,
   hasPasswordField: false,
+  hasEmptyLoginField: false,
   hasConfirmationPasswordField: false,
   canGeneratePassword: false,
 };
@@ -663,6 +664,7 @@ function setSiteVisibility(visible: boolean) {
       intent: "unknown",
       visibleUsername: null,
       hasPasswordField: false,
+      hasEmptyLoginField: false,
       hasConfirmationPasswordField: false,
       canGeneratePassword: false,
     });
@@ -739,6 +741,7 @@ function suggestEntryName(hostnameText: string, username: string | null) {
 
 function setPageContext(context: PopupPageContextResponse["context"]) {
   pageContext = context;
+  renderMatchPicker();
   updateFillButtonState();
 }
 
@@ -785,6 +788,7 @@ function updateFillButtonState() {
   const singleMatch = currentSiteMatches.length === 1;
   const showGenerateAction = pageContext.canGeneratePassword;
   const showFillAction =
+    pageContext.hasEmptyLoginField &&
     pageContext.intent !== "signup" &&
     pageContext.intent !== "password_change" &&
     singleMatch;
@@ -939,6 +943,7 @@ function formatMatchDetail(match: PopupSiteMatch) {
 
 function renderMatchPicker() {
   const multipleMatches =
+    pageContext.hasEmptyLoginField &&
     currentSiteMatches.length > 1 &&
     pageContext.intent !== "signup" &&
     pageContext.intent !== "password_change";
@@ -1235,6 +1240,7 @@ function submitPendingFill() {
 
       const result: PopupFillResultResponse = response.response;
       renderMessage(formatFillResultMessage(result), "success");
+      inspectPageContext();
     }
   );
 }
@@ -1416,6 +1422,7 @@ function inspectPageContext() {
       intent: "unknown",
       visibleUsername: null,
       hasPasswordField: false,
+      hasEmptyLoginField: false,
       hasConfirmationPasswordField: false,
       canGeneratePassword: false,
     });

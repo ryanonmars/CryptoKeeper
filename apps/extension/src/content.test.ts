@@ -397,6 +397,89 @@ it("does not report a visible failure alert on a signup page", () => {
   });
 });
 
+it("reports an empty eligible password field as fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username" value="sam"><input type="password" autocomplete="current-password"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: true,
+  });
+});
+
+it("reports an empty eligible username field as fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username"><input type="password" autocomplete="current-password" value="secret"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: true,
+  });
+});
+
+it("reports a filled eligible login form as not fillable", () => {
+  document.body.innerHTML = `
+    <form><input autocomplete="username" value="sam"><input type="password" autocomplete="current-password" value="secret"></form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: false,
+  });
+});
+
+it("does not report empty signup fields as fillable login targets", () => {
+  document.body.innerHTML = `
+    <form aria-label="Create account">
+      <input autocomplete="username">
+      <input type="password" autocomplete="new-password">
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "signup",
+    hasEmptyLoginField: false,
+  });
+});
+
+it("does not report empty password-change fields as fillable login targets", () => {
+  document.body.innerHTML = `
+    <form aria-label="Change password">
+      <input type="password" autocomplete="current-password" value="old-secret">
+      <input type="password" autocomplete="new-password">
+      <input type="password" autocomplete="new-password">
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "password_change",
+    hasEmptyLoginField: false,
+  });
+});
+
+it("ignores empty ineligible decoys beside a filled eligible login form", () => {
+  document.body.innerHTML = `
+    <form aria-label="Login">
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <input type="password" autocomplete="one-time-code">
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasEmptyLoginField: false,
+  });
+});
+
 it("notifies the background of a submitted login without credentials", () => {
   document.body.innerHTML = `
     <form>

@@ -970,12 +970,17 @@ function inspectPageContext() {
       ? generatedTargets.usernameInput
       : loginTargets.usernameInput ??
         findBestUsernameInput(inputs, undefined);
+  const hasEmptyLoginField =
+    inferred.intent === "login" &&
+    (loginTargets.usernameInput?.value.trim() === "" ||
+      Boolean(loginTargets.passwordInput && !loginTargets.passwordInput.value));
 
   return {
     ok: true,
     intent: inferred.intent,
     visibleUsername: usernameInput?.value.trim() || null,
     hasPasswordField: inferred.hasPasswordField,
+    hasEmptyLoginField,
     hasConfirmationPasswordField: inferred.hasConfirmationPasswordField,
     canGeneratePassword: canGeneratePasswordForInputs(inputs),
     hasVisibleLoginFailure:
