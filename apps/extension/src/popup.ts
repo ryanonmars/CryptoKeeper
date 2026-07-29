@@ -819,6 +819,7 @@ function stagePendingLogin(
   savePanelHint.textContent =
     "The submitted password remains in the extension background until you choose an action.";
   renderSavePrompt();
+  updateFillButtonState();
 }
 
 function updateFillButtonState() {
@@ -1087,6 +1088,11 @@ function beginFill(match: PopupSiteMatch) {
     return;
   }
 
+  if (pendingLoginCandidate) {
+    dismissPendingLogin(() => beginFill(match));
+    return;
+  }
+
   clearPendingSave();
   pendingFillMatch = match;
   renderMatchPicker();
@@ -1113,6 +1119,11 @@ function beginSave() {
 
   if (!vaultExists) {
     renderMessage("Create your vault before saving a login.", "error");
+    return;
+  }
+
+  if (pendingLoginCandidate) {
+    dismissPendingLogin(beginSave);
     return;
   }
 
@@ -1183,6 +1194,11 @@ function formatGeneratedPasswordMessage(filledPasswordFields: number) {
 function beginGeneratedPasswordFlow() {
   if (!backendConnected) {
     renderMessage("Reconnect the extension backend before generating a password.", "error");
+    return;
+  }
+
+  if (pendingLoginCandidate) {
+    dismissPendingLogin(beginGeneratedPasswordFlow);
     return;
   }
 
@@ -1467,6 +1483,11 @@ function submitPendingSave() {
       updateFillButtonState();
       renderMessage(`Saved ${result.entryName}.`, "success");
       findSiteMatches();
+    },
+    () => {
+      saveInFlight = false;
+      renderSavePrompt();
+      updateFillButtonState();
     }
   );
 }
@@ -1489,7 +1510,8 @@ function formatFillResultMessage(result: PopupFillResultResponse) {
 
 function sendMessage(
   message: PopupToBackgroundMessage,
-  onSuccess: (response: PopupToBackgroundResponse) => void
+  onSuccess: (response: PopupToBackgroundResponse) => void,
+  onTransportFailure?: () => void
 ) {
   chrome.runtime.sendMessage(
     message,
@@ -1498,12 +1520,14 @@ function sendMessage(
       if (runtimeError) {
         setBackendStatus(false, "Disconnected");
         renderMessage(`Background message failed: ${runtimeError.message}`, "error");
+        onTransportFailure?.();
         return;
       }
 
       if (!response) {
         setBackendStatus(false, "Disconnected");
         renderMessage("No response received from the extension background.", "error");
+        onTransportFailure?.();
         return;
       }
 
@@ -1699,12 +1723,7 @@ unlockVaultButton.addEventListener("click", submitPendingFill);
 
 function cancelPendingSave() {
   if (pendingLoginCandidate) {
-    sendMessage({ type: "termkey.pendingLogin.dismiss" }, (response) => {
-      if (!response.ok) {
-        renderMessage(`Could not dismiss this login: ${response.error}`, "error");
-        return;
-      }
-
+    dismissPendingLogin(() => {
       clearPendingSave();
       renderSavePrompt();
       updateFillButtonState();
@@ -1717,6 +1736,18 @@ function cancelPendingSave() {
   renderSavePrompt();
   updateFillButtonState();
   renderMessage("Save login cancelled.");
+}
+
+function dismissPendingLogin(onDismissed: () => void) {
+  sendMessage({ type: "termkey.pendingLogin.dismiss" }, (response) => {
+    if (!response.ok) {
+      renderMessage(`Could not dismiss this login: ${response.error}`, "error");
+      return;
+    }
+
+    clearPendingSave();
+    onDismissed();
+  });
 }
 
 saveUseSecondaryPasswordInput.addEventListener("change", () => {

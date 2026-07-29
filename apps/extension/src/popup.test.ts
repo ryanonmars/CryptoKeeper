@@ -9,13 +9,27 @@ afterEach(() => {
   vi.resetModules();
 });
 
+type PendingLoginPopupOptions = {
+  canGeneratePassword?: boolean;
+  matches?: Array<{
+    id: string;
+    grantId: string;
+    name: string;
+    username: string | null;
+    url: string;
+    matchType: "exact_origin";
+    hasSecondaryPassword: boolean;
+  }>;
+};
+
 async function openPendingLoginPopup(
   mode: "save" | "update",
   handleMessage: (
     message: { type: string },
     callback: (response: unknown) => void,
     dismissCandidate: () => void
-  ) => void
+  ) => void,
+  options: PendingLoginPopupOptions = {}
 ) {
   let candidate: {
     username: string | null;
@@ -55,7 +69,7 @@ async function openPendingLoginPopup(
               visibleUsername: null,
               hasPasswordField: false,
               hasConfirmationPasswordField: false,
-              canGeneratePassword: false,
+              canGeneratePassword: options.canGeneratePassword ?? false,
               hasPendingSaveUsername: false,
               pendingUsername: null,
             },
@@ -69,7 +83,7 @@ async function openPendingLoginPopup(
             siteUrl: "https://example.test",
             siteOrigin: "https://example.test",
             siteHostname: "example.test",
-            matches: [],
+            matches: options.matches ?? [],
           },
         });
       } else if (message.type === "termkey.pendingLogin.get") {
@@ -443,6 +457,173 @@ it("keeps the submitted login prompt available after a save failure", async () =
     "Save failed: Vault remains locked."
   );
 });
+
+it.each([
+  {
+    actionSelector: "#save-login",
+    requestType: "termkey.content.captureVisibleCredentials",
+    options: {},
+  },
+  {
+    actionSelector: "#generate-password",
+    requestType: "termkey.passwords.generateForPage",
+    options: { canGeneratePassword: true },
+  },
+  {
+    actionSelector: "#fill-best-match",
+    requestType: "termkey.autofill.fillSelectedMatch",
+    options: {
+      matches: [
+        {
+          id: "entry-1",
+          grantId: "grant-1",
+          name: "Example account",
+          username: "sam@example.test",
+          url: "https://example.test",
+          matchType: "exact_origin" as const,
+          hasSecondaryPassword: false,
+        },
+      ],
+    },
+  },
+])(
+  "dismisses the submitted login before starting $requestType",
+  async ({ actionSelector, requestType, options }) => {
+    const sendMessage = await openPendingLoginPopup(
+      "save",
+      (message, callback, dismissCandidate) => {
+        if (message.type === "termkey.pendingLogin.dismiss") {
+          dismissCandidate();
+          callback({
+            ok: true,
+            response: { type: "pending_login", candidate: null },
+          });
+        }
+      },
+      options
+    );
+
+    document.querySelector<HTMLButtonElement>(actionSelector)?.click();
+
+    const relevantRequests = sendMessage.mock.calls
+      .map(([message]) => (message as { type: string }).type)
+      .filter(
+        (type) =>
+          type === "termkey.pendingLogin.dismiss" || type === requestType
+      );
+    expect(relevantRequests).toEqual([
+      "termkey.pendingLogin.dismiss",
+      requestType,
+    ]);
+  }
+);
+
+it.each([
+  { name: "reports a runtime error", runtimeError: "Background service worker stopped." },
+  { name: "returns no response", runtimeError: undefined },
+])(
+  "keeps a submitted login retryable when its save transport $name",
+  async ({ runtimeError }) => {
+    await openPendingLoginPopup("save", (message, callback) => {
+      if (message.type === "termkey.pendingLogin.save") {
+        if (runtimeError) {
+          (
+            chrome.runtime as unknown as {
+              lastError?: { message: string };
+            }
+          ).lastError = { message: runtimeError };
+        }
+        callback(undefined);
+        (
+          chrome.runtime as unknown as {
+            lastError?: { message: string };
+          }
+        ).lastError = undefined;
+      }
+    });
+
+    document.querySelector<HTMLButtonElement>("#submit-save")?.click();
+
+    expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(false);
+    expect(document.querySelector("#submit-save")?.textContent).toBe("Save login");
+  }
+);
+
+it.each([
+  {
+    actionSelector: "#save-login",
+    responseType: "captured_login",
+    requestType: "termkey.content.captureVisibleCredentials",
+    candidate: { password: "captured-password", url: "https://example.test" },
+  },
+  {
+    actionSelector: "#generate-password",
+    responseType: "generated_password",
+    requestType: "termkey.passwords.generateForPage",
+    candidate: { password: "generated-password", url: "https://example.test" },
+  },
+])(
+  "saves a manually $responseType candidate through the native save request",
+  async ({ actionSelector, responseType, requestType, candidate }) => {
+    let nativeSave: unknown;
+    await openPendingLoginPopup(
+      "save",
+      (message, callback, dismissCandidate) => {
+        if (message.type === "termkey.pendingLogin.dismiss") {
+          dismissCandidate();
+          callback({
+            ok: true,
+            response: { type: "pending_login", candidate: null },
+          });
+          return;
+        }
+        if (message.type === requestType) {
+          callback({
+            ok: true,
+            response:
+              responseType === "captured_login"
+                ? {
+                    type: "captured_login",
+                    candidate: {
+                      username: "manual@example.test",
+                      password: candidate.password,
+                      url: candidate.url,
+                    },
+                    usedStoredUsername: false,
+                  }
+                : {
+                    type: "generated_password",
+                    candidate: {
+                      username: "manual@example.test",
+                      password: candidate.password,
+                      url: candidate.url,
+                    },
+                    filledPasswordFields: 1,
+                  },
+          });
+          return;
+        }
+        if (message.type === "termkey.nativeHost.savePasswordEntry") {
+          nativeSave = message;
+          callback({
+            ok: true,
+            response: { type: "save_entry_result", entryName: "Manual login" },
+          });
+        }
+      },
+      { canGeneratePassword: responseType === "generated_password" }
+    );
+
+    document.querySelector<HTMLButtonElement>(actionSelector)?.click();
+    document.querySelector<HTMLButtonElement>("#submit-save")?.click();
+
+    expect(nativeSave).toMatchObject({
+      type: "termkey.nativeHost.savePasswordEntry",
+      password: candidate.password,
+      url: candidate.url,
+    });
+  }
+);
 
 it("retries a protected fill with the same grant after a wrong secondary password", async () => {
   const sendMessage = vi.fn(
