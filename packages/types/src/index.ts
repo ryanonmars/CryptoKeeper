@@ -29,6 +29,16 @@ export type NativeHostRequest =
       secondaryPassword?: string;
     }
   | {
+      type: "update_password_entry";
+      id: string;
+      origin: string;
+      name: string;
+      username?: string;
+      password: string;
+      url?: string;
+      secondaryPassword?: string;
+    }
+  | {
       type: "list_entries";
     }
   | {
@@ -147,6 +157,15 @@ export type PopupCapturedLoginStepResponse = {
   url: string;
 };
 
+export type PopupPendingLoginResponse = {
+  type: "pending_login";
+  candidate: {
+    username: string | null;
+    url: string;
+    mode: "save" | "update";
+  } | null;
+};
+
 export type PopupGeneratedPasswordResponse = {
   type: "generated_password";
   candidate: {
@@ -223,7 +242,22 @@ export type PopupToBackgroundMessage =
       type: "termkey.content.captureVisibleCredentials";
     }
   | {
+      type: "termkey.content.captureSubmittedLogin";
+    }
+  | {
       type: "termkey.content.inspectPageContext";
+    }
+  | {
+      type: "termkey.pendingLogin.get";
+    }
+  | {
+      type: "termkey.pendingLogin.dismiss";
+    }
+  | {
+      type: "termkey.pendingLogin.save";
+      name: string;
+      username?: string;
+      secondaryPassword?: string;
     }
   | {
       type: "termkey.passwords.generateForPage";
@@ -256,6 +290,7 @@ export type PopupToBackgroundResponse =
         | PopupCapturedLoginResponse
         | PopupPageContextResponse
         | PopupCapturedLoginStepResponse
+        | PopupPendingLoginResponse
         | PopupGeneratedPasswordResponse
         | PopupFillResultResponse
         | PopupSaveResultResponse;

@@ -21,6 +21,22 @@ type CaptureVisibleCredentialsMessage = {
   documentToken: string;
 };
 
+type CaptureSubmittedLoginMessage = {
+  type: "termkey.captureSubmittedLogin";
+  documentToken: string;
+};
+
+type SubmittedLoginCapture =
+  | {
+      ok: true;
+      username: string | null;
+      password: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 type InspectPageContextMessage = {
   type: "termkey.inspectPageContext";
 };
@@ -53,6 +69,9 @@ const runtimeChrome = typeof chrome === "undefined" ? undefined : chrome;
 const contentGlobal = globalThis as typeof globalThis & {
   __termkeyContentScriptLoaded?: boolean;
 };
+let submittedLoginSnapshot: SubmittedLoginCapture | undefined;
+let submittedLoginNotification: Promise<unknown> | undefined;
+let pageContextNotificationQueued = false;
 
 if (runtimeChrome?.runtime && contentGlobal.__termkeyContentScriptLoaded) {
   return;
@@ -937,6 +956,33 @@ function captureVisibleCredentials() {
   };
 }
 
+function captureSubmittedLogin(
+  submittedForm: HTMLFormElement
+): SubmittedLoginCapture {
+  const inputs = collectInputElements().filter(
+    (input) => input.form === submittedForm
+  );
+  const inferred = inferPageIntent(inputs);
+  const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
+
+  if (
+    inferred.intent !== "login" ||
+    !passwordInput ||
+    !passwordInput.value.trim()
+  ) {
+    return {
+      ok: false,
+      error: "No visible submitted login credentials were found on this page.",
+    };
+  }
+
+  return {
+    ok: true,
+    username: usernameInput?.value.trim() || null,
+    password: passwordInput.value,
+  };
+}
+
 function fillGeneratedPassword(message: FillGeneratedPasswordMessage) {
   const inputs = collectInputElements();
   const {
@@ -989,7 +1035,42 @@ function inspectPageContext() {
     hasPasswordField: inferred.hasPasswordField,
     hasConfirmationPasswordField: inferred.hasConfirmationPasswordField,
     canGeneratePassword: canGeneratePasswordForInputs(inputs),
+    hasVisibleLoginFailure:
+      inferred.intent === "login" && hasVisibleLoginFailure(),
   };
+}
+
+function hasVisibleLoginFailure() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[role='alert'], .error, .alert")
+  ).some((element) => {
+    const text = element.textContent?.trim() ?? "";
+    return (
+      isVisibleElement(element) &&
+      /invalid|incorrect|failed|try again/i.test(text)
+    );
+  });
+}
+
+function isVisibleElement(element: HTMLElement) {
+  for (
+    let current: HTMLElement | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    const style = window.getComputedStyle(current);
+    if (
+      current.hidden ||
+      current.getAttribute("aria-hidden") === "true" ||
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 runtimeChrome?.runtime?.onMessage?.addListener(
@@ -999,6 +1080,7 @@ runtimeChrome?.runtime?.onMessage?.addListener(
       | FillGeneratedPasswordMessage
       | ContentScriptProbeMessage
       | CaptureVisibleCredentialsMessage
+      | CaptureSubmittedLoginMessage
       | InspectPageContextMessage,
     sender: { id?: string },
     sendResponse: (response: unknown) => void
@@ -1014,6 +1096,7 @@ runtimeChrome?.runtime?.onMessage?.addListener(
 
     if (
       (message?.type === "termkey.captureVisibleCredentials" ||
+        message?.type === "termkey.captureSubmittedLogin" ||
         message?.type === "termkey.fillGeneratedPassword" ||
         message?.type === "termkey-fill-credentials") &&
       message.documentToken !== DOCUMENT_TOKEN
@@ -1027,6 +1110,16 @@ runtimeChrome?.runtime?.onMessage?.addListener(
 
     if (message?.type === "termkey.captureVisibleCredentials") {
       sendResponse(captureVisibleCredentials());
+      return true;
+    }
+
+    if (message?.type === "termkey.captureSubmittedLogin") {
+      const snapshot = submittedLoginSnapshot ?? {
+        ok: false as const,
+        error: "No submitted login credentials are available.",
+      };
+      submittedLoginSnapshot = undefined;
+      sendResponse(snapshot);
       return true;
     }
 
@@ -1063,7 +1156,80 @@ runtimeChrome?.runtime?.onMessage?.addListener(
   }
 );
 
+function sendPageContextChanged() {
+  pageContextNotificationQueued = false;
+  const notify = () =>
+    runtimeChrome?.runtime?.sendMessage?.({
+      type: "termkey.content.pageContextChanged",
+      documentToken: DOCUMENT_TOKEN,
+    });
+  if (submittedLoginNotification) {
+    void submittedLoginNotification.then(notify);
+  } else {
+    void notify();
+  }
+}
+
+function schedulePageContextChanged() {
+  if (pageContextNotificationQueued) {
+    return;
+  }
+  pageContextNotificationQueued = true;
+  queueMicrotask(sendPageContextChanged);
+}
+
+function wrapHistoryMethod(method: "pushState" | "replaceState") {
+  const original = window.history[method].bind(window.history);
+  window.history[method] = ((
+    data: unknown,
+    unused: string,
+    url?: string | URL | null
+  ) => {
+    original(data, unused, url);
+    schedulePageContextChanged();
+  }) as History["pushState"];
+}
+
+document.addEventListener(
+  "submit",
+  (event) => {
+    const snapshot =
+      event.target instanceof HTMLFormElement
+        ? captureSubmittedLogin(event.target)
+        : undefined;
+    submittedLoginSnapshot = snapshot;
+    const notification = runtimeChrome?.runtime?.sendMessage?.({
+      type: "termkey.content.loginSubmitted",
+      documentToken: DOCUMENT_TOKEN,
+    });
+    if (
+      notification &&
+      typeof (notification as PromiseLike<unknown>).then === "function"
+    ) {
+      const settled = Promise.resolve(notification).catch(() => undefined);
+      submittedLoginNotification = settled;
+      void settled.finally(() => {
+        if (submittedLoginNotification === settled) {
+          submittedLoginNotification = undefined;
+        }
+        if (submittedLoginSnapshot === snapshot) {
+          submittedLoginSnapshot = undefined;
+        }
+      });
+    }
+  },
+  true
+);
+
 if (runtimeChrome?.runtime) {
+  wrapHistoryMethod("pushState");
+  wrapHistoryMethod("replaceState");
+  window.addEventListener("popstate", schedulePageContextChanged);
+  window.addEventListener("hashchange", schedulePageContextChanged);
+  new MutationObserver(schedulePageContextChanged).observe(document, {
+    childList: true,
+    subtree: true,
+  });
   console.log("TermKey content script running");
 }
 })();

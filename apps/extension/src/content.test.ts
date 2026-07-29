@@ -12,6 +12,7 @@ type ContentListener = (
 
 let listener: ContentListener;
 let documentToken: string;
+let sendMessage: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -41,10 +42,12 @@ beforeEach(async () => {
   onMessage.addListener.mockImplementation((registered) => {
     listener = registered as ContentListener;
   });
+  sendMessage = vi.fn();
   vi.stubGlobal("chrome", {
     runtime: {
       id: "extension-id",
       onMessage,
+      sendMessage,
     },
   });
   await import("./content");
@@ -66,7 +69,8 @@ function dispatch(message: unknown, sender = { id: "extension-id" }) {
     "type" in message &&
     ((message as { type?: string }).type === "termkey-fill-credentials" ||
       (message as { type?: string }).type === "termkey.fillGeneratedPassword" ||
-      (message as { type?: string }).type === "termkey.captureVisibleCredentials") &&
+      (message as { type?: string }).type === "termkey.captureVisibleCredentials" ||
+      (message as { type?: string }).type === "termkey.captureSubmittedLogin") &&
     !("documentToken" in message)
   ) {
     message = { ...message, documentToken };
@@ -316,6 +320,160 @@ it("does not capture the old password during password change", () => {
     captureState: "password_only",
     username: null,
     password: "new-secret",
+  });
+});
+
+it("captures an unambiguous submitted login with its document token", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+    </form>
+  `;
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(
+    dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
+  ).toEqual({ ok: true, username: "sam", password: "secret" });
+});
+
+it.each([
+  [
+    "a signup form",
+    `<form><input type="password" autocomplete="new-password" value="secret"></form>`,
+  ],
+  [
+    "equally ranked passwords in the submitted form",
+    `<form>
+       <input type="password" autocomplete="current-password" value="one">
+       <input type="password" autocomplete="current-password" value="two">
+     </form>`,
+  ],
+  ["a username-only form", `<form><input autocomplete="username" value="sam"></form>`],
+  [
+    "a blank password",
+    `<form><input autocomplete="username" value="sam"><input type="password" autocomplete="current-password" value=""></form>`,
+  ],
+])("rejects submitted capture from %s", (_caseName, fixture) => {
+  document.body.innerHTML = fixture;
+  const form = document.querySelector("form");
+  if (form) {
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  }
+
+  expect(
+    dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
+  ).toMatchObject({ ok: false });
+});
+
+it("reports a visible invalid-login alert only on a login page", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <p role="alert">Invalid password</p>
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasVisibleLoginFailure: true,
+  });
+});
+
+it("does not report an invalid-login alert hidden by an ancestor", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <div hidden><p role="alert">Invalid password</p></div>
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "login",
+    hasVisibleLoginFailure: false,
+  });
+});
+
+it("does not report a visible failure alert on a signup page", () => {
+  document.body.innerHTML = `
+    <form aria-label="Create account">
+      <input type="password" autocomplete="new-password" value="secret">
+      <p class="error">Try again</p>
+    </form>
+  `;
+
+  expect(dispatch({ type: "termkey.inspectPageContext" }).response).toMatchObject({
+    ok: true,
+    intent: "signup",
+    hasVisibleLoginFailure: false,
+  });
+});
+
+it("notifies the background of a submitted login without credentials", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+    </form>
+  `;
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+  });
+  expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
+});
+
+it("snapshots submitted credentials before a site handler clears the form", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+    </form>
+  `;
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+  form.addEventListener("submit", () => {
+    form.remove();
+  });
+
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(document.querySelector("form")).toBeNull();
+  expect(
+    dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
+  ).toEqual({ ok: true, username: "sam", password: "secret" });
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+  });
+  expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
+});
+
+it("emits a token-bound page-context event after a history API transition", async () => {
+  history.pushState({}, "", "/signed-in");
+
+  await vi.waitFor(() => {
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "termkey.content.pageContextChanged",
+      documentToken,
+    });
   });
 });
 
@@ -683,6 +841,12 @@ it.each([
   [
     {
       type: "termkey.captureVisibleCredentials",
+      documentToken: "0".repeat(64),
+    },
+  ],
+  [
+    {
+      type: "termkey.captureSubmittedLogin",
       documentToken: "0".repeat(64),
     },
   ],

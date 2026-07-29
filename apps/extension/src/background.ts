@@ -11,12 +11,14 @@ import type {
 const NATIVE_HOST_NAME = "com.ryanonmars.termkey";
 const PENDING_SAVE_KEY_PREFIX = "pending-save:";
 const MATCH_GRANT_TTL_MS = 30_000;
+const PENDING_LOGIN_TTL_MS = 120_000;
 const MAX_MATCH_GRANTS = 100;
-export const NATIVE_PROTOCOL_VERSION = 2;
+export const NATIVE_PROTOCOL_VERSION = 3;
 export const REQUIRED_NATIVE_CAPABILITIES = [
   "opaque-match-handles",
   "document-token-binding",
   "origin-only-save",
+  "password-entry-update",
   "bounded-native-output",
 ] as const;
 const PROTOCOL_REPAIR_ERROR =
@@ -56,7 +58,9 @@ type NativeResponseForRequest<TRequest extends NativeHostRequest> =
           ? Extract<NativeHostResponse, { type: "site_matches" }>
           : TRequest["type"] extends "generate_password"
             ? Extract<NativeHostResponse, { type: "generated_password" }>
-            : TRequest["type"] extends "save_password_entry"
+            : TRequest["type"] extends
+                  | "save_password_entry"
+                  | "update_password_entry"
               ? Extract<NativeHostResponse, { type: "save_entry" }>
               : TRequest["type"] extends "list_entries"
                 ? Extract<NativeHostResponse, { type: "list_entries" }>
@@ -71,6 +75,17 @@ type PendingSaveDraft = {
   url: string;
 };
 
+type PendingLogin = {
+  tabId: number;
+  sourceDocumentToken: string;
+  origin: string;
+  username: string | null;
+  password: string;
+  updateEntryId?: string;
+  expiresAt: number;
+  ready: boolean;
+};
+
 export type MatchGrant = {
   tabId: number;
   documentToken: string;
@@ -82,6 +97,8 @@ export type MatchGrant = {
 type MessageSender = {
   id?: string;
   url?: string;
+  tab?: { id?: number; url?: string };
+  frameId?: number;
 };
 
 type BackgroundChrome = {
@@ -93,9 +110,9 @@ type BackgroundChrome = {
     onMessage?: {
       addListener(
         listener: (
-          message: PopupToBackgroundMessage,
+          message: unknown,
           sender: MessageSender,
-          sendResponse: (response: PopupToBackgroundResponse) => void
+          sendResponse: (response: unknown) => void
         ) => boolean
       ): void;
     };
@@ -112,6 +129,15 @@ type BackgroundChrome = {
     ): Promise<unknown>;
     onRemoved?: {
       addListener(listener: (tabId: number) => void): void;
+    };
+    onUpdated?: {
+      addListener(
+        listener: (
+          tabId: number,
+          changeInfo: { status?: string; url?: string },
+          tab: { id?: number; url?: string }
+        ) => void
+      ): void;
     };
   };
   scripting: {
@@ -285,6 +311,7 @@ function expectedResponseType(
     case "generate_password":
       return "generated_password";
     case "save_password_entry":
+    case "update_password_entry":
       return "save_entry";
     case "list_entries":
       return "list_entries";
@@ -657,6 +684,88 @@ class MatchGrantStore {
   }
 }
 
+class PendingLoginStore {
+  private readonly candidates = new Map<
+    number,
+    {
+      candidate: PendingLogin;
+      deadlineId: symbol;
+      timerId: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  constructor(
+    private readonly now: () => number,
+    private readonly ttlMs: number
+  ) {}
+
+  add(
+    tabId: number,
+    sourceDocumentToken: string,
+    origin: string,
+    username: string | null,
+    password: string
+  ) {
+    const previous = this.candidates.get(tabId);
+    if (previous) {
+      clearTimeout(previous.timerId);
+      previous.candidate.password = "";
+    }
+    const candidate: PendingLogin = {
+      tabId,
+      sourceDocumentToken,
+      origin,
+      username,
+      password,
+      expiresAt: this.now() + this.ttlMs,
+      ready: false,
+    };
+    const deadlineId = Symbol();
+    const timerId = setTimeout(() => {
+      const current = this.candidates.get(tabId);
+      if (current?.deadlineId === deadlineId) {
+        current.candidate.password = "";
+        this.candidates.delete(tabId);
+      }
+    }, this.ttlMs);
+    this.candidates.set(tabId, { candidate, deadlineId, timerId });
+    return candidate;
+  }
+
+  get(tabId: number) {
+    const candidate = this.candidates.get(tabId)?.candidate;
+    if (candidate && candidate.expiresAt <= this.now()) {
+      this.remove(candidate);
+      return undefined;
+    }
+    return candidate;
+  }
+
+  markReady(candidate: PendingLogin) {
+    if (this.candidates.get(candidate.tabId)?.candidate === candidate) {
+      candidate.ready = true;
+    }
+  }
+
+  removeTab(tabId: number) {
+    const current = this.candidates.get(tabId);
+    if (current) {
+      clearTimeout(current.timerId);
+      current.candidate.password = "";
+    }
+    this.candidates.delete(tabId);
+  }
+
+  remove(candidate: PendingLogin) {
+    const current = this.candidates.get(candidate.tabId);
+    if (current?.candidate === candidate) {
+      clearTimeout(current.timerId);
+      current.candidate.password = "";
+      this.candidates.delete(candidate.tabId);
+    }
+  }
+}
+
 function generateOpaqueGrantId() {
   return Array.from(
     crypto.getRandomValues(new Uint8Array(32)),
@@ -719,10 +828,32 @@ function isKnownPopupMessage(
     message.type === "termkey.nativeHost.findSiteMatches" ||
     message.type === "termkey.content.captureVisibleCredentials" ||
     message.type === "termkey.content.inspectPageContext" ||
+    message.type === "termkey.pendingLogin.get" ||
+    message.type === "termkey.pendingLogin.dismiss" ||
+    message.type === "termkey.pendingLogin.save" ||
     message.type === "termkey.passwords.generateForPage" ||
     message.type === "termkey.autofill.fillSelectedMatch" ||
     message.type === "termkey.nativeHost.savePasswordEntry" ||
     message.type === "termkey.nativeHost.unlock"
+  );
+}
+
+type ContentLifecycleMessage = {
+  type:
+    | "termkey.content.loginSubmitted"
+    | "termkey.content.pageContextChanged";
+  documentToken: string;
+};
+
+function isContentLifecycleMessage(
+  message: unknown
+): message is ContentLifecycleMessage {
+  return (
+    isRecord(message) &&
+    (message.type === "termkey.content.loginSubmitted" ||
+      message.type === "termkey.content.pageContextChanged") &&
+    typeof message.documentToken === "string" &&
+    /^[a-f0-9]{64}$/.test(message.documentToken)
   );
 }
 
@@ -769,6 +900,7 @@ export function createBackgroundService(
     now,
     options.grantTtlMs ?? MATCH_GRANT_TTL_MS
   );
+  const pendingLogins = new PendingLoginStore(now, PENDING_LOGIN_TTL_MS);
   const nativeClient =
     options.nativeClient ??
     new NativeHostClient(
@@ -1220,6 +1352,333 @@ export function createBackgroundService(
     };
   }
 
+  async function getTrustedContentPage(sender: MessageSender) {
+    if (
+      sender.id !== chromeApi.runtime.id ||
+      sender.frameId !== 0 ||
+      typeof sender.tab?.id !== "number" ||
+      typeof sender.url !== "string"
+    ) {
+      throw new Error("Unauthorized content message sender.");
+    }
+    const tab = await chromeApi.tabs.get(sender.tab.id);
+    if (
+      tab.id !== sender.tab.id ||
+      typeof tab.url !== "string" ||
+      canonicalizeWebOrigin(tab.url) !== canonicalizeWebOrigin(sender.url)
+    ) {
+      throw new Error("The content page changed before capture.");
+    }
+    return {
+      tabId: sender.tab.id,
+      origin: canonicalizeWebOrigin(tab.url),
+    };
+  }
+
+  async function inspectPendingLogin(
+    candidate: PendingLogin,
+    expectedDocumentToken?: string
+  ) {
+    let tab: { id?: number; url?: string };
+    try {
+      tab = await chromeApi.tabs.get(candidate.tabId);
+      if (
+        tab.id !== candidate.tabId ||
+        typeof tab.url !== "string" ||
+        canonicalizeWebOrigin(tab.url) !== candidate.origin
+      ) {
+        pendingLogins.remove(candidate);
+        return;
+      }
+    } catch {
+      pendingLogins.remove(candidate);
+      return;
+    }
+
+    let context: unknown;
+    try {
+      context = await chromeApi.tabs.sendMessage(
+        candidate.tabId,
+        { type: "termkey.inspectPageContext" },
+        { frameId: 0 }
+      );
+    } catch {
+      return;
+    }
+    if (
+      !isRecord(context) ||
+      context.ok !== true ||
+      typeof context.documentToken !== "string" ||
+      !/^[a-f0-9]{64}$/.test(context.documentToken) ||
+      (expectedDocumentToken !== undefined &&
+        context.documentToken !== expectedDocumentToken)
+    ) {
+      return;
+    }
+    if (context.hasVisibleLoginFailure === true) {
+      pendingLogins.remove(candidate);
+      return;
+    }
+    if (
+      context.intent !== "login" &&
+      context.hasPasswordField !== true &&
+      context.hasVisibleLoginFailure === false
+    ) {
+      pendingLogins.markReady(candidate);
+    }
+  }
+
+  async function handleContentLifecycleMessage(
+    message: ContentLifecycleMessage,
+    sender: MessageSender
+  ) {
+    const page = await getTrustedContentPage(sender);
+    if (message.type === "termkey.content.loginSubmitted") {
+      const capture = await chromeApi.tabs.sendMessage(
+        page.tabId,
+        {
+          type: "termkey.captureSubmittedLogin",
+          documentToken: message.documentToken,
+        },
+        { frameId: 0 }
+      );
+      if (
+        !isRecord(capture) ||
+        capture.ok !== true ||
+        (typeof capture.username !== "string" && capture.username !== null) ||
+        typeof capture.password !== "string" ||
+        capture.password.trim() === ""
+      ) {
+        return {
+          ok: false as const,
+          error:
+            isRecord(capture) && typeof capture.error === "string"
+              ? capture.error
+              : "Could not capture the submitted login.",
+        };
+      }
+      pendingLogins.add(
+        page.tabId,
+        message.documentToken,
+        page.origin,
+        capture.username,
+        capture.password
+      );
+      return { ok: true as const };
+    }
+
+    const candidate = pendingLogins.get(page.tabId);
+    if (
+      candidate &&
+      candidate.origin === page.origin &&
+      candidate.sourceDocumentToken === message.documentToken
+    ) {
+      await inspectPendingLogin(candidate, message.documentToken);
+    }
+    return { ok: true as const };
+  }
+
+  async function handleTabUpdated(
+    tabId: number,
+    changeInfo: { status?: string; url?: string }
+  ) {
+    const candidate = pendingLogins.get(tabId);
+    if (!candidate) {
+      return;
+    }
+    if (changeInfo.url !== undefined) {
+      try {
+        if (canonicalizeWebOrigin(changeInfo.url) !== candidate.origin) {
+          pendingLogins.remove(candidate);
+          return;
+        }
+      } catch {
+        pendingLogins.remove(candidate);
+        return;
+      }
+    }
+    let tab: { id?: number; url?: string };
+    try {
+      tab = await chromeApi.tabs.get(tabId);
+      if (
+        tab.id !== tabId ||
+        typeof tab.url !== "string" ||
+        canonicalizeWebOrigin(tab.url) !== candidate.origin
+      ) {
+        pendingLogins.remove(candidate);
+        return;
+      }
+    } catch {
+      pendingLogins.remove(candidate);
+      return;
+    }
+    if (changeInfo.status === "complete") {
+      await inspectPendingLogin(candidate);
+    }
+  }
+
+  async function getActivePendingLogin(requireReady: boolean) {
+    const tabs = await chromeApi.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    const active = tabs[0];
+    if (typeof active?.id !== "number") {
+      return undefined;
+    }
+    const candidate = pendingLogins.get(active.id);
+    if (!candidate || (requireReady && !candidate.ready)) {
+      return undefined;
+    }
+    try {
+      const tab = await chromeApi.tabs.get(candidate.tabId);
+      if (
+        tab.id !== candidate.tabId ||
+        typeof tab.url !== "string" ||
+        canonicalizeWebOrigin(tab.url) !== candidate.origin
+      ) {
+        pendingLogins.remove(candidate);
+        return undefined;
+      }
+    } catch {
+      pendingLogins.remove(candidate);
+      return undefined;
+    }
+    const current = pendingLogins.get(candidate.tabId);
+    if (
+      current !== candidate ||
+      (requireReady && !current.ready)
+    ) {
+      return undefined;
+    }
+    return candidate;
+  }
+
+  async function getPendingLogin() {
+    const candidate = await getActivePendingLogin(true);
+    if (!candidate) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login" as const,
+          candidate: null,
+        },
+      };
+    }
+    const matches = await nativeClient.request({
+      type: "find_site_matches",
+      url: candidate.origin,
+    });
+    if (!matches.ok) {
+      return matches;
+    }
+    if (
+      matches.response.type !== "site_matches" ||
+      canonicalizeWebOrigin(matches.response.siteOrigin) !== candidate.origin
+    ) {
+      return {
+        ok: false as const,
+        error: "Native host returned matches for a different origin.",
+      };
+    }
+    if ((await getActivePendingLogin(true)) !== candidate) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login" as const,
+          candidate: null,
+        },
+      };
+    }
+    const matchingEntries =
+      candidate.username === null
+        ? []
+        : matches.response.matches.filter(
+            (match) => match.username === candidate.username
+          );
+    candidate.updateEntryId =
+      matchingEntries.length === 1 ? matchingEntries[0].id : undefined;
+    const mode: "save" | "update" =
+      candidate.updateEntryId === undefined ? "save" : "update";
+    return {
+      ok: true as const,
+      response: {
+        type: "pending_login" as const,
+        candidate: {
+          username: candidate.username,
+          url: candidate.origin,
+          mode,
+        },
+      },
+    };
+  }
+
+  async function dismissPendingLogin() {
+    const candidate = await getActivePendingLogin(false);
+    if (candidate) {
+      pendingLogins.remove(candidate);
+    }
+    return {
+      ok: true as const,
+      response: {
+        type: "pending_login" as const,
+        candidate: null,
+      },
+    };
+  }
+
+  async function savePendingLogin(
+    message: Extract<
+      PopupToBackgroundMessage,
+      { type: "termkey.pendingLogin.save" }
+    >
+  ) {
+    const candidate = await getActivePendingLogin(true);
+    if (!candidate) {
+      return {
+        ok: false as const,
+        error: "No pending login is available to save.",
+      };
+    }
+    const response =
+      candidate.updateEntryId === undefined
+        ? await nativeClient.request({
+            type: "save_password_entry",
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          })
+        : await nativeClient.request({
+            type: "update_password_entry",
+            id: candidate.updateEntryId,
+            origin: candidate.origin,
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          });
+    if (!response.ok) {
+      return response;
+    }
+    if (response.response.type !== "save_entry") {
+      return {
+        ok: false as const,
+        error: "Native host returned the wrong response type.",
+      };
+    }
+    pendingLogins.remove(candidate);
+    return {
+      ok: true as const,
+      response: {
+        type: "save_entry_result" as const,
+        entryName: response.response.entryName,
+      },
+    };
+  }
+
   async function handleTrustedMessage(
     message: PopupToBackgroundMessage
   ): Promise<PopupToBackgroundResponse> {
@@ -1238,8 +1697,19 @@ export function createBackgroundService(
         return findSiteMatches();
       case "termkey.content.captureVisibleCredentials":
         return captureVisibleCredentials();
+      case "termkey.content.captureSubmittedLogin":
+        return {
+          ok: false,
+          error: "Submitted login capture is available only to the background.",
+        };
       case "termkey.content.inspectPageContext":
         return inspectPageContext();
+      case "termkey.pendingLogin.get":
+        return getPendingLogin();
+      case "termkey.pendingLogin.dismiss":
+        return dismissPendingLogin();
+      case "termkey.pendingLogin.save":
+        return savePendingLogin(message);
       case "termkey.passwords.generateForPage":
         return generateForPage();
       case "termkey.autofill.fillSelectedMatch":
@@ -1308,13 +1778,45 @@ export function createBackgroundService(
     }
   }
 
-  return {
+  const service = {
     handleMessage,
     handleTabRemoved(tabId: number) {
       grants.removeTab(tabId);
+      pendingLogins.removeTab(tabId);
       void clearPendingSaveDraft(tabId);
     },
+    handleTabUpdated,
   };
+
+  chromeApi.tabs.onRemoved?.addListener((tabId) => {
+    service.handleTabRemoved(tabId);
+  });
+  chromeApi.tabs.onUpdated?.addListener((tabId, changeInfo) =>
+    service.handleTabUpdated(tabId, changeInfo)
+  );
+  chromeApi.runtime.onMessage?.addListener(
+    (message, sender, sendResponse) => {
+      if (isContentLifecycleMessage(message)) {
+        void handleContentLifecycleMessage(message, sender)
+          .catch((error) => ({
+            ok: false as const,
+            error:
+              error instanceof Error
+                ? error.message
+                : "The content lifecycle request failed.",
+          }))
+          .then(sendResponse);
+        return true;
+      }
+      if (!isKnownPopupMessage(message)) {
+        return false;
+      }
+      void service.handleMessage(message, sender).then(sendResponse);
+      return true;
+    }
+  );
+
+  return service;
 }
 
 const runtimeChrome =
@@ -1323,19 +1825,7 @@ const runtimeChrome =
     : (chrome as unknown as BackgroundChrome);
 
 if (runtimeChrome?.runtime?.onMessage) {
-  const service = createBackgroundService(runtimeChrome);
-  runtimeChrome.tabs.onRemoved?.addListener((tabId) => {
-    service.handleTabRemoved(tabId);
-  });
-  runtimeChrome.runtime.onMessage.addListener(
-    (message, sender, sendResponse) => {
-      if (!isKnownPopupMessage(message)) {
-        return false;
-      }
-      void service.handleMessage(message, sender).then(sendResponse);
-      return true;
-    }
-  );
+  createBackgroundService(runtimeChrome);
   console.log("Core connected:", coreReady);
   console.log("Extension ID:", runtimeChrome.runtime.id);
 }
