@@ -782,6 +782,7 @@ function getActionableUsername() {
 
 function setPageContext(context: PopupPageContextResponse["context"]) {
   pageContext = context;
+  renderMatchPicker();
   updateFillButtonState();
 }
 
@@ -1379,6 +1380,7 @@ function submitPendingFill() {
 
       const result: PopupFillResultResponse = response.response;
       renderMessage(formatFillResultMessage(result), "success");
+      inspectPageContext();
     }
   );
 }

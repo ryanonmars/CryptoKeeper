@@ -36,10 +36,13 @@ const match = {
 async function openPopupWithSiteContext({
   hasEmptyLoginField,
   matches,
+  pageContextValues = [hasEmptyLoginField],
 }: {
   hasEmptyLoginField: boolean;
   matches: typeof match[];
+  pageContextValues?: boolean[];
 }) {
+  let pageContextRequestCount = 0;
   const sendMessage = vi.fn(
     (
       message: { type: string },
@@ -60,6 +63,8 @@ async function openPopupWithSiteContext({
           },
         });
       } else if (message.type === "termkey.content.inspectPageContext") {
+        const contextValue =
+          pageContextValues[pageContextRequestCount++] ?? hasEmptyLoginField;
         callback({
           ok: true,
           response: {
@@ -68,7 +73,7 @@ async function openPopupWithSiteContext({
               intent: "login",
               visibleUsername: null,
               hasPasswordField: true,
-              hasEmptyLoginField,
+              hasEmptyLoginField: contextValue,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
               hasPendingSaveUsername: false,
@@ -89,6 +94,17 @@ async function openPopupWithSiteContext({
         });
       } else if (message.type === "termkey.pendingLogin.get") {
         callback({ ok: true, response: { type: "pending_login", candidate: null } });
+      } else if (message.type === "termkey.autofill.fillSelectedMatch") {
+        callback({
+          ok: true,
+          response: {
+            type: "fill_result",
+            entryName: "Example account",
+            filledFields: 2,
+            filledUsername: true,
+            filledPassword: true,
+          },
+        });
       }
     }
   );
@@ -103,6 +119,7 @@ async function openPopupWithSiteContext({
   });
 
   await import("./popup");
+  return sendMessage;
 }
 
 async function openPendingLoginPopup(
@@ -218,6 +235,38 @@ it("hides the match picker when eligible login fields are already filled", async
   expect(document.querySelector<HTMLElement>("#match-picker")?.hidden).toBe(
     true
   );
+});
+
+it("shows the match picker when eligible login fields are empty", async () => {
+  await openPopupWithSiteContext({
+    hasEmptyLoginField: true,
+    matches: [match, { ...match, id: "entry-2", grantId: "grant-2" }],
+  });
+
+  expect(document.querySelector<HTMLElement>("#match-picker")?.hidden).toBe(
+    false
+  );
+});
+
+it("refreshes page context after filling and hides Fill when the fields are filled", async () => {
+  const sendMessage = await openPopupWithSiteContext({
+    hasEmptyLoginField: true,
+    matches: [match],
+    pageContextValues: [true, false],
+  });
+
+  document.querySelector<HTMLButtonElement>("#fill-best-match")?.click();
+
+  expect(document.querySelector<HTMLButtonElement>("#fill-best-match")?.hidden).toBe(
+    true
+  );
+  expect(
+    sendMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type: string }).type ===
+        "termkey.content.inspectPageContext"
+    )
+  ).toHaveLength(2);
 });
 
 it.each([
