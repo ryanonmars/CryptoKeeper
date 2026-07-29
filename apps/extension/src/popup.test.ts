@@ -139,7 +139,7 @@ async function openPopupWithSiteContext({
 }
 
 async function openPendingLoginPopup(
-  mode: "save" | "update",
+  mode: "save" | "update" | "unlock",
   handleMessage: (
     message: { type: string },
     callback: (response: unknown) => void,
@@ -150,7 +150,7 @@ async function openPendingLoginPopup(
   let candidate: {
     username: string | null;
     url: string;
-    mode: "save" | "update";
+    mode: "save" | "update" | "unlock";
   } | null = {
     username: "sam@example.test",
     url: "https://example.test",
@@ -172,7 +172,7 @@ async function openPendingLoginPopup(
             vaultExists: true,
             firstRunComplete: true,
             recoveryConfigured: true,
-            locked: false,
+            locked: mode === "unlock",
           },
         });
       } else if (message.type === "termkey.content.inspectPageContext") {
@@ -594,6 +594,96 @@ it("saves a submitted login with editable metadata but never a candidate passwor
     secondaryPassword: "secondary-secret",
   });
   expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
+});
+
+it("offers a locked submitted login for unlock and save", async () => {
+  await openPendingLoginPopup("unlock", () => {});
+
+  expect(document.querySelector("#save-panel-label")?.textContent).toBe(
+    "Unlock to save this login"
+  );
+  expect(document.querySelector("#submit-save")?.textContent).toBe(
+    "Unlock & Save"
+  );
+  expect(document.querySelector<HTMLButtonElement>("#unlock-vault")?.hidden).toBe(
+    true
+  );
+});
+
+it("unlocks and saves a submitted login without exposing its website password", async () => {
+  let unlockAndSaveRequest: unknown;
+  await openPendingLoginPopup("unlock", (message, callback, dismissCandidate) => {
+    if (message.type === "termkey.pendingLogin.unlockAndSave") {
+      unlockAndSaveRequest = message;
+      dismissCandidate();
+      callback({
+        ok: true,
+        response: {
+          type: "unlock_and_save_result",
+          unlocked: true,
+          saved: true,
+          mode: "save",
+          entryName: "Edited account",
+        },
+      });
+    }
+  });
+
+  const name = document.querySelector<HTMLInputElement>("#save-entry-name");
+  const username = document.querySelector<HTMLInputElement>("#save-username");
+  const masterPassword = document.querySelector<HTMLInputElement>("#master-password");
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!name || !username || !masterPassword || !submit) {
+    throw new Error("Unlock and save controls did not initialize.");
+  }
+
+  name.value = "Edited account";
+  username.value = "edited@example.test";
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  submit.click();
+
+  expect(unlockAndSaveRequest).toEqual({
+    type: "termkey.pendingLogin.unlockAndSave",
+    name: "Edited account",
+    username: "edited@example.test",
+    masterPassword: "master-secret",
+    secondaryPassword: undefined,
+  });
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
+  expect(document.querySelector("#native-host-status")?.textContent).toContain(
+    "Saved Edited account."
+  );
+});
+
+it("keeps the locked save prompt focused after an unlock failure", async () => {
+  await openPendingLoginPopup("unlock", (message, callback) => {
+    if (message.type === "termkey.pendingLogin.unlockAndSave") {
+      callback({
+        ok: true,
+        response: {
+          type: "unlock_and_save_result",
+          unlocked: false,
+          saved: false,
+          error: "Incorrect master password.",
+        },
+      });
+    }
+  });
+
+  const masterPassword = document.querySelector<HTMLInputElement>("#master-password");
+  if (!masterPassword) {
+    throw new Error("Master password control did not initialize.");
+  }
+  masterPassword.value = "wrong-master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  document.querySelector<HTMLButtonElement>("#submit-save")?.click();
+
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(false);
+  expect(document.activeElement).toBe(masterPassword);
+  expect(document.querySelector("#native-host-status")?.textContent).toContain(
+    "Incorrect master password."
+  );
 });
 
 it("dismisses a submitted login before clearing its save prompt", async () => {

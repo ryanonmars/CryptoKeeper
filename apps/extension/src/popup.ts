@@ -635,7 +635,7 @@ let currentSiteMatches: PopupSiteMatch[] = [];
 let pendingFillMatch: PopupSiteMatch | null = null;
 let pendingSaveCandidate: SaveCandidate | null = null;
 let pendingLoginCandidate: PopupPendingLoginResponse["candidate"] = null;
-let pendingLoginMode: "save" | "update" | null = null;
+let pendingLoginMode: "save" | "update" | "unlock" | null = null;
 let fillingEntryId: string | null = null;
 let generationInFlight = false;
 let saveInFlight = false;
@@ -780,6 +780,7 @@ function stagePendingLogin(
   saveSecondaryPasswordConfirmInput.value = "";
   savePanelHint.textContent =
     "The submitted password remains in the extension background until you choose an action.";
+  renderPasswordPrompt();
   renderSavePrompt();
   updateFillButtonState();
 }
@@ -839,7 +840,10 @@ function clearPendingSave() {
 function renderPasswordPrompt() {
   const activeMatch = pendingFillMatch;
   const needsSecondaryPassword = activeMatch?.hasSecondaryPassword === true;
-  unlockSection.hidden = !vaultLocked && !needsSecondaryPassword;
+  const isUnlockingPendingLogin =
+    pendingLoginCandidate !== null && pendingLoginMode === "unlock";
+  unlockSection.hidden =
+    !isUnlockingPendingLogin && !vaultLocked && !needsSecondaryPassword;
 
   if (unlockSection.hidden) {
     masterPasswordInput.hidden = false;
@@ -848,6 +852,7 @@ function renderPasswordPrompt() {
     secondaryPasswordInput.disabled = false;
     secondaryPasswordInput.value = "";
     secondaryPasswordGroup.hidden = true;
+    unlockVaultButton.hidden = false;
     unlockVaultButton.disabled = true;
     unlockVaultButton.textContent = "Unlock";
     return;
@@ -860,9 +865,11 @@ function renderPasswordPrompt() {
     ? "Unlock is retained by the native host for this extension session."
     : `Required to fill ${activeMatch?.name ?? "this login"} on ${siteDetails.hostname}.`;
   masterPasswordInput.hidden = !vaultLocked;
-  masterPasswordInput.disabled = !vaultLocked || fillingEntryId !== null;
+  masterPasswordInput.disabled =
+    !vaultLocked || fillingEntryId !== null || saveInFlight;
   secondaryPasswordInput.disabled = fillingEntryId !== null;
   secondaryPasswordGroup.hidden = !needsSecondaryPassword;
+  unlockVaultButton.hidden = isUnlockingPendingLogin;
   unlockVaultButton.disabled = !backendConnected || fillingEntryId !== null;
   unlockVaultButton.textContent = fillingEntryId
     ? "Working..."
@@ -875,6 +882,8 @@ function renderSavePrompt() {
   const activeSave =
     pendingSaveCandidate !== null || pendingLoginCandidate !== null;
   const isPendingLogin = pendingLoginCandidate !== null;
+  const isUnlockingPendingLogin =
+    pendingLoginCandidate !== null && pendingLoginMode === "unlock";
   saveSection.hidden = !activeSave;
   saveSecondaryPasswordGroup.hidden = !saveUseSecondaryPasswordInput.checked;
 
@@ -885,17 +894,24 @@ function renderSavePrompt() {
     return;
   }
 
-  savePanelLabel.textContent = isPendingLogin
-    ? pendingLoginMode === "update"
+  savePanelLabel.textContent = isUnlockingPendingLogin
+    ? "Unlock to save this login"
+    : isPendingLogin
+      ? pendingLoginMode === "update"
       ? "Update the saved login for this site?"
       : "Save this login?"
     : "Save login";
+  if (isUnlockingPendingLogin) {
+    savePanelHint.textContent =
+      "Unlock TermKey to save this submitted login without signing in again.";
+  }
 
   const disabled =
     !backendConnected ||
-    vaultLocked ||
     saveInFlight ||
-    generationInFlight;
+    generationInFlight ||
+    (!isUnlockingPendingLogin && vaultLocked) ||
+    (isUnlockingPendingLogin && !masterPasswordInput.value);
   saveEntryNameInput.disabled = saveInFlight;
   saveUsernameInput.disabled = saveInFlight;
   saveUseSecondaryPasswordInput.disabled = saveInFlight;
@@ -905,7 +921,9 @@ function renderSavePrompt() {
   submitSaveButton.disabled = disabled;
   submitSaveButton.textContent = saveInFlight
     ? "Saving..."
-    : isPendingLogin && pendingLoginMode === "update"
+    : isUnlockingPendingLogin
+      ? "Unlock & Save"
+      : isPendingLogin && pendingLoginMode === "update"
       ? "Update login"
       : "Save login";
 }
@@ -1265,7 +1283,7 @@ function submitPendingSave() {
     return;
   }
 
-  if (vaultLocked) {
+  if (vaultLocked && pendingLoginMode !== "unlock") {
     renderMessage("Unlock your vault before saving this login.", "error");
     masterPasswordInput.focus();
     return;
@@ -1293,6 +1311,15 @@ function submitPendingSave() {
     return;
   }
 
+  const isUnlockingPendingLogin =
+    submittedLogin !== null && pendingLoginMode === "unlock";
+  const masterPassword = masterPasswordInput.value;
+  if (isUnlockingPendingLogin && !masterPassword) {
+    renderMessage("Enter your master password to unlock TermKey.", "error");
+    masterPasswordInput.focus();
+    return;
+  }
+
   saveInFlight = true;
   renderSavePrompt();
   updateFillButtonState();
@@ -1301,7 +1328,15 @@ function submitPendingSave() {
   );
 
   let message: PopupToBackgroundMessage;
-  if (submittedLogin) {
+  if (isUnlockingPendingLogin) {
+    message = {
+      type: "termkey.pendingLogin.unlockAndSave",
+      name,
+      username: saveUsernameInput.value.trim() || undefined,
+      masterPassword,
+      secondaryPassword: secondaryPassword || undefined,
+    };
+  } else if (submittedLogin) {
     message = {
       type: "termkey.pendingLogin.save",
       name,
@@ -1327,9 +1362,54 @@ function submitPendingSave() {
       saveInFlight = false;
 
       if (!response.ok) {
+        renderPasswordPrompt();
         renderSavePrompt();
         updateFillButtonState();
         renderMessage(`Save failed: ${response.error}`, "error");
+        return;
+      }
+
+      if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        if (response.response.type !== "unlock_and_save_result") {
+          renderPasswordPrompt();
+          renderSavePrompt();
+          updateFillButtonState();
+          renderMessage(
+            "Background returned the wrong response type for unlock and save.",
+            "error"
+          );
+          return;
+        }
+
+        const result = response.response;
+        if (!result.unlocked) {
+          renderPasswordPrompt();
+          renderSavePrompt();
+          updateFillButtonState();
+          renderMessage(result.error ?? "Unlock failed.", "error");
+          masterPasswordInput.focus();
+          masterPasswordInput.select();
+          return;
+        }
+
+        vaultLocked = false;
+        masterPasswordInput.value = "";
+        if (!result.saved) {
+          pendingLoginMode = result.mode ?? "save";
+          renderPasswordPrompt();
+          renderSavePrompt();
+          updateFillButtonState();
+          renderMessage(result.error ?? "Save failed.", "error");
+          return;
+        }
+
+        clearPendingSave();
+        renderPasswordPrompt();
+        renderSavePrompt();
+        updateFillButtonState();
+        inspectPageContext();
+        findSiteMatches();
+        renderMessage(`Saved ${result.entryName ?? name}.`, "success");
         return;
       }
 
@@ -1352,6 +1432,7 @@ function submitPendingSave() {
     },
     () => {
       saveInFlight = false;
+      renderPasswordPrompt();
       renderSavePrompt();
       updateFillButtonState();
     }
@@ -1498,7 +1579,7 @@ function findSiteMatches() {
 }
 
 function loadPendingLogin() {
-  if (!hasSupportedPage || vaultLocked || pendingSaveCandidate !== null) {
+  if (!hasSupportedPage || pendingSaveCandidate !== null) {
     return;
   }
 
@@ -1561,6 +1642,7 @@ function refreshStatus() {
       resetMatches("Unlock your vault to check saved logins.");
       renderMessage("Unlock TermKey to use saved logins.");
       inspectPageContext();
+      loadPendingLogin();
       return;
     }
 
@@ -1653,7 +1735,17 @@ saveSecondaryPasswordConfirmInput.addEventListener("keydown", (event) => {
 masterPasswordInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
+    if (pendingLoginCandidate !== null && pendingLoginMode === "unlock") {
+      submitPendingSave();
+      return;
+    }
     submitPendingFill();
+  }
+});
+
+masterPasswordInput.addEventListener("input", () => {
+  if (pendingLoginCandidate !== null && pendingLoginMode === "unlock") {
+    renderSavePrompt();
   }
 });
 
