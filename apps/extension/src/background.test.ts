@@ -12,11 +12,12 @@ import {
 } from "./test/chrome-mock";
 
 const protocolInfo = {
-  protocolVersion: 2,
+  protocolVersion: 3,
   capabilities: [
     "opaque-match-handles",
     "document-token-binding",
     "origin-only-save",
+    "password-entry-update",
     "bounded-native-output",
   ],
 } as const;
@@ -571,6 +572,57 @@ describe("background security boundaries", () => {
     });
   });
 
+  it("clears a pending login from a transient cross-origin URL update", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? { ...siteMatchesResponse, matches: [] }
+        : { type: "error", message: "Unexpected request." }
+    );
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await mock.chrome.tabs.onUpdated.emitAsync(
+      7,
+      { url: "https://elsewhere.test/redirect" },
+      { id: 7, url: "https://elsewhere.test/redirect" }
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
+  });
+
   it("classifies a pending login as update only for an identical non-null username", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({
@@ -837,6 +889,91 @@ describe("background security boundaries", () => {
         mock.extensionSender
       )
     ).resolves.toMatchObject({ response: { candidate: null } });
+  });
+
+  it("updates the matched login instead of appending a duplicate", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "person@example.test",
+      password: "background-only-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const nativeRequests: unknown[] = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request);
+      const type = (request as { type?: string }).type;
+      if (type === "find_site_matches") {
+        return siteMatchesResponse;
+      }
+      if (type === "update_password_entry") {
+        return { type: "save_entry", entryName: "Renamed account" };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      response: { candidate: { mode: "update" } },
+    });
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLogin.save",
+          name: "Renamed account",
+          username: "edited@example.test",
+          secondaryPassword: "vault-secret",
+        },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "save_entry_result",
+        entryName: "Renamed account",
+      },
+    });
+    expect(nativeRequests).toContainEqual(
+      expect.objectContaining({
+        type: "update_password_entry",
+        id: "entry-1",
+        origin: "https://example.test",
+        name: "Renamed account",
+        username: "edited@example.test",
+        password: "background-only-secret",
+        url: "https://example.test",
+        secondaryPassword: "vault-secret",
+      })
+    );
+    expect(
+      nativeRequests.some(
+        (request) =>
+          (request as { type?: string }).type === "save_password_entry"
+      )
+    ).toBe(false);
   });
 
   it("retains a pending login when native save fails", async () => {
@@ -1638,7 +1775,7 @@ describe("background security boundaries", () => {
     });
     const client = new NativeHostClient(connectNative);
     const first = client.request({ type: "status" });
-    const queued = client.request({ type: "ping", protocolVersion: 2 });
+    const queued = client.request({ type: "ping", protocolVersion: 3 });
     expect(ports[0].postMessage).toHaveBeenCalledTimes(1);
     let firstSettled = false;
     void first.then(() => {
@@ -1768,7 +1905,7 @@ describe("background security boundaries", () => {
     expect(ports[0].postMessage).toHaveBeenCalledTimes(1);
     expect(ports[0].postMessage.mock.calls[0][0]).toMatchObject({
       type: "ping",
-      protocolVersion: 2,
+      protocolVersion: 3,
     });
     ports[0].onMessage.emit(
       correlatedResponse(ports[0], {
@@ -1797,7 +1934,7 @@ describe("background security boundaries", () => {
     expect(ports).toHaveLength(2);
     expect(ports[1].postMessage.mock.calls[0][0]).toMatchObject({
       type: "ping",
-      protocolVersion: 2,
+      protocolVersion: 3,
     });
     ports[1].onMessage.emit(
       correlatedResponse(ports[1], {
@@ -1858,7 +1995,7 @@ describe("background security boundaries", () => {
         type: "pong",
         app: "termkey",
         version: "1.0.0",
-        protocolVersion: 2,
+        protocolVersion: 3,
         capabilities: ["opaque-match-handles"],
       },
     ],
@@ -1869,7 +2006,7 @@ describe("background security boundaries", () => {
       undefined,
       () => "f".repeat(64)
     );
-    const response = client.request({ type: "ping", protocolVersion: 2 });
+    const response = client.request({ type: "ping", protocolVersion: 3 });
     port.onMessage.emit(correlatedResponse(port, pong));
 
     await expect(response).resolves.toEqual({
@@ -1889,7 +2026,7 @@ describe("background security boundaries", () => {
       ports.push(port);
       if (ports.length === 1) {
         port.postMessage.mockImplementationOnce(() => {
-          queued = client.request({ type: "ping", protocolVersion: 2 });
+          queued = client.request({ type: "ping", protocolVersion: 3 });
           throw new Error("post failed");
         });
       }
@@ -1907,7 +2044,7 @@ describe("background security boundaries", () => {
     });
     expect(ports[0].disconnect).toHaveBeenCalledTimes(1);
 
-    const later = client.request({ type: "ping", protocolVersion: 2 });
+    const later = client.request({ type: "ping", protocolVersion: 3 });
     ports[1].onMessage.emit(correlatedResponse(ports[1], {
       type: "pong",
       app: "termkey",
@@ -1926,7 +2063,7 @@ describe("background security boundaries", () => {
       ports.push(port);
       if (ports.length === 1) {
         port.onMessage.addListener.mockImplementationOnce(() => {
-          queued = client.request({ type: "ping", protocolVersion: 2 });
+          queued = client.request({ type: "ping", protocolVersion: 3 });
           throw new Error("listener failed");
         });
       }
@@ -1944,7 +2081,7 @@ describe("background security boundaries", () => {
     });
     expect(ports[0].disconnect).toHaveBeenCalledTimes(1);
 
-    const later = client.request({ type: "ping", protocolVersion: 2 });
+    const later = client.request({ type: "ping", protocolVersion: 3 });
     ports[1].onMessage.emit(correlatedResponse(ports[1], {
       type: "pong",
       app: "termkey",
@@ -2048,14 +2185,14 @@ describe("background security boundaries", () => {
       return port;
     });
     const current = client.request({ type: "status" });
-    const queued = client.request({ type: "ping", protocolVersion: 2 });
+    const queued = client.request({ type: "ping", protocolVersion: 3 });
     expect(ports[0].postMessage).toHaveBeenCalledTimes(2);
 
     ports[0].onDisconnect.emit();
     await expect(current).resolves.toMatchObject({ ok: false });
     await expect(queued).resolves.toMatchObject({ ok: false });
 
-    const later = client.request({ type: "ping", protocolVersion: 2 });
+    const later = client.request({ type: "ping", protocolVersion: 3 });
     expect(ports).toHaveLength(2);
     ports[1].onMessage.emit(correlatedResponse(ports[1], {
       type: "pong",
@@ -2117,7 +2254,7 @@ describe("background security boundaries", () => {
       return port;
     });
     const response = client.request({ type: "status" });
-    const queued = client.request({ type: "ping", protocolVersion: 2 });
+    const queued = client.request({ type: "ping", protocolVersion: 3 });
     ports[0].onMessage.emit(correlatedResponse(ports[0], {
       type: "pong",
       app: "termkey",
@@ -2135,7 +2272,7 @@ describe("background security boundaries", () => {
     });
     expect(ports[0].disconnect).toHaveBeenCalledTimes(1);
 
-    const later = client.request({ type: "ping", protocolVersion: 2 });
+    const later = client.request({ type: "ping", protocolVersion: 3 });
     expect(ports).toHaveLength(2);
     ports[1].onMessage.emit(correlatedResponse(ports[1], {
       type: "pong",

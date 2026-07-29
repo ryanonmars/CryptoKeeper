@@ -330,6 +330,11 @@ it("captures an unambiguous submitted login with its document token", () => {
       <input type="password" autocomplete="current-password" value="secret">
     </form>
   `;
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 
   expect(
     dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
@@ -342,9 +347,11 @@ it.each([
     `<form><input type="password" autocomplete="new-password" value="secret"></form>`,
   ],
   [
-    "equally ranked login forms",
-    `<form><input type="password" autocomplete="current-password" value="one"></form>
-     <form><input type="password" autocomplete="current-password" value="two"></form>`,
+    "equally ranked passwords in the submitted form",
+    `<form>
+       <input type="password" autocomplete="current-password" value="one">
+       <input type="password" autocomplete="current-password" value="two">
+     </form>`,
   ],
   ["a username-only form", `<form><input autocomplete="username" value="sam"></form>`],
   [
@@ -353,6 +360,10 @@ it.each([
   ],
 ])("rejects submitted capture from %s", (_caseName, fixture) => {
   document.body.innerHTML = fixture;
+  const form = document.querySelector("form");
+  if (form) {
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  }
 
   expect(
     dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
@@ -425,6 +436,45 @@ it("notifies the background of a submitted login without credentials", () => {
     documentToken,
   });
   expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
+});
+
+it("snapshots submitted credentials before a site handler clears the form", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+    </form>
+  `;
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+  form.addEventListener("submit", () => {
+    form.remove();
+  });
+
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(document.querySelector("form")).toBeNull();
+  expect(
+    dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
+  ).toEqual({ ok: true, username: "sam", password: "secret" });
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+  });
+  expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
+});
+
+it("emits a token-bound page-context event after a history API transition", async () => {
+  history.pushState({}, "", "/signed-in");
+
+  await vi.waitFor(() => {
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: "termkey.content.pageContextChanged",
+      documentToken,
+    });
+  });
 });
 
 it("does not treat OTP input as a password", async () => {

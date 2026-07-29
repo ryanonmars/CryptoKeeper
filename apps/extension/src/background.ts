@@ -13,11 +13,12 @@ const PENDING_SAVE_KEY_PREFIX = "pending-save:";
 const MATCH_GRANT_TTL_MS = 30_000;
 const PENDING_LOGIN_TTL_MS = 120_000;
 const MAX_MATCH_GRANTS = 100;
-export const NATIVE_PROTOCOL_VERSION = 2;
+export const NATIVE_PROTOCOL_VERSION = 3;
 export const REQUIRED_NATIVE_CAPABILITIES = [
   "opaque-match-handles",
   "document-token-binding",
   "origin-only-save",
+  "password-entry-update",
   "bounded-native-output",
 ] as const;
 const PROTOCOL_REPAIR_ERROR =
@@ -57,7 +58,9 @@ type NativeResponseForRequest<TRequest extends NativeHostRequest> =
           ? Extract<NativeHostResponse, { type: "site_matches" }>
           : TRequest["type"] extends "generate_password"
             ? Extract<NativeHostResponse, { type: "generated_password" }>
-            : TRequest["type"] extends "save_password_entry"
+            : TRequest["type"] extends
+                  | "save_password_entry"
+                  | "update_password_entry"
               ? Extract<NativeHostResponse, { type: "save_entry" }>
               : TRequest["type"] extends "list_entries"
                 ? Extract<NativeHostResponse, { type: "list_entries" }>
@@ -78,6 +81,7 @@ type PendingLogin = {
   origin: string;
   username: string | null;
   password: string;
+  updateEntryId?: string;
   expiresAt: number;
   ready: boolean;
 };
@@ -307,6 +311,7 @@ function expectedResponseType(
     case "generate_password":
       return "generated_password";
     case "save_password_entry":
+    case "update_password_entry":
       return "save_entry";
     case "list_entries":
       return "list_entries";
@@ -1481,6 +1486,17 @@ export function createBackgroundService(
     if (!candidate) {
       return;
     }
+    if (changeInfo.url !== undefined) {
+      try {
+        if (canonicalizeWebOrigin(changeInfo.url) !== candidate.origin) {
+          pendingLogins.remove(candidate);
+          return;
+        }
+      } catch {
+        pendingLogins.remove(candidate);
+        return;
+      }
+    }
     let tab: { id?: number; url?: string };
     try {
       tab = await chromeApi.tabs.get(tabId);
@@ -1574,13 +1590,16 @@ export function createBackgroundService(
         },
       };
     }
+    const matchingEntries =
+      candidate.username === null
+        ? []
+        : matches.response.matches.filter(
+            (match) => match.username === candidate.username
+          );
+    candidate.updateEntryId =
+      matchingEntries.length === 1 ? matchingEntries[0].id : undefined;
     const mode: "save" | "update" =
-      candidate.username !== null &&
-      matches.response.matches.some(
-        (match) => match.username === candidate.username
-      )
-        ? "update"
-        : "save";
+      candidate.updateEntryId === undefined ? "save" : "update";
     return {
       ok: true as const,
       response: {
@@ -1621,14 +1640,26 @@ export function createBackgroundService(
         error: "No pending login is available to save.",
       };
     }
-    const response = await nativeClient.request({
-      type: "save_password_entry",
-      name: message.name,
-      username: message.username,
-      password: candidate.password,
-      url: candidate.origin,
-      secondaryPassword: message.secondaryPassword,
-    });
+    const response =
+      candidate.updateEntryId === undefined
+        ? await nativeClient.request({
+            type: "save_password_entry",
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          })
+        : await nativeClient.request({
+            type: "update_password_entry",
+            id: candidate.updateEntryId,
+            origin: candidate.origin,
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          });
     if (!response.ok) {
       return response;
     }

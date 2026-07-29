@@ -788,7 +788,7 @@ it("keeps a recovery notice visible after unlock refreshes the page state", asyn
             type: "status",
             app: "termkey",
             version: "1.0.0",
-            protocolVersion: 2,
+            protocolVersion: 3,
             capabilities: [],
             vaultPath: "/vault",
             vaultExists: true,

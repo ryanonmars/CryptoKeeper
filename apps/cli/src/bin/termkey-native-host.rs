@@ -64,6 +64,19 @@ enum NativeRequest {
         #[serde(alias = "secondaryPassword")]
         secondary_password: Option<SensitiveString>,
     },
+    UpdatePasswordEntry {
+        id: String,
+        origin: String,
+        name: String,
+        #[serde(default)]
+        username: Option<String>,
+        password: SensitiveString,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        #[serde(alias = "secondaryPassword")]
+        secondary_password: Option<SensitiveString>,
+    },
     ListEntries,
     Unlock {
         password: SensitiveString,
@@ -602,7 +615,7 @@ fn build_password_entry(
     username: Option<String>,
     password: SensitiveString,
     url: Option<String>,
-    secondary_password: Option<SensitiveString>,
+    secondary_password: Option<&str>,
 ) -> Result<Entry, NativeResponse> {
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -634,8 +647,6 @@ fn build_password_entry(
         })
         .transpose()?
         .flatten();
-    let secondary_password = normalize_optional_secret(secondary_password);
-
     let (
         has_secondary_password,
         secret,
@@ -653,7 +664,7 @@ fn build_password_entry(
                 }
             })?;
         let (entry_key_wrapped, entry_key_nonce, entry_key_salt) =
-            crypto::entry_key::wrap_entry_key(&entry_key, &secondary_password).map_err(|err| {
+            crypto::entry_key::wrap_entry_key(&entry_key, secondary_password).map_err(|err| {
                 NativeResponse::Error {
                     message: err.to_string(),
                 }
@@ -707,7 +718,16 @@ fn save_password_entry(
         };
     }
 
-    let entry = match build_password_entry(name, username, password, url, secondary_password) {
+    let secondary_password = normalize_optional_secret(secondary_password);
+    let entry = match build_password_entry(
+        name,
+        username,
+        password,
+        url,
+        secondary_password
+            .as_ref()
+            .map(|password| password.as_str()),
+    ) {
         Ok(entry) => entry,
         Err(response) => return response,
     };
@@ -725,6 +745,140 @@ fn save_password_entry(
     }
     let save_result = session.save();
     match save_result {
+        Ok(()) => {
+            state.issued_matches.clear();
+            NativeResponse::SaveEntry { entry_name }
+        }
+        Err(err) => {
+            session.vault = snapshot;
+            let conflicted = matches!(err, termkey::error::TermKeyError::VaultConflict);
+            if conflicted {
+                state.session = None;
+                state.issued_matches.clear();
+            }
+            NativeResponse::Error {
+                message: err.to_string(),
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_password_entry(
+    state: &mut HostState,
+    id: String,
+    origin: String,
+    name: String,
+    username: Option<String>,
+    password: SensitiveString,
+    url: Option<String>,
+    secondary_password: Option<SensitiveString>,
+) -> NativeResponse {
+    let origin = match HttpsOrigin::parse(&origin) {
+        Ok(origin) => origin,
+        Err(_) => {
+            return NativeResponse::Error {
+                message: "Current tab origin is not a supported HTTP or HTTPS origin.".to_string(),
+            }
+        }
+    };
+    if state.session.is_none() {
+        return NativeResponse::Error {
+            message: "Vault is locked. Unlock it first.".to_string(),
+        };
+    }
+    if !is_valid_request_id(&id) {
+        return NativeResponse::Error {
+            message: "Selected login match ID is invalid.".to_string(),
+        };
+    }
+    let issued = match state.issued_matches.get(&id).cloned() {
+        Some(issued) if issued.origin == origin.as_str() && issued.expires_at > Instant::now() => {
+            issued
+        }
+        _ => {
+            state.issued_matches.remove(&id);
+            return NativeResponse::Error {
+                message: "Selected login match expired or is no longer valid.".to_string(),
+            };
+        }
+    };
+
+    let reload_result = state
+        .session
+        .as_mut()
+        .expect("retained session was checked before reload")
+        .reload();
+    if let Err(err) = reload_result {
+        state.session = None;
+        state.issued_matches.clear();
+        return NativeResponse::Error {
+            message: err.to_string(),
+        };
+    }
+
+    let (original_name, created_at, notes, site_rules) = {
+        let session = state
+            .session
+            .as_ref()
+            .expect("session remains available after a successful reload");
+        let entry = match find_unique_entry_by_fingerprint(&session.vault, &issued.fingerprint) {
+            Ok(entry) => entry,
+            Err(()) => {
+                return NativeResponse::Error {
+                    message: "Selected login match changed, is ambiguous, or no longer exists."
+                        .to_string(),
+                }
+            }
+        };
+        if entry.secret_type != SecretType::Password {
+            return NativeResponse::Error {
+                message: "Selected entry is not a password entry.".to_string(),
+            };
+        }
+        if !entry_authorizes_origin(entry, &origin) {
+            return NativeResponse::Error {
+                message: "Selected entry is not authorized for the current site origin."
+                    .to_string(),
+            };
+        }
+        (
+            entry.name.clone(),
+            entry.created_at,
+            entry.notes.clone(),
+            entry.site_rules.clone(),
+        )
+    };
+
+    let secondary_password = normalize_optional_secret(secondary_password);
+    let secondary_password_ref = secondary_password
+        .as_ref()
+        .map(|password| password.as_str());
+    let session = state
+        .session
+        .as_mut()
+        .expect("session remains available after validating the matched entry");
+    let mut replacement =
+        match build_password_entry(name, username, password, url, secondary_password_ref) {
+            Ok(entry) => entry,
+            Err(response) => return response,
+        };
+    replacement.created_at = created_at;
+    replacement.notes = notes;
+    replacement.site_rules = site_rules;
+    let entry_name = replacement.name.clone();
+    let snapshot = session.vault.clone();
+    if let Err(err) =
+        session
+            .vault
+            .replace_entry_authorized(&original_name, replacement, secondary_password_ref)
+    {
+        return NativeResponse::Error {
+            message: err.to_string(),
+        };
+    }
+
+    match session.save() {
         Ok(()) => {
             state.issued_matches.clear();
             NativeResponse::SaveEntry { entry_name }
@@ -799,6 +953,24 @@ fn handle_request(state: &mut HostState, payload: &[u8]) -> NativeResponse {
             url,
             secondary_password,
         } => save_password_entry(state, name, username, password, url, secondary_password),
+        NativeRequest::UpdatePasswordEntry {
+            id,
+            origin,
+            name,
+            username,
+            password,
+            url,
+            secondary_password,
+        } => update_password_entry(
+            state,
+            id,
+            origin,
+            name,
+            username,
+            password,
+            url,
+            secondary_password,
+        ),
         NativeRequest::ListEntries => list_entries(state),
         NativeRequest::Unlock { password } => unlock_vault(state, password),
     }
@@ -1092,16 +1264,17 @@ mod tests {
     #[test]
     fn current_protocol_ping_returns_capabilities_and_unlocks_privileged_requests() {
         let mut state = negotiated_state();
-        let response = handle_request(&mut state, br#"{"type":"ping","protocolVersion":2}"#);
+        let response = handle_request(&mut state, br#"{"type":"ping","protocolVersion":3}"#);
 
         assert!(matches!(
             response,
             NativeResponse::Pong {
-                protocol_version: 2,
+                protocol_version: 3,
                 capabilities: NATIVE_CAPABILITIES,
                 ..
             }
         ));
+        assert!(NATIVE_CAPABILITIES.contains(&"password-entry-update"));
         assert!(state.protocol_negotiated);
     }
 
@@ -1142,7 +1315,7 @@ mod tests {
     #[test]
     fn status_returns_status_payload() {
         let mut state = HostState::default();
-        let response = handle_request(&mut state, br#"{"type":"status","protocolVersion":2}"#);
+        let response = handle_request(&mut state, br#"{"type":"status","protocolVersion":3}"#);
 
         assert!(matches!(response, NativeResponse::Status(_)));
         assert!(state.protocol_negotiated);
@@ -1784,6 +1957,254 @@ mod tests {
     }
 
     #[test]
+    fn update_password_entry_replaces_the_issued_match_instead_of_appending() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        let mut vault = test_vault_with_entry();
+        let created_at = Utc::now() - chrono::Duration::days(1);
+        vault.entries[0].created_at = created_at;
+        vault.entries[0].updated_at = created_at;
+        vault.entries[0].notes = "keep this note".to_string();
+        vault.entries[0].site_rules = vec!["origin:https://example.com".to_string()];
+        write_vault(&vault, b"correct horse battery staple", &path).unwrap();
+        let mut state = unlocked_state(&path);
+        let id = discover_first_match_id(&mut state, "https://example.com");
+
+        let response = handle_request(
+            &mut state,
+            serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://example.com",
+                "name": "Updated Email",
+                "username": "updated-user",
+                "password": "updated-secret",
+                "url": "https://example.com",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+
+        assert!(matches!(
+            response,
+            NativeResponse::SaveEntry { entry_name } if entry_name == "Updated Email"
+        ));
+        assert_eq!(persisted.entries.len(), 1);
+        let updated = &persisted.entries[0];
+        assert_eq!(updated.name, "Updated Email");
+        assert_eq!(updated.username.as_deref(), Some("updated-user"));
+        assert_eq!(updated.secret, "updated-secret");
+        assert_eq!(updated.created_at, created_at);
+        assert!(updated.updated_at > created_at);
+        assert_eq!(updated.notes, "keep this note");
+        assert_eq!(
+            updated.site_rules,
+            vec!["origin:https://example.com".to_string()]
+        );
+        assert!(state.issued_matches.is_empty());
+    }
+
+    #[test]
+    fn update_password_entry_rejects_a_match_handle_from_another_origin() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let id = discover_first_match_id(&mut state, "https://example.com");
+        let before = std::fs::read(&path).unwrap();
+
+        let response = handle_request(
+            &mut state,
+            serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://attacker.example",
+                "name": "Attacker",
+                "password": "replacement",
+                "url": "https://attacker.example",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message }
+                if message == "Selected login match expired or is no longer valid."
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn update_password_entry_rejects_a_match_whose_fingerprint_changed_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let id = discover_first_match_id(&mut state, "https://example.com");
+        let mut independent = VaultSession::open(
+            Zeroizing::new("correct horse battery staple".to_string()),
+            path.clone(),
+        )
+        .unwrap()
+        .session;
+        independent.vault.entries[0].notes = "external change".to_string();
+        independent.save().unwrap();
+
+        let response = handle_request(
+            &mut state,
+            serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://example.com",
+                "name": "Updated Email",
+                "password": "replacement",
+                "url": "https://example.com",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message }
+                if message
+                    == "Selected login match changed, is ambiguous, or no longer exists."
+        ));
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(persisted.entries[0].name, "Email");
+        assert_eq!(persisted.entries[0].secret, "super-secret");
+        assert_eq!(persisted.entries[0].notes, "external change");
+    }
+
+    #[test]
+    fn update_password_entry_rechecks_that_the_entry_authorizes_the_origin() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let id = "a".repeat(64);
+        let fingerprint = entry_fingerprint(&state.session.as_ref().unwrap().vault.entries[0]);
+        state.issued_matches.insert(
+            id.clone(),
+            super::IssuedMatch {
+                fingerprint,
+                origin: "https://attacker.example".to_string(),
+                expires_at: Instant::now() + Duration::from_secs(30),
+            },
+        );
+
+        let response = handle_request(
+            &mut state,
+            serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://attacker.example",
+                "name": "Attacker",
+                "password": "replacement",
+                "url": "https://attacker.example",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+
+        assert!(matches!(
+            response,
+            NativeResponse::Error { message }
+                if message == "Selected entry is not authorized for the current site origin."
+        ));
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(persisted.entries[0].name, "Email");
+        assert_eq!(persisted.entries[0].secret, "super-secret");
+    }
+
+    #[test]
+    fn update_password_entry_requires_existing_secondary_password_before_replacement() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("vault.ck");
+        write_vault(
+            &test_vault_with_secondary_entry(),
+            b"correct horse battery staple",
+            &path,
+        )
+        .unwrap();
+        let mut state = unlocked_state(&path);
+        let id = discover_first_match_id(&mut state, "https://secure.example.com");
+        let original = std::fs::read(&path).unwrap();
+
+        for secondary_password in [None, Some("wrong-pass")] {
+            let mut request = serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://secure.example.com",
+                "name": "Updated Protected Email",
+                "username": "updated-user",
+                "password": "updated-secret",
+                "url": "https://secure.example.com",
+            });
+            if let Some(secondary_password) = secondary_password {
+                request["secondaryPassword"] = secondary_password.into();
+            }
+            let response = handle_request(&mut state, request.to_string().as_bytes());
+
+            assert!(matches!(
+                response,
+                NativeResponse::Error { message }
+                    if message == "This entry requires a secondary password to view."
+                        || message == "Incorrect secondary password."
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+
+        let response = handle_request(
+            &mut state,
+            serde_json::json!({
+                "type": "update_password_entry",
+                "id": id,
+                "origin": "https://secure.example.com",
+                "name": "Updated Protected Email",
+                "username": "updated-user",
+                "password": "updated-secret",
+                "url": "https://secure.example.com",
+                "secondaryPassword": "view-pass",
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let persisted = read_vault(b"correct horse battery staple", &path).unwrap();
+
+        assert!(matches!(response, NativeResponse::SaveEntry { .. }));
+        assert_eq!(persisted.entries.len(), 1);
+        let updated = &persisted.entries[0];
+        assert_eq!(updated.name, "Updated Protected Email");
+        assert_eq!(updated.username.as_deref(), Some("updated-user"));
+        assert!(updated.has_secondary_password);
+        assert_eq!(
+            updated.reveal_secret(Some("view-pass")).unwrap().as_str(),
+            "updated-secret"
+        );
+        assert!(state.issued_matches.is_empty());
+    }
+
+    #[test]
     fn native_save_rejects_non_origin_urls_before_mutating_the_vault() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("vault.ck");
@@ -2229,7 +2650,7 @@ mod tests {
         let request_id = "a".repeat(64);
         let response = handle_wire_request(
             &mut HostState::default(),
-            format!(r#"{{"type":"ping","protocolVersion":2,"requestId":"{request_id}"}}"#)
+            format!(r#"{{"type":"ping","protocolVersion":3,"requestId":"{request_id}"}}"#)
                 .as_bytes(),
         );
 
@@ -2253,7 +2674,7 @@ mod tests {
         let request_id = "a".repeat(64);
         let response = handle_wire_request(
             &mut HostState::default(),
-            format!(r#"{{"type":"ping","protocolVersion":2,"requestId":"{request_id}"}}"#)
+            format!(r#"{{"type":"ping","protocolVersion":3,"requestId":"{request_id}"}}"#)
                 .as_bytes(),
         );
         let encoded = serde_json::to_value(response).unwrap();
@@ -2318,7 +2739,7 @@ mod tests {
     #[test]
     fn wire_rejects_escaped_request_ids_without_owned_envelope_decoding() {
         let escaped = format!(
-            r#"{{"type":"ping","protocolVersion":2,"requestId":"{}\u0061"}}"#,
+            r#"{{"type":"ping","protocolVersion":3,"requestId":"{}\u0061"}}"#,
             "a".repeat(63)
         );
         let response = handle_wire_request(&mut HostState::default(), escaped.as_bytes());
@@ -2453,7 +2874,7 @@ mod tests {
         .unwrap();
         let status = serde_json::to_value(handle_wire_request(
             &mut state,
-            format!(r#"{{"type":"status","protocolVersion":2,"requestId":"{status_id}"}}"#)
+            format!(r#"{{"type":"status","protocolVersion":3,"requestId":"{status_id}"}}"#)
                 .as_bytes(),
         ))
         .unwrap();

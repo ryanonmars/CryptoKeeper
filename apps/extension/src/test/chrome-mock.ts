@@ -38,16 +38,17 @@ export class MockNativePort {
           protocolVersion?: number;
           requestId?: string;
         };
-        if (request.type === "ping" && request.protocolVersion === 2) {
+        if (request.type === "ping" && request.protocolVersion === 3) {
           this.onMessage.emit({
             type: "pong",
             app: "termkey",
             version: "1.0.0",
-            protocolVersion: 2,
+            protocolVersion: 3,
             capabilities: [
               "opaque-match-handles",
               "document-token-binding",
               "origin-only-save",
+              "password-entry-update",
               "bounded-native-output",
             ],
             requestId: request.requestId,
@@ -121,16 +122,17 @@ export function createChromeMock(initialTab: MockTab = {
             protocolVersion?: number;
           };
           const response =
-            typed.type === "ping" && typed.protocolVersion === 2
+            typed.type === "ping" && typed.protocolVersion === 3
               ? {
                   type: "pong",
                   app: "termkey",
                   version: "1.0.0",
-                  protocolVersion: 2,
+                  protocolVersion: 3,
                   capabilities: [
                     "opaque-match-handles",
                     "document-token-binding",
                     "origin-only-save",
+                    "password-entry-update",
                     "bounded-native-output",
                   ],
                 }

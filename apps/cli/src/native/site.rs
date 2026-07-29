@@ -5,11 +5,12 @@ use url::{Host, Url};
 use crate::error::{Result, TermKeyError};
 use crate::vault::model::{Entry, SecretType, VaultData};
 
-pub const NATIVE_PROTOCOL_VERSION: u32 = 2;
+pub const NATIVE_PROTOCOL_VERSION: u32 = 3;
 pub const NATIVE_CAPABILITIES: &[&str] = &[
     "opaque-match-handles",
     "document-token-binding",
     "origin-only-save",
+    "password-entry-update",
     "bounded-native-output",
 ];
 

@@ -29,6 +29,16 @@ export type NativeHostRequest =
       secondaryPassword?: string;
     }
   | {
+      type: "update_password_entry";
+      id: string;
+      origin: string;
+      name: string;
+      username?: string;
+      password: string;
+      url?: string;
+      secondaryPassword?: string;
+    }
+  | {
       type: "list_entries";
     }
   | {

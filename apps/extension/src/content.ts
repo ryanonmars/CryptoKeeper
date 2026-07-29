@@ -26,6 +26,17 @@ type CaptureSubmittedLoginMessage = {
   documentToken: string;
 };
 
+type SubmittedLoginCapture =
+  | {
+      ok: true;
+      username: string | null;
+      password: string;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
 type InspectPageContextMessage = {
   type: "termkey.inspectPageContext";
 };
@@ -58,6 +69,9 @@ const runtimeChrome = typeof chrome === "undefined" ? undefined : chrome;
 const contentGlobal = globalThis as typeof globalThis & {
   __termkeyContentScriptLoaded?: boolean;
 };
+let submittedLoginSnapshot: SubmittedLoginCapture | undefined;
+let submittedLoginNotification: Promise<unknown> | undefined;
+let pageContextNotificationQueued = false;
 
 if (runtimeChrome?.runtime && contentGlobal.__termkeyContentScriptLoaded) {
   return;
@@ -942,8 +956,12 @@ function captureVisibleCredentials() {
   };
 }
 
-function captureSubmittedLogin() {
-  const inputs = collectInputElements();
+function captureSubmittedLogin(
+  submittedForm: HTMLFormElement
+): SubmittedLoginCapture {
+  const inputs = collectInputElements().filter(
+    (input) => input.form === submittedForm
+  );
   const inferred = inferPageIntent(inputs);
   const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
 
@@ -1096,7 +1114,12 @@ runtimeChrome?.runtime?.onMessage?.addListener(
     }
 
     if (message?.type === "termkey.captureSubmittedLogin") {
-      sendResponse(captureSubmittedLogin());
+      const snapshot = submittedLoginSnapshot ?? {
+        ok: false as const,
+        error: "No submitted login credentials are available.",
+      };
+      submittedLoginSnapshot = undefined;
+      sendResponse(snapshot);
       return true;
     }
 
@@ -1133,18 +1156,80 @@ runtimeChrome?.runtime?.onMessage?.addListener(
   }
 );
 
+function sendPageContextChanged() {
+  pageContextNotificationQueued = false;
+  const notify = () =>
+    runtimeChrome?.runtime?.sendMessage?.({
+      type: "termkey.content.pageContextChanged",
+      documentToken: DOCUMENT_TOKEN,
+    });
+  if (submittedLoginNotification) {
+    void submittedLoginNotification.then(notify);
+  } else {
+    void notify();
+  }
+}
+
+function schedulePageContextChanged() {
+  if (pageContextNotificationQueued) {
+    return;
+  }
+  pageContextNotificationQueued = true;
+  queueMicrotask(sendPageContextChanged);
+}
+
+function wrapHistoryMethod(method: "pushState" | "replaceState") {
+  const original = window.history[method].bind(window.history);
+  window.history[method] = ((
+    data: unknown,
+    unused: string,
+    url?: string | URL | null
+  ) => {
+    original(data, unused, url);
+    schedulePageContextChanged();
+  }) as History["pushState"];
+}
+
 document.addEventListener(
   "submit",
-  () => {
-    void runtimeChrome?.runtime?.sendMessage?.({
+  (event) => {
+    const snapshot =
+      event.target instanceof HTMLFormElement
+        ? captureSubmittedLogin(event.target)
+        : undefined;
+    submittedLoginSnapshot = snapshot;
+    const notification = runtimeChrome?.runtime?.sendMessage?.({
       type: "termkey.content.loginSubmitted",
       documentToken: DOCUMENT_TOKEN,
     });
+    if (
+      notification &&
+      typeof (notification as PromiseLike<unknown>).then === "function"
+    ) {
+      const settled = Promise.resolve(notification).catch(() => undefined);
+      submittedLoginNotification = settled;
+      void settled.finally(() => {
+        if (submittedLoginNotification === settled) {
+          submittedLoginNotification = undefined;
+        }
+        if (submittedLoginSnapshot === snapshot) {
+          submittedLoginSnapshot = undefined;
+        }
+      });
+    }
   },
   true
 );
 
 if (runtimeChrome?.runtime) {
+  wrapHistoryMethod("pushState");
+  wrapHistoryMethod("replaceState");
+  window.addEventListener("popstate", schedulePageContextChanged);
+  window.addEventListener("hashchange", schedulePageContextChanged);
+  new MutationObserver(schedulePageContextChanged).observe(document, {
+    childList: true,
+    subtree: true,
+  });
   console.log("TermKey content script running");
 }
 })();
