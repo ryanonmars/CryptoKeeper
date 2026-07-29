@@ -956,12 +956,7 @@ function captureVisibleCredentials() {
   };
 }
 
-function captureSubmittedLogin(
-  submittedForm: HTMLFormElement
-): SubmittedLoginCapture {
-  const inputs = collectInputElements().filter(
-    (input) => input.form === submittedForm
-  );
+function captureSubmittedLoginFromInputs(inputs: HTMLInputElement[]): SubmittedLoginCapture {
   const inferred = inferPageIntent(inputs);
   const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
 
@@ -981,6 +976,20 @@ function captureSubmittedLogin(
     username: usernameInput?.value.trim() || null,
     password: passwordInput.value,
   };
+}
+
+function captureSubmittedLogin(submittedForm: HTMLFormElement): SubmittedLoginCapture {
+  return captureSubmittedLoginFromInputs(
+    collectInputElements().filter((input) => input.form === submittedForm)
+  );
+}
+
+function captureClickedLogin(button: HTMLElement): SubmittedLoginCapture {
+  const root = getCandidateRoot(button);
+  const inputs = root
+    ? Array.from(root.querySelectorAll<HTMLInputElement>("input"))
+    : collectInputElements();
+  return captureSubmittedLoginFromInputs(inputs);
 }
 
 function fillGeneratedPassword(message: FillGeneratedPasswordMessage) {
@@ -1215,6 +1224,39 @@ document.addEventListener(
         if (submittedLoginSnapshot === snapshot) {
           submittedLoginSnapshot = undefined;
         }
+      });
+    }
+  },
+  true
+);
+
+document.addEventListener(
+  "click",
+  (event) => {
+    const button = event.target instanceof HTMLElement
+      ? event.target.closest("button, input[type='submit'], input[type='button']")
+      : null;
+    if (
+      !(button instanceof HTMLElement) ||
+      (button instanceof HTMLButtonElement && button.type === "submit")
+    ) {
+      return;
+    }
+    const snapshot = captureClickedLogin(button);
+    if (!snapshot.ok) {
+      return;
+    }
+    submittedLoginSnapshot = snapshot;
+    const notification = runtimeChrome?.runtime?.sendMessage?.({
+      type: "termkey.content.loginSubmitted",
+      documentToken: DOCUMENT_TOKEN,
+    });
+    if (notification && typeof (notification as PromiseLike<unknown>).then === "function") {
+      const settled = Promise.resolve(notification).catch(() => undefined);
+      submittedLoginNotification = settled;
+      void settled.finally(() => {
+        if (submittedLoginNotification === settled) submittedLoginNotification = undefined;
+        if (submittedLoginSnapshot === snapshot) submittedLoginSnapshot = undefined;
       });
     }
   },
