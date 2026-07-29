@@ -143,7 +143,8 @@ async function openPendingLoginPopup(
   handleMessage: (
     message: { type: string },
     callback: (response: unknown) => void,
-    dismissCandidate: () => void
+    dismissCandidate: () => void,
+    setCandidateMode: (mode: "save" | "update" | "unlock") => void
   ) => void,
   options: PendingLoginPopupOptions = {}
 ) {
@@ -206,6 +207,10 @@ async function openPendingLoginPopup(
       } else {
         handleMessage(message, callback, () => {
           candidate = null;
+        }, (nextMode) => {
+          if (candidate) {
+            candidate.mode = nextMode;
+          }
         });
       }
     }
@@ -636,6 +641,7 @@ it("sends one unlock and save request when Enter is pressed repeatedly", async (
 
 it("unlocks and saves a submitted login without exposing its website password", async () => {
   let unlockAndSaveRequest: unknown;
+  const recoveryNotice = "Configure a new recovery phrase.";
   await openPendingLoginPopup("unlock", (message, callback, dismissCandidate) => {
     if (message.type === "termkey.pendingLogin.unlockAndSave") {
       unlockAndSaveRequest = message;
@@ -648,6 +654,7 @@ it("unlocks and saves a submitted login without exposing its website password", 
           saved: true,
           mode: "save",
           entryName: "Edited account",
+          recoveryNotice,
         },
       });
     }
@@ -678,6 +685,139 @@ it("unlocks and saves a submitted login without exposing its website password", 
   expect(document.querySelector("#native-host-status")?.textContent).toContain(
     "Saved Edited account."
   );
+  expect(document.querySelector<HTMLElement>("#recovery-notice")?.hidden).toBe(
+    false
+  );
+  expect(document.querySelector("#recovery-notice")?.textContent).toBe(
+    recoveryNotice
+  );
+});
+
+it.each(["save", "update"] as const)(
+  "restores the ordinary %s retry after unlocking succeeds but saving fails",
+  async (mode) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const recoveryNotice = "Configure a new recovery phrase.";
+    await openPendingLoginPopup("unlock", (message, callback, dismissCandidate) => {
+      requests.push(message);
+      if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        callback({
+          ok: true,
+          response: {
+            type: "unlock_and_save_result",
+            unlocked: true,
+            saved: false,
+            mode,
+            error: "Native save failed.",
+            recoveryNotice,
+          },
+        });
+      } else if (message.type === "termkey.pendingLogin.save") {
+        dismissCandidate();
+        callback({
+          ok: true,
+          response: {
+            type: "save_entry_result",
+            entryName: "Retried account",
+          },
+        });
+      }
+    });
+
+    const masterPassword =
+      document.querySelector<HTMLInputElement>("#master-password");
+    const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+    const unlockSection =
+      document.querySelector<HTMLElement>("#unlock-section");
+    const standaloneUnlock =
+      document.querySelector<HTMLButtonElement>("#unlock-vault");
+    if (!masterPassword || !submit || !unlockSection || !standaloneUnlock) {
+      throw new Error("Unlock and save controls did not initialize.");
+    }
+    masterPassword.value = "master-secret";
+    masterPassword.dispatchEvent(new Event("input"));
+    submit.click();
+
+    expect(masterPassword.value).toBe("");
+    expect(unlockSection.hidden).toBe(true);
+    expect(standaloneUnlock.hidden).toBe(false);
+    expect(document.querySelector("#save-panel-label")?.textContent).toBe(
+      mode === "update"
+        ? "Update the saved login for this site?"
+        : "Save this login?"
+    );
+    expect(submit.textContent).toBe(
+      mode === "update" ? "Update login" : "Save login"
+    );
+    expect(submit.disabled).toBe(false);
+    expect(document.querySelector<HTMLElement>("#recovery-notice")?.hidden).toBe(
+      false
+    );
+    expect(document.querySelector("#recovery-notice")?.textContent).toBe(
+      recoveryNotice
+    );
+
+    submit.click();
+
+    expect(requests.at(-1)).toEqual({
+      type: "termkey.pendingLogin.save",
+      name: "https://example.test • sam@example.test",
+      username: "sam@example.test",
+      secondaryPassword: undefined,
+    });
+    expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(
+      true
+    );
+  }
+);
+
+it("re-resolves an unlock result without a mode before enabling save or update", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const sendMessage = await openPendingLoginPopup(
+    "unlock",
+    (message, callback, _dismissCandidate, setCandidateMode) => {
+      requests.push(message);
+      if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        setCandidateMode("update");
+        callback({
+          ok: true,
+          response: {
+            type: "unlock_and_save_result",
+            unlocked: true,
+            saved: false,
+            error: "Could not inspect saved logins.",
+          },
+        });
+      }
+    }
+  );
+
+  const masterPassword =
+    document.querySelector<HTMLInputElement>("#master-password");
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!masterPassword || !submit) {
+    throw new Error("Unlock and save controls did not initialize.");
+  }
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  submit.click();
+
+  expect(masterPassword.value).toBe("");
+  expect(submit.textContent).toBe("Retry match check");
+  expect(
+    requests.filter((request) => request.type === "termkey.pendingLogin.save")
+  ).toHaveLength(0);
+
+  submit.click();
+
+  expect(sendMessage).toHaveBeenLastCalledWith(
+    { type: "termkey.pendingLogin.get" },
+    expect.any(Function)
+  );
+  expect(document.querySelector("#save-panel-label")?.textContent).toBe(
+    "Update the saved login for this site?"
+  );
+  expect(submit.textContent).toBe("Update login");
 });
 
 it("keeps the locked save prompt focused after an unlock failure", async () => {

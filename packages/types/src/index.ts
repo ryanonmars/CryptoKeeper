@@ -177,6 +177,7 @@ export type PopupUnlockAndSaveResponse = {
   saved: boolean;
   mode?: "save" | "update";
   entryName?: string;
+  recoveryNotice?: string;
   error?: string;
 };
 

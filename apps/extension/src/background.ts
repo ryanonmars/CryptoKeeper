@@ -1445,6 +1445,12 @@ export function createBackgroundService(
       };
     }
     const status = await nativeClient.request({ type: "status" });
+    if ((await getActivePendingLogin(true)) !== candidate) {
+      return {
+        ok: true as const,
+        response: { type: "pending_login" as const, candidate: null },
+      };
+    }
     if (!status.ok) return status;
     if (status.response.type !== "status") {
       return { ok: false as const, error: "Native host returned the wrong response type." };
@@ -1573,25 +1579,58 @@ export function createBackgroundService(
           },
         };
       }
+      const recoveryMetadata =
+        unlock.response.recoveryNotice === undefined
+          ? {}
+          : { recoveryNotice: unlock.response.recoveryNotice };
       const mode = await resolvePendingLogin(candidate);
       if (mode === null) {
-        return { ok: false as const, error: "No pending login is available to save." };
+        return {
+          ok: true as const,
+          response: {
+            type: "unlock_and_save_result" as const,
+            unlocked: true,
+            saved: false,
+            error: "No pending login is available to save.",
+            ...recoveryMetadata,
+          },
+        };
       }
       if (typeof mode !== "string") {
         return {
           ok: true as const,
-          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, error: mode.error },
+          response: {
+            type: "unlock_and_save_result" as const,
+            unlocked: true,
+            saved: false,
+            error: mode.error,
+            ...recoveryMetadata,
+          },
         };
       }
       const save = await saveResolvedPendingLogin(candidate, message);
       return save.ok
         ? {
             ok: true as const,
-            response: { type: "unlock_and_save_result" as const, unlocked: true, saved: true, mode, entryName: save.entryName },
+            response: {
+              type: "unlock_and_save_result" as const,
+              unlocked: true,
+              saved: true,
+              mode,
+              entryName: save.entryName,
+              ...recoveryMetadata,
+            },
           }
         : {
             ok: true as const,
-            response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, mode, error: save.error },
+            response: {
+              type: "unlock_and_save_result" as const,
+              unlocked: true,
+              saved: false,
+              mode,
+              error: save.error,
+              ...recoveryMetadata,
+            },
           };
     } finally {
       pendingLoginTransactions.delete(candidate);

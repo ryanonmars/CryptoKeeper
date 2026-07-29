@@ -981,15 +981,92 @@ describe("background security boundaries", () => {
     });
   });
 
+  it("does not return locked metadata for a candidate replaced during the status request", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "first-user",
+      password: "first-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder(() => undefined);
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
+      7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) },
+      7
+    );
+
+    const pendingGet = service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      mock.extensionSender
+    );
+    await vi.waitFor(() => {
+      expect(
+        mock.ports.flatMap((port) =>
+          port.postMessage.mock.calls.filter(
+            ([request]) => (request as { type?: string }).type === "status"
+          )
+        )
+      ).toHaveLength(1);
+    });
+
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "replacement-user",
+      password: "replacement-secret",
+    });
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "b".repeat(64) },
+      7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "b".repeat(64) },
+      7
+    );
+
+    const statusPort = mock.ports.find((port) =>
+      port.postMessage.mock.calls.some(
+        ([request]) => (request as { type?: string }).type === "status"
+      )
+    );
+    if (!statusPort) {
+      throw new Error("Status request was not sent.");
+    }
+    const statusCallIndex = statusPort.postMessage.mock.calls.findIndex(
+      ([request]) => (request as { type?: string }).type === "status"
+    );
+    statusPort.onMessage.emit(
+      correlatedResponse(
+        statusPort,
+        { ...statusResponse, locked: true },
+        statusCallIndex
+      )
+    );
+
+    await expect(pendingGet).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+  });
+
   it("unlocks, resolves, and saves using the background-owned website password", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({ ok: true, username: "captured-user", password: "website-secret" });
     mock.setPageContext({ intent: "unknown", hasPasswordField: false, hasVisibleLoginFailure: false });
     const nativeRequests: Array<Record<string, unknown>> = [];
+    const recoveryNotice = "Configure a new recovery phrase.";
     mock.setNativeResponder((request) => {
       nativeRequests.push(request as Record<string, unknown>);
       switch ((request as { type?: string }).type) {
-        case "unlock": return { type: "unlock", unlocked: true };
+        case "unlock": return { type: "unlock", unlocked: true, recoveryNotice };
         case "find_site_matches": return { ...siteMatchesResponse, matches: [] };
         case "save_password_entry": return { type: "save_entry", entryName: "Example account" };
         default: return { type: "error", message: "Unexpected request." };
@@ -1007,7 +1084,14 @@ describe("background security boundaries", () => {
       secondaryPassword: "vault-secret",
     }, mock.extensionSender)).resolves.toEqual({
       ok: true,
-      response: { type: "unlock_and_save_result", unlocked: true, saved: true, mode: "save", entryName: "Example account" },
+      response: {
+        type: "unlock_and_save_result",
+        unlocked: true,
+        saved: true,
+        mode: "save",
+        entryName: "Example account",
+        recoveryNotice,
+      },
     });
     expect(nativeRequests.map((request) => request.type)).toEqual([
       "unlock",
@@ -1018,6 +1102,73 @@ describe("background security boundaries", () => {
       expect.objectContaining({ type: "save_password_entry", password: "website-secret" }),
     ]);
     expect(nativeRequests[0]).toMatchObject({ type: "unlock", password: "master-secret" });
+  });
+
+  it("keeps match-resolution failures unresolved after a successful unlock", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "captured-user",
+      password: "website-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    const recoveryNotice = "Configure a new recovery phrase.";
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      switch ((request as { type?: string }).type) {
+        case "unlock":
+          return { type: "unlock", unlocked: true, recoveryNotice };
+        case "find_site_matches":
+          return { type: "error", message: "Could not inspect saved logins." };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
+      7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) },
+      7
+    );
+
+    const result = await service.handleMessage(
+      {
+        type: "termkey.pendingLogin.unlockAndSave",
+        name: "Example account",
+        masterPassword: "master-secret",
+      },
+      mock.extensionSender
+    );
+
+    expect(result).toEqual({
+      ok: true,
+      response: {
+        type: "unlock_and_save_result",
+        unlocked: true,
+        saved: false,
+        error: "Could not inspect saved logins.",
+        recoveryNotice,
+      },
+    });
+    expect(nativeRequests.map((request) => request.type)).toEqual([
+      "unlock",
+      "find_site_matches",
+    ]);
+    expect(
+      nativeRequests.filter(
+        (request) =>
+          request.type === "save_password_entry" ||
+          request.type === "update_password_entry"
+      )
+    ).toHaveLength(0);
   });
 
   it("updates the matched login after unlocking", async () => {
