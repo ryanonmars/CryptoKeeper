@@ -11,6 +11,7 @@ afterEach(() => {
 
 type PendingLoginPopupOptions = {
   canGeneratePassword?: boolean;
+  hasEmptyLoginField?: boolean;
   matches?: Array<{
     id: string;
     grantId: string;
@@ -21,6 +22,88 @@ type PendingLoginPopupOptions = {
     hasSecondaryPassword: boolean;
   }>;
 };
+
+const match = {
+  id: "entry-1",
+  grantId: "grant-1",
+  name: "Example account",
+  username: "sam@example.test",
+  url: "https://example.test",
+  matchType: "exact_origin" as const,
+  hasSecondaryPassword: false,
+};
+
+async function openPopupWithSiteContext({
+  hasEmptyLoginField,
+  matches,
+}: {
+  hasEmptyLoginField: boolean;
+  matches: typeof match[];
+}) {
+  const sendMessage = vi.fn(
+    (
+      message: { type: string },
+      callback: (response: unknown) => void
+    ) => {
+      if (message.type === "termkey.nativeHost.status") {
+        callback({
+          ok: true,
+          response: {
+            type: "status",
+            app: "termkey",
+            version: "1.0.0",
+            vaultPath: "/vault",
+            vaultExists: true,
+            firstRunComplete: true,
+            recoveryConfigured: true,
+            locked: false,
+          },
+        });
+      } else if (message.type === "termkey.content.inspectPageContext") {
+        callback({
+          ok: true,
+          response: {
+            type: "page_context",
+            context: {
+              intent: "login",
+              visibleUsername: null,
+              hasPasswordField: true,
+              hasEmptyLoginField,
+              hasConfirmationPasswordField: false,
+              canGeneratePassword: false,
+              hasPendingSaveUsername: false,
+              pendingUsername: null,
+            },
+          },
+        });
+      } else if (message.type === "termkey.nativeHost.findSiteMatches") {
+        callback({
+          ok: true,
+          response: {
+            type: "site_matches",
+            siteUrl: "https://example.test",
+            siteOrigin: "https://example.test",
+            siteHostname: "example.test",
+            matches,
+          },
+        });
+      } else if (message.type === "termkey.pendingLogin.get") {
+        callback({ ok: true, response: { type: "pending_login", candidate: null } });
+      }
+    }
+  );
+  vi.stubGlobal("chrome", {
+    runtime: { lastError: undefined, sendMessage },
+    tabs: {
+      query: (
+        _query: unknown,
+        callback: (tabs: Array<{ url?: string }>) => void
+      ) => callback([{ url: "https://example.test/account" }]),
+    },
+  });
+
+  await import("./popup");
+}
 
 async function openPendingLoginPopup(
   mode: "save" | "update",
@@ -68,6 +151,7 @@ async function openPendingLoginPopup(
               intent: "unknown",
               visibleUsername: null,
               hasPasswordField: false,
+              hasEmptyLoginField: options.hasEmptyLoginField ?? false,
               hasConfirmationPasswordField: false,
               canGeneratePassword: options.canGeneratePassword ?? false,
               hasPendingSaveUsername: false,
@@ -108,6 +192,33 @@ async function openPendingLoginPopup(
   await import("./popup");
   return sendMessage;
 }
+
+it("hides Fill when the eligible login fields are already filled", async () => {
+  await openPopupWithSiteContext({ hasEmptyLoginField: false, matches: [match] });
+
+  expect(
+    document.querySelector<HTMLButtonElement>("#fill-best-match")?.hidden
+  ).toBe(true);
+});
+
+it("shows Fill when an eligible login field is empty", async () => {
+  await openPopupWithSiteContext({ hasEmptyLoginField: true, matches: [match] });
+
+  expect(
+    document.querySelector<HTMLButtonElement>("#fill-best-match")?.hidden
+  ).toBe(false);
+});
+
+it("hides the match picker when eligible login fields are already filled", async () => {
+  await openPopupWithSiteContext({
+    hasEmptyLoginField: false,
+    matches: [match, { ...match, id: "entry-2", grantId: "grant-2" }],
+  });
+
+  expect(document.querySelector<HTMLElement>("#match-picker")?.hidden).toBe(
+    true
+  );
+});
 
 it.each([
   ["URL userinfo", "https://user:password@example.test/login"],
@@ -473,6 +584,7 @@ it.each([
     actionSelector: "#fill-best-match",
     requestType: "termkey.autofill.fillSelectedMatch",
     options: {
+      hasEmptyLoginField: true,
       matches: [
         {
           id: "entry-1",
@@ -656,6 +768,7 @@ it("retries a protected fill with the same grant after a wrong secondary passwor
               intent: "login",
               visibleUsername: "person@example.test",
               hasPasswordField: true,
+              hasEmptyLoginField: true,
               hasConfirmationPasswordField: false,
               canGeneratePassword: false,
               hasPendingSaveUsername: false,

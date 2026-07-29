@@ -830,6 +830,7 @@ function updateFillButtonState() {
   const knownUsername = hasMatchingSavedUsername(actionableUsername);
   const showGenerateAction = pageContext.canGeneratePassword;
   const showFillAction =
+    pageContext.hasEmptyLoginField &&
     pageContext.intent !== "signup" &&
     pageContext.intent !== "password_change" &&
     singleMatch;
@@ -1009,6 +1010,7 @@ function formatMatchDetail(match: PopupSiteMatch) {
 
 function renderMatchPicker() {
   const multipleMatches =
+    pageContext.hasEmptyLoginField &&
     currentSiteMatches.length > 1 &&
     pageContext.intent !== "signup" &&
     pageContext.intent !== "password_change";
