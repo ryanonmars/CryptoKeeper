@@ -806,6 +806,7 @@ function isKnownPopupMessage(
     message.type === "termkey.pendingLogin.get" ||
     message.type === "termkey.pendingLogin.dismiss" ||
     message.type === "termkey.pendingLogin.save" ||
+    message.type === "termkey.pendingLogin.unlockAndSave" ||
     message.type === "termkey.passwords.generateForPage" ||
     message.type === "termkey.autofill.fillSelectedMatch" ||
     message.type === "termkey.nativeHost.savePasswordEntry" ||
@@ -1403,17 +1404,7 @@ export function createBackgroundService(
     return candidate;
   }
 
-  async function getPendingLogin() {
-    const candidate = await getActivePendingLogin(true);
-    if (!candidate) {
-      return {
-        ok: true as const,
-        response: {
-          type: "pending_login" as const,
-          candidate: null,
-        },
-      };
-    }
+  async function resolvePendingLogin(candidate: PendingLogin) {
     const matches = await nativeClient.request({
       type: "find_site_matches",
       url: candidate.origin,
@@ -1430,15 +1421,7 @@ export function createBackgroundService(
         error: "Native host returned matches for a different origin.",
       };
     }
-    if ((await getActivePendingLogin(true)) !== candidate) {
-      return {
-        ok: true as const,
-        response: {
-          type: "pending_login" as const,
-          candidate: null,
-        },
-      };
-    }
+    if ((await getActivePendingLogin(true)) !== candidate) return null;
     const matchingEntries =
       candidate.username === null
         ? []
@@ -1449,6 +1432,39 @@ export function createBackgroundService(
       matchingEntries.length === 1 ? matchingEntries[0].id : undefined;
     const mode: "save" | "update" =
       candidate.updateEntryId === undefined ? "save" : "update";
+    return mode;
+  }
+
+  async function getPendingLogin() {
+    const candidate = await getActivePendingLogin(true);
+    if (!candidate) {
+      return {
+        ok: true as const,
+        response: { type: "pending_login" as const, candidate: null },
+      };
+    }
+    const status = await nativeClient.request({ type: "status" });
+    if (!status.ok) return status;
+    if (status.response.type !== "status") {
+      return { ok: false as const, error: "Native host returned the wrong response type." };
+    }
+    if (status.response.locked) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login" as const,
+          candidate: { username: candidate.username, url: candidate.origin, mode: "unlock" as const },
+        },
+      };
+    }
+    const mode = await resolvePendingLogin(candidate);
+    if (mode === null) {
+      return {
+        ok: true as const,
+        response: { type: "pending_login" as const, candidate: null },
+      };
+    }
+    if (typeof mode !== "string") return mode;
     return {
       ok: true as const,
       response: {
@@ -1460,6 +1476,40 @@ export function createBackgroundService(
         },
       },
     };
+  }
+
+  async function saveResolvedPendingLogin(
+    candidate: PendingLogin,
+    message: Pick<Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.save" | "termkey.pendingLogin.unlockAndSave" }>, "name" | "username" | "secondaryPassword">
+  ) {
+    const mode: "save" | "update" =
+      candidate.updateEntryId === undefined ? "save" : "update";
+    const response =
+      mode === "save"
+        ? await nativeClient.request({
+            type: "save_password_entry",
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          })
+        : await nativeClient.request({
+            type: "update_password_entry",
+            id: candidate.updateEntryId!,
+            origin: candidate.origin,
+            name: message.name,
+            username: message.username,
+            password: candidate.password,
+            url: candidate.origin,
+            secondaryPassword: message.secondaryPassword,
+          });
+    if (!response.ok) return { ok: false as const, mode, error: response.error };
+    if (response.response.type !== "save_entry") {
+      return { ok: false as const, mode, error: "Native host returned the wrong response type." };
+    }
+    pendingLogins.remove(candidate);
+    return { ok: true as const, mode, entryName: response.response.entryName };
   }
 
   async function dismissPendingLogin() {
@@ -1489,43 +1539,54 @@ export function createBackgroundService(
         error: "No pending login is available to save.",
       };
     }
-    const response =
-      candidate.updateEntryId === undefined
-        ? await nativeClient.request({
-            type: "save_password_entry",
-            name: message.name,
-            username: message.username,
-            password: candidate.password,
-            url: candidate.origin,
-            secondaryPassword: message.secondaryPassword,
-          })
-        : await nativeClient.request({
-            type: "update_password_entry",
-            id: candidate.updateEntryId,
-            origin: candidate.origin,
-            name: message.name,
-            username: message.username,
-            password: candidate.password,
-            url: candidate.origin,
-            secondaryPassword: message.secondaryPassword,
-          });
-    if (!response.ok) {
-      return response;
-    }
-    if (response.response.type !== "save_entry") {
-      return {
-        ok: false as const,
-        error: "Native host returned the wrong response type.",
-      };
-    }
-    pendingLogins.remove(candidate);
+    const response = await saveResolvedPendingLogin(candidate, message);
+    if (!response.ok) return { ok: false as const, error: response.error };
     return {
       ok: true as const,
       response: {
         type: "save_entry_result" as const,
-        entryName: response.response.entryName,
+        entryName: response.entryName,
       },
     };
+  }
+
+  async function unlockAndSavePendingLogin(
+    message: Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.unlockAndSave" }>
+  ) {
+    const candidate = await getActivePendingLogin(true);
+    if (!candidate) return { ok: false as const, error: "No pending login is available to save." };
+    const unlock = await nativeClient.request({ type: "unlock", password: message.masterPassword });
+    if (!unlock.ok || unlock.response.type !== "unlock") {
+      return {
+        ok: true as const,
+        response: {
+          type: "unlock_and_save_result" as const,
+          unlocked: false,
+          saved: false,
+          error: unlock.ok ? "Native host returned the wrong response type." : unlock.error,
+        },
+      };
+    }
+    const mode = await resolvePendingLogin(candidate);
+    if (mode === null) {
+      return { ok: false as const, error: "No pending login is available to save." };
+    }
+    if (typeof mode !== "string") {
+      return {
+        ok: true as const,
+        response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, error: mode.error },
+      };
+    }
+    const save = await saveResolvedPendingLogin(candidate, message);
+    return save.ok
+      ? {
+          ok: true as const,
+          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: true, mode, entryName: save.entryName },
+        }
+      : {
+          ok: true as const,
+          response: { type: "unlock_and_save_result" as const, unlocked: true, saved: false, mode, error: save.error },
+        };
   }
 
   async function handleTrustedMessage(
@@ -1557,6 +1618,8 @@ export function createBackgroundService(
         return dismissPendingLogin();
       case "termkey.pendingLogin.save":
         return savePendingLogin(message);
+      case "termkey.pendingLogin.unlockAndSave":
+        return unlockAndSavePendingLogin(message);
       case "termkey.passwords.generateForPage":
         return generateForPage();
       case "termkey.autofill.fillSelectedMatch":

@@ -144,7 +144,7 @@ export type PopupPendingLoginResponse = {
   candidate: {
     username: string | null;
     url: string;
-    mode: "save" | "update";
+    mode: "save" | "update" | "unlock";
   } | null;
 };
 
@@ -169,6 +169,15 @@ export type PopupFillResultResponse = {
 export type PopupSaveResultResponse = {
   type: "save_entry_result";
   entryName: string;
+};
+
+export type PopupUnlockAndSaveResponse = {
+  type: "unlock_and_save_result";
+  unlocked: boolean;
+  saved: boolean;
+  mode?: "save" | "update";
+  entryName?: string;
+  error?: string;
 };
 
 export type NativeHostResponse = (
@@ -239,6 +248,13 @@ export type PopupToBackgroundMessage =
       secondaryPassword?: string;
     }
   | {
+      type: "termkey.pendingLogin.unlockAndSave";
+      name: string;
+      username?: string;
+      masterPassword: string;
+      secondaryPassword?: string;
+    }
+  | {
       type: "termkey.passwords.generateForPage";
     }
   | {
@@ -270,7 +286,8 @@ export type PopupToBackgroundResponse =
         | PopupPendingLoginResponse
         | PopupGeneratedPasswordResponse
         | PopupFillResultResponse
-        | PopupSaveResultResponse;
+        | PopupSaveResultResponse
+        | PopupUnlockAndSaveResponse;
     }
   | {
       ok: false;
