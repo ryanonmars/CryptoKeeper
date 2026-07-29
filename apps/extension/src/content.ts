@@ -21,6 +21,11 @@ type CaptureVisibleCredentialsMessage = {
   documentToken: string;
 };
 
+type CaptureSubmittedLoginMessage = {
+  type: "termkey.captureSubmittedLogin";
+  documentToken: string;
+};
+
 type InspectPageContextMessage = {
   type: "termkey.inspectPageContext";
 };
@@ -937,6 +942,29 @@ function captureVisibleCredentials() {
   };
 }
 
+function captureSubmittedLogin() {
+  const inputs = collectInputElements();
+  const inferred = inferPageIntent(inputs);
+  const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
+
+  if (
+    inferred.intent !== "login" ||
+    !passwordInput ||
+    !passwordInput.value.trim()
+  ) {
+    return {
+      ok: false,
+      error: "No visible submitted login credentials were found on this page.",
+    };
+  }
+
+  return {
+    ok: true,
+    username: usernameInput?.value.trim() || null,
+    password: passwordInput.value,
+  };
+}
+
 function fillGeneratedPassword(message: FillGeneratedPasswordMessage) {
   const inputs = collectInputElements();
   const {
@@ -989,7 +1017,26 @@ function inspectPageContext() {
     hasPasswordField: inferred.hasPasswordField,
     hasConfirmationPasswordField: inferred.hasConfirmationPasswordField,
     canGeneratePassword: canGeneratePasswordForInputs(inputs),
+    hasVisibleLoginFailure:
+      inferred.intent === "login" && hasVisibleLoginFailure(),
   };
+}
+
+function hasVisibleLoginFailure() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[role='alert'], .error, .alert")
+  ).some((element) => {
+    const style = window.getComputedStyle(element);
+    const text = element.textContent?.trim() ?? "";
+    return (
+      !element.hidden &&
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      style.opacity !== "0" &&
+      !element.closest("[aria-hidden='true']") &&
+      /invalid|incorrect|failed|try again/i.test(text)
+    );
+  });
 }
 
 runtimeChrome?.runtime?.onMessage?.addListener(
@@ -999,6 +1046,7 @@ runtimeChrome?.runtime?.onMessage?.addListener(
       | FillGeneratedPasswordMessage
       | ContentScriptProbeMessage
       | CaptureVisibleCredentialsMessage
+      | CaptureSubmittedLoginMessage
       | InspectPageContextMessage,
     sender: { id?: string },
     sendResponse: (response: unknown) => void
@@ -1014,6 +1062,7 @@ runtimeChrome?.runtime?.onMessage?.addListener(
 
     if (
       (message?.type === "termkey.captureVisibleCredentials" ||
+        message?.type === "termkey.captureSubmittedLogin" ||
         message?.type === "termkey.fillGeneratedPassword" ||
         message?.type === "termkey-fill-credentials") &&
       message.documentToken !== DOCUMENT_TOKEN
@@ -1027,6 +1076,11 @@ runtimeChrome?.runtime?.onMessage?.addListener(
 
     if (message?.type === "termkey.captureVisibleCredentials") {
       sendResponse(captureVisibleCredentials());
+      return true;
+    }
+
+    if (message?.type === "termkey.captureSubmittedLogin") {
+      sendResponse(captureSubmittedLogin());
       return true;
     }
 
@@ -1061,6 +1115,17 @@ runtimeChrome?.runtime?.onMessage?.addListener(
 
     return true;
   }
+);
+
+document.addEventListener(
+  "submit",
+  () => {
+    void runtimeChrome?.runtime?.sendMessage?.({
+      type: "termkey.content.loginSubmitted",
+      documentToken: DOCUMENT_TOKEN,
+    });
+  },
+  true
 );
 
 if (runtimeChrome?.runtime) {
