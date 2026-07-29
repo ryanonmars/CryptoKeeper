@@ -608,6 +608,30 @@ it("offers a locked submitted login for unlock and save", async () => {
   expect(document.querySelector<HTMLButtonElement>("#unlock-vault")?.hidden).toBe(
     true
   );
+  expect(document.querySelector("#native-host-status")?.textContent).toBe(
+    "Unlock TermKey to save this submitted login without signing in again."
+  );
+});
+
+it("sends one unlock and save request when Enter is pressed repeatedly", async () => {
+  let unlockAndSaveRequestCount = 0;
+  await openPendingLoginPopup("unlock", (message) => {
+    if (message.type === "termkey.pendingLogin.unlockAndSave") {
+      unlockAndSaveRequestCount += 1;
+    }
+  });
+
+  const masterPassword = document.querySelector<HTMLInputElement>("#master-password");
+  if (!masterPassword) {
+    throw new Error("Master password control did not initialize.");
+  }
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  masterPassword.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+  masterPassword.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+
+  expect(unlockAndSaveRequestCount).toBe(1);
+  expect(masterPassword.disabled).toBe(true);
 });
 
 it("unlocks and saves a submitted login without exposing its website password", async () => {

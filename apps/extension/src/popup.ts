@@ -782,6 +782,11 @@ function stagePendingLogin(
     "The submitted password remains in the extension background until you choose an action.";
   renderPasswordPrompt();
   renderSavePrompt();
+  if (candidate.mode === "unlock") {
+    renderMessage(
+      "Unlock TermKey to save this submitted login without signing in again."
+    );
+  }
   updateFillButtonState();
 }
 
@@ -1264,6 +1269,10 @@ function submitPendingFill() {
 }
 
 function submitPendingSave() {
+  if (saveInFlight) {
+    return;
+  }
+
   const manualCandidate = pendingSaveCandidate;
   const submittedLogin = pendingLoginCandidate;
   if (!manualCandidate && !submittedLogin) {
@@ -1321,6 +1330,7 @@ function submitPendingSave() {
   }
 
   saveInFlight = true;
+  renderPasswordPrompt();
   renderSavePrompt();
   updateFillButtonState();
   renderMessage(
