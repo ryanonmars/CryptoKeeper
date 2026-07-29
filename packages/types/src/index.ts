@@ -147,6 +147,16 @@ export type PopupCapturedLoginStepResponse = {
   url: string;
 };
 
+export type PopupPendingLoginResponse = {
+  type: "pending_login";
+  candidate: {
+    username: string | null;
+    password: string;
+    url: string;
+    mode: "save" | "update";
+  } | null;
+};
+
 export type PopupGeneratedPasswordResponse = {
   type: "generated_password";
   candidate: {
@@ -223,7 +233,16 @@ export type PopupToBackgroundMessage =
       type: "termkey.content.captureVisibleCredentials";
     }
   | {
+      type: "termkey.content.captureSubmittedLogin";
+    }
+  | {
       type: "termkey.content.inspectPageContext";
+    }
+  | {
+      type: "termkey.pendingLogin.get";
+    }
+  | {
+      type: "termkey.pendingLogin.dismiss";
     }
   | {
       type: "termkey.passwords.generateForPage";
@@ -256,6 +275,7 @@ export type PopupToBackgroundResponse =
         | PopupCapturedLoginResponse
         | PopupPageContextResponse
         | PopupCapturedLoginStepResponse
+        | PopupPendingLoginResponse
         | PopupGeneratedPasswordResponse
         | PopupFillResultResponse
         | PopupSaveResultResponse;

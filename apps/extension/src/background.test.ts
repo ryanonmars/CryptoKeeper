@@ -125,6 +125,21 @@ describe("background security boundaries", () => {
     vi.useRealTimers();
   });
 
+  it("returns no pending login when the extension has not captured one", async () => {
+    const mock = createChromeMock();
+    const service = createBackgroundService(mock.chrome);
+
+    expect(
+      await service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+  });
+
   it("discovers HTTP tabs using their canonical origin", async () => {
     const mock = createChromeMock({ id: 7, url: "http://example.test/login" });
     installHappyPathResponders(mock);
