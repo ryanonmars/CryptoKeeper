@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 
-type Listener<TArgs extends unknown[]> = (...args: TArgs) => void;
+type Listener<TArgs extends unknown[]> = (...args: TArgs) => unknown;
 
 export class MockChromeEvent<TArgs extends unknown[]> {
   private readonly listeners: Listener<TArgs>[] = [];
@@ -13,6 +13,14 @@ export class MockChromeEvent<TArgs extends unknown[]> {
     for (const listener of [...this.listeners]) {
       listener(...args);
     }
+  }
+
+  async emitAsync(...args: TArgs) {
+    await Promise.all(this.listeners.map((listener) => listener(...args)));
+  }
+
+  hasListeners() {
+    return this.listeners.length > 0;
   }
 }
 
@@ -67,6 +75,18 @@ export function createChromeMock(initialTab: MockTab = {
   let tabMessageHandler:
     | ((tabId: number, message: unknown, options: { frameId: number }) => unknown)
     | undefined;
+  let documentToken = "a".repeat(64);
+  let submittedLogin:
+    | { ok: true; username: string | null; password: string }
+    | { ok: false; error: string }
+    | undefined;
+  let pageContext:
+    | {
+        intent: "login" | "signup" | "password_change" | "unknown";
+        hasPasswordField: boolean;
+        hasVisibleLoginFailure: boolean;
+      }
+    | undefined;
   let nativeResponder:
     | ((request: unknown, port: MockNativePort) => unknown | undefined)
     | undefined;
@@ -76,7 +96,12 @@ export function createChromeMock(initialTab: MockTab = {
     new MockChromeEvent<
       [
         unknown,
-        { id?: string; url?: string },
+        {
+          id?: string;
+          url?: string;
+          tab?: { id?: number; url?: string };
+          frameId?: number;
+        },
         (response: unknown) => void,
       ]
     >();
@@ -143,9 +168,35 @@ export function createChromeMock(initialTab: MockTab = {
           tabId: number,
           message: unknown,
           options: { frameId: number }
-        ) => tabMessageHandler?.(tabId, message, options)
+        ) => {
+          if (tabMessageHandler) {
+            return tabMessageHandler(tabId, message, options);
+          }
+          const type = (message as { type?: string }).type;
+          if (type === "termkey.contentScriptProbe") {
+            return { ok: true, documentToken };
+          }
+          if (type === "termkey.captureSubmittedLogin" && submittedLogin) {
+            return submittedLogin;
+          }
+          if (type === "termkey.inspectPageContext" && pageContext) {
+            return {
+              ok: true,
+              documentToken,
+              ...pageContext,
+            };
+          }
+          return undefined;
+        }
       ),
       onRemoved: new MockChromeEvent<[number]>(),
+      onUpdated: new MockChromeEvent<
+        [
+          number,
+          { status?: string; url?: string },
+          { id?: number; url?: string },
+        ]
+      >(),
     },
     scripting: {
       executeScript: vi.fn(async () => undefined),
@@ -179,6 +230,70 @@ export function createChromeMock(initialTab: MockTab = {
       if (typeof tab.id === "number") {
         tabsById.set(tab.id, { ...tab });
       }
+    },
+    setTab(tab: MockTab) {
+      if (typeof tab.id === "number") {
+        tabsById.set(tab.id, { ...tab });
+        if (activeTab.id === tab.id) {
+          activeTab = { ...tab };
+        }
+      }
+    },
+    setDocumentToken(token: string) {
+      documentToken = token;
+    },
+    setSubmittedLogin(
+      response:
+        | { ok: true; username: string | null; password: string }
+        | { ok: false; error: string }
+    ) {
+      submittedLogin = response;
+    },
+    setPageContext(context: {
+      intent: "login" | "signup" | "password_change" | "unknown";
+      hasPasswordField: boolean;
+      hasVisibleLoginFailure: boolean;
+    }) {
+      pageContext = context;
+    },
+    dispatchContentMessage(message: unknown, tabId: number) {
+      const tab = tabsById.get(tabId);
+      if (!runtimeOnMessage.hasListeners()) {
+        return Promise.resolve(undefined);
+      }
+      return new Promise<unknown>((resolve) => {
+        runtimeOnMessage.emit(
+          message,
+          {
+            id: "extension-id",
+            url: tab?.url,
+            tab: tab ? { ...tab } : { id: tabId },
+            frameId: 0,
+          },
+          resolve
+        );
+      });
+    },
+    async dispatchTabUpdated(
+      tabId: number,
+      changeInfo: { status?: string; url?: string }
+    ) {
+      const current = tabsById.get(tabId) ?? { id: tabId };
+      const updated = {
+        ...current,
+        ...(changeInfo.url === undefined ? {} : { url: changeInfo.url }),
+      };
+      tabsById.set(tabId, updated);
+      if (activeTab.id === tabId) {
+        activeTab = { ...updated };
+      }
+      await chrome.tabs.onUpdated.emitAsync(tabId, changeInfo, {
+        ...updated,
+      });
+    },
+    async dispatchTabRemoved(tabId: number) {
+      tabsById.delete(tabId);
+      await chrome.tabs.onRemoved.emitAsync(tabId);
     },
     setTabMessageHandler(
       handler: (

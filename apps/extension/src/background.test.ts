@@ -150,6 +150,574 @@ describe("background security boundaries", () => {
     });
   });
 
+  it("offers a submitted login only after a successful full-page navigation", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? { ...siteMatchesResponse, matches: [] }
+        : { type: "error", message: "Unexpected request." }
+    );
+    const service = createBackgroundService(mock.chrome);
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.loginSubmitted",
+          documentToken: "a".repeat(64),
+        },
+        7
+      )
+    ).resolves.toEqual({ ok: true });
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.captureSubmittedLogin",
+        documentToken: "a".repeat(64),
+      },
+      { frameId: 0 }
+    );
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+
+    mock.setTab({ id: 7, url: "https://example.test/account" });
+    mock.setDocumentToken("b".repeat(64));
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    await mock.dispatchTabUpdated(7, { status: "complete" });
+
+    const result = await service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      mock.extensionSender
+    );
+    expect(result).toEqual({
+      ok: true,
+      response: {
+        type: "pending_login",
+        candidate: {
+          username: "sam",
+          url: "https://example.test",
+          mode: "save",
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("submitted-secret");
+    expect(mock.chrome.storage.session.set).not.toHaveBeenCalled();
+  });
+
+  it("offers a submitted login after a successful same-origin SPA transition", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? { ...siteMatchesResponse, matches: [] }
+        : { type: "error", message: "Unexpected request." }
+    );
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const service = createBackgroundService(mock.chrome);
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: { username: "sam", mode: "save" },
+      },
+    });
+  });
+
+  it("discards a submitted login when the destination shows a visible failure", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "login",
+      hasPasswordField: true,
+      hasVisibleLoginFailure: true,
+    });
+    const service = createBackgroundService(mock.chrome);
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchTabUpdated(7, { status: "complete" });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
+  });
+
+  it("retains a submitted login while the login page remains unchanged", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "login",
+      hasPasswordField: true,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? { ...siteMatchesResponse, matches: [] }
+        : { type: "error", message: "Unexpected request." }
+    );
+    const service = createBackgroundService(mock.chrome);
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchTabUpdated(7, { status: "complete" });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({ response: { candidate: null } });
+
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { username: "sam" } },
+    });
+  });
+
+  it("expires a pending login after two minutes", async () => {
+    let now = 1_000;
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const service = createBackgroundService(mock.chrome, { now: () => now });
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    now += 120_000;
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(mock.chrome.runtime.connectNative).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["tab close", async (mock: ReturnType<typeof createChromeMock>) => {
+      await mock.dispatchTabRemoved(7);
+    }],
+    ["cross-origin navigation", async (mock: ReturnType<typeof createChromeMock>) => {
+      await mock.dispatchTabUpdated(7, {
+        status: "complete",
+        url: "https://elsewhere.test/account",
+      });
+    }],
+  ])("clears a pending login on %s", async (_caseName, clearCandidate) => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await clearCandidate(mock);
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+  });
+
+  it("classifies a pending login as update only for an identical non-null username", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "person@example.test",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? siteMatchesResponse
+        : { type: "error", message: "Unexpected request." }
+    );
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "update" } },
+    });
+  });
+
+  it("does not classify two missing usernames as an update", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: null,
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "find_site_matches"
+        ? {
+            ...siteMatchesResponse,
+            matches: [{ ...siteMatchesResponse.matches[0], username: null }],
+          }
+        : { type: "error", message: "Unexpected request." }
+    );
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          username: null,
+          mode: "save",
+        },
+      },
+    });
+  });
+
+  it("dismisses a ready pending login", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "submitted-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.dismiss" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({ response: { candidate: null } });
+  });
+
+  it("saves with the background-only password and clears after native success", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "captured-user",
+      password: "background-only-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    let nativeSave: unknown;
+    mock.setNativeResponder((request) => {
+      if ((request as { type?: string }).type === "save_password_entry") {
+        nativeSave = request;
+        return { type: "save_entry", entryName: "Example account" };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLogin.save",
+          name: "Example account",
+          username: "edited-user",
+          secondaryPassword: "vault-secret",
+        },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "save_entry_result",
+        entryName: "Example account",
+      },
+    });
+    expect(nativeSave).toMatchObject({
+      type: "save_password_entry",
+      name: "Example account",
+      username: "edited-user",
+      password: "background-only-secret",
+      url: "https://example.test",
+      secondaryPassword: "vault-secret",
+    });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({ response: { candidate: null } });
+  });
+
+  it("retains a pending login when native save fails", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam",
+      password: "background-only-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "save_password_entry") {
+        return { type: "error", message: "Vault remains locked." };
+      }
+      if (type === "find_site_matches") {
+        return { ...siteMatchesResponse, matches: [] };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.save", name: "Example" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({ ok: false, error: "Vault remains locked." });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { username: "sam" } },
+    });
+  });
+
   it("discovers HTTP tabs using their canonical origin", async () => {
     const mock = createChromeMock({ id: 7, url: "http://example.test/login" });
     installHappyPathResponders(mock);
