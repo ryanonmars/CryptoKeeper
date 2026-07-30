@@ -110,6 +110,7 @@ type MessageSender = {
   url?: string;
   tab?: { id?: number; url?: string };
   frameId?: number;
+  documentId?: string;
 };
 
 type BackgroundChrome = {
@@ -991,13 +992,28 @@ export function createBackgroundService(
     now,
     options.grantTtlMs ?? MATCH_GRANT_TTL_MS
   );
-  let trustedPopupPendingLogin: PendingLogin | undefined;
+  type TrustedPopupPendingLoginSession = {
+    candidate: PendingLogin;
+    state: "active" | "invalidated";
+  };
+  let pendingTrustedPopupSession:
+    | TrustedPopupPendingLoginSession
+    | undefined;
+  const trustedPopupSessions = new Map<
+    string,
+    TrustedPopupPendingLoginSession
+  >();
   const pendingLogins = new PendingLoginStore(
     now,
     PENDING_LOGIN_TTL_MS,
     (candidate, disposition) => {
-      if (trustedPopupPendingLogin === candidate) {
-        trustedPopupPendingLogin = undefined;
+      if (pendingTrustedPopupSession?.candidate === candidate) {
+        pendingTrustedPopupSession.state = "invalidated";
+      }
+      for (const session of trustedPopupSessions.values()) {
+        if (session.candidate === candidate) {
+          session.state = "invalidated";
+        }
       }
       const message =
         disposition.type === "complete"
@@ -1605,14 +1621,43 @@ export function createBackgroundService(
 
   type PopupPendingLoginSelection = {
     candidate: PendingLogin;
-    source: "trusted-handoff" | "active-tab";
+    source:
+      | {
+          type: "trusted-session";
+          documentKey: string;
+          session: TrustedPopupPendingLoginSession;
+        }
+      | { type: "active-tab" };
   };
 
+  type PopupPendingLoginLookup =
+    | { state: "selected"; selection: PopupPendingLoginSelection }
+    | { state: "invalidated" }
+    | { state: "none" };
+
+  function trustedPopupDocumentKey(sender: MessageSender) {
+    return typeof sender.documentId === "string" &&
+      sender.documentId.length > 0
+      ? sender.documentId
+      : "legacy-popup-document";
+  }
+
   async function getPopupPendingLogin(
+    sender: MessageSender,
     requireReady: boolean
-  ): Promise<PopupPendingLoginSelection | undefined> {
-    const handedOffCandidate = trustedPopupPendingLogin;
-    if (handedOffCandidate) {
+  ): Promise<PopupPendingLoginLookup> {
+    const documentKey = trustedPopupDocumentKey(sender);
+    let session = trustedPopupSessions.get(documentKey);
+    if (!session && pendingTrustedPopupSession) {
+      session = pendingTrustedPopupSession;
+      pendingTrustedPopupSession = undefined;
+      trustedPopupSessions.set(documentKey, session);
+    }
+    if (session) {
+      if (session.state === "invalidated") {
+        return { state: "invalidated" };
+      }
+      const handedOffCandidate = session.candidate;
       const current = await getPendingLoginForTab(
         handedOffCandidate.tabId,
         handedOffCandidate.candidateId,
@@ -1620,33 +1665,46 @@ export function createBackgroundService(
       );
       if (current === handedOffCandidate) {
         return {
-          candidate: handedOffCandidate,
-          source: "trusted-handoff",
+          state: "selected",
+          selection: {
+            candidate: handedOffCandidate,
+            source: {
+              type: "trusted-session",
+              documentKey,
+              session,
+            },
+          },
         };
       }
-      if (trustedPopupPendingLogin === handedOffCandidate) {
-        trustedPopupPendingLogin = undefined;
-      }
-      return undefined;
+      session.state = "invalidated";
+      return { state: "invalidated" };
     }
     const candidate = await getActivePendingLogin(requireReady);
     return candidate === undefined
-      ? undefined
-      : { candidate, source: "active-tab" };
+      ? { state: "none" }
+      : {
+          state: "selected",
+          selection: { candidate, source: { type: "active-tab" } },
+        };
   }
 
   async function isCurrentPopupPendingLogin(
     selection: PopupPendingLoginSelection
   ) {
-    if (selection.source === "trusted-handoff") {
-      return (
-        trustedPopupPendingLogin === selection.candidate &&
+    if (selection.source.type === "trusted-session") {
+      const isCurrent =
+        selection.source.session.state === "active" &&
+        trustedPopupSessions.get(selection.source.documentKey) ===
+          selection.source.session &&
         (await getPendingLoginForTab(
           selection.candidate.tabId,
           selection.candidate.candidateId,
           true
-        )) === selection.candidate
-      );
+        )) === selection.candidate;
+      if (!isCurrent) {
+        selection.source.session.state = "invalidated";
+      }
+      return isCurrent;
     }
     return (await getActivePendingLogin(true)) === selection.candidate;
   }
@@ -1695,14 +1753,15 @@ export function createBackgroundService(
         };
   }
 
-  async function getPendingLogin() {
-    const selection = await getPopupPendingLogin(true);
-    if (!selection) {
+  async function getPendingLogin(sender: MessageSender) {
+    const lookup = await getPopupPendingLogin(sender, true);
+    if (lookup.state !== "selected") {
       return {
         ok: true as const,
         response: { type: "pending_login" as const, candidate: null },
       };
     }
+    const { selection } = lookup;
     const { candidate } = selection;
     const status = await nativeClient.request({
       type: "status",
@@ -1809,11 +1868,19 @@ export function createBackgroundService(
         };
   }
 
-  async function dismissPendingLogin() {
-    const selection = await getPopupPendingLogin(false);
+  async function dismissPendingLogin(sender: MessageSender) {
+    const lookup = await getPopupPendingLogin(sender, false);
+    if (lookup.state === "invalidated") {
+      return {
+        ok: false as const,
+        error: "No pending login is available to dismiss.",
+      };
+    }
+    const selection =
+      lookup.state === "selected" ? lookup.selection : undefined;
     if (
       selection &&
-      (selection.source === "active-tab" ||
+      (selection.source.type === "active-tab" ||
         (await isCurrentPopupPendingLogin(selection)))
     ) {
       pendingLogins.remove(selection.candidate);
@@ -1831,15 +1898,17 @@ export function createBackgroundService(
     message: Extract<
       PopupToBackgroundMessage,
       { type: "termkey.pendingLogin.save" }
-    >
+    >,
+    sender: MessageSender
   ) {
-    const selection = await getPopupPendingLogin(true);
-    if (!selection) {
+    const lookup = await getPopupPendingLogin(sender, true);
+    if (lookup.state !== "selected") {
       return {
         ok: false as const,
         error: "No pending login is available to save.",
       };
     }
+    const { selection } = lookup;
     const { candidate } = selection;
     if (pendingLoginTransactions.has(candidate)) {
       return {
@@ -1874,10 +1943,12 @@ export function createBackgroundService(
   }
 
   async function unlockAndSavePendingLogin(
-    message: Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.unlockAndSave" }>
+    message: Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.unlockAndSave" }>,
+    sender: MessageSender
   ) {
-    const selection = await getPopupPendingLogin(true);
-    if (!selection) return { ok: false as const, error: "No pending login is available to save." };
+    const lookup = await getPopupPendingLogin(sender, true);
+    if (lookup.state !== "selected") return { ok: false as const, error: "No pending login is available to save." };
+    const { selection } = lookup;
     const { candidate } = selection;
     if (pendingLoginTransactions.has(candidate)) {
       return { ok: false as const, error: "A pending login save is already in progress." };
@@ -2056,8 +2127,12 @@ export function createBackgroundService(
   }
 
   async function openPendingLoginPopup(candidate: PendingLogin) {
-    const previousCandidate = trustedPopupPendingLogin;
-    trustedPopupPendingLogin = candidate;
+    const previousSession = pendingTrustedPopupSession;
+    const session: TrustedPopupPendingLoginSession = {
+      candidate,
+      state: "active",
+    };
+    pendingTrustedPopupSession = session;
     try {
       if (typeof chromeApi.action.openPopup !== "function") {
         throw new Error("Popup API unavailable.");
@@ -2071,8 +2146,8 @@ export function createBackgroundService(
         },
       };
     } catch {
-      if (trustedPopupPendingLogin === candidate) {
-        trustedPopupPendingLogin = previousCandidate;
+      if (pendingTrustedPopupSession === session) {
+        pendingTrustedPopupSession = previousSession;
       }
       return {
         ok: true as const,
@@ -2282,7 +2357,8 @@ export function createBackgroundService(
   }
 
   async function handleTrustedMessage(
-    message: KnownPopupToBackgroundMessage
+    message: KnownPopupToBackgroundMessage,
+    sender: MessageSender
   ): Promise<PopupToBackgroundResponse> {
     switch (message.type) {
       case "termkey.nativeHost.ping":
@@ -2305,13 +2381,13 @@ export function createBackgroundService(
       case "termkey.content.inspectPageContext":
         return inspectPageContext();
       case "termkey.pendingLogin.get":
-        return getPendingLogin();
+        return getPendingLogin(sender);
       case "termkey.pendingLogin.dismiss":
-        return dismissPendingLogin();
+        return dismissPendingLogin(sender);
       case "termkey.pendingLogin.save":
-        return savePendingLogin(message);
+        return savePendingLogin(message, sender);
       case "termkey.pendingLogin.unlockAndSave":
-        return unlockAndSavePendingLogin(message);
+        return unlockAndSavePendingLogin(message, sender);
       case "termkey.passwords.generateForPage":
         return generateForPage();
       case "termkey.autofill.fillSelectedMatch":
@@ -2381,7 +2457,7 @@ export function createBackgroundService(
       return { ok: false, error: "Unsupported extension message." };
     }
     try {
-      return await handleTrustedMessage(message);
+      return await handleTrustedMessage(message, sender);
     } catch (error) {
       return {
         ok: false,

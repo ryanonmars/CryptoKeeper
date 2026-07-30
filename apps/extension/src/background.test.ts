@@ -1186,6 +1186,170 @@ describe("background security boundaries", () => {
     ).toBe(false);
   });
 
+  it("does not fall back to the active tab after a trusted popup candidate is removed", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    const nativeWrites: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      const typed = request as Record<string, unknown>;
+      nativeRequests.push(typed);
+      switch (typed.type) {
+        case "status":
+          return statusResponse;
+        case "find_site_matches":
+          return typed.url === "https://example.test"
+            ? siteMatchesResponse
+            : {
+                ...siteMatchesResponse,
+                siteUrl: "https://other.test",
+                siteOrigin: "https://other.test",
+                siteHostname: "other.test",
+                matches: [
+                  {
+                    ...siteMatchesResponse.matches[0],
+                    id: "other-entry",
+                    name: "Other account",
+                    username: "other@example.test",
+                    url: "https://other.test",
+                  },
+                ],
+              };
+        case "save_password_entry":
+        case "update_password_entry":
+          nativeWrites.push(typed);
+          return { type: "save_entry", entryName: typed.name };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "person@example.test",
+      password: "originating-secret",
+    });
+    mock.setActiveTab({ id: 8, url: "https://other.test/account" });
+    await captureReadyPendingLogin(mock, {
+      tabId: 8,
+      username: "other@example.test",
+      password: "other-tab-secret",
+    });
+    const handedOffPopupSender = {
+      ...mock.extensionSender,
+      documentId: "popup-document-a",
+    };
+    const freshToolbarPopupSender = {
+      ...mock.extensionSender,
+      documentId: "popup-document-b",
+    };
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.openPopup",
+          candidateId,
+          reason: "more-options",
+        },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { outcome: "popup-opened" },
+    });
+    const handedOffGet = await service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      handedOffPopupSender
+    );
+    const nativeRequestCountBeforeInvalidation = nativeRequests.length;
+    await mock.dispatchTabRemoved(7);
+    const invalidatedGet = await service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      handedOffPopupSender
+    );
+    const invalidatedSave = await service.handleMessage(
+      { type: "termkey.pendingLogin.save", name: "Must not save" },
+      handedOffPopupSender
+    );
+    const invalidatedUnlockAndSave = await service.handleMessage(
+      {
+        type: "termkey.pendingLogin.unlockAndSave",
+        name: "Must not save",
+        masterPassword: "master-secret",
+      },
+      handedOffPopupSender
+    );
+    const invalidatedDismiss = await service.handleMessage(
+      { type: "termkey.pendingLogin.dismiss" },
+      handedOffPopupSender
+    );
+    const writesAfterInvalidatedSave = [...nativeWrites];
+    const nativeRequestCountAfterInvalidatedOperations =
+      nativeRequests.length;
+    const freshToolbarGet = await service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      freshToolbarPopupSender
+    );
+    const freshToolbarSave = await service.handleMessage(
+      { type: "termkey.pendingLogin.save", name: "Other account" },
+      freshToolbarPopupSender
+    );
+
+    expect(handedOffGet).toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          url: "https://example.test",
+          username: "person@example.test",
+          mode: "update",
+        },
+      },
+    });
+    expect(invalidatedGet).toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(invalidatedSave).toEqual({
+      ok: false,
+      error: "No pending login is available to save.",
+    });
+    expect(invalidatedUnlockAndSave).toEqual({
+      ok: false,
+      error: "No pending login is available to save.",
+    });
+    expect(invalidatedDismiss).toEqual({
+      ok: false,
+      error: "No pending login is available to dismiss.",
+    });
+    expect(writesAfterInvalidatedSave).toEqual([]);
+    expect(nativeRequestCountAfterInvalidatedOperations).toBe(
+      nativeRequestCountBeforeInvalidation
+    );
+    expect(freshToolbarGet).toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          url: "https://other.test",
+          username: "other@example.test",
+          mode: "update",
+        },
+      },
+    });
+    expect(freshToolbarSave).toMatchObject({
+      ok: true,
+      response: {
+        type: "save_entry_result",
+        entryName: "Other account",
+      },
+    });
+    expect(nativeWrites).toEqual([
+      expect.objectContaining({
+        type: "update_password_entry",
+        id: "other-entry",
+        origin: "https://other.test",
+        password: "other-tab-secret",
+      }),
+    ]);
+  });
+
   it("rejects a direct action after the same-origin document token changes", async () => {
     const mock = createChromeMock();
     const nativeRequests: Array<Record<string, unknown>> = [];
