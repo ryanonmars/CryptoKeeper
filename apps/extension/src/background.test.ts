@@ -125,6 +125,67 @@ function grantIdFromDiscovery(result: unknown) {
   ).response.matches[0].grantId;
 }
 
+function mountedCandidateId(
+  mock: ReturnType<typeof createChromeMock>,
+  tabId = 7
+) {
+  const mount = [...mock.chrome.tabs.sendMessage.mock.calls]
+    .reverse()
+    .find(
+      ([calledTabId, message]) =>
+        calledTabId === tabId &&
+        (message as { type?: string }).type ===
+          "termkey.pendingLoginPrompt.mount"
+    );
+  if (!mount) {
+    throw new Error("Pending login prompt was not mounted.");
+  }
+  return (mount[1] as { candidateId: string }).candidateId;
+}
+
+function promptSenderFor(
+  mock: ReturnType<typeof createChromeMock>,
+  candidateId: string,
+  tabId = 7
+) {
+  return {
+    ...mock.promptSender(tabId),
+    url: `chrome-extension://extension-id/prompt.html#candidate=${candidateId}`,
+  };
+}
+
+async function captureReadyPendingLogin(
+  mock: ReturnType<typeof createChromeMock>,
+  {
+    tabId = 7,
+    documentToken = "a".repeat(64),
+    username = "captured-user",
+    password = "website-secret",
+  }: {
+    tabId?: number;
+    documentToken?: string;
+    username?: string | null;
+    password?: string;
+  } = {}
+) {
+  mock.setDocumentToken(documentToken);
+  mock.setSubmittedLogin({ ok: true, username, password });
+  mock.setPageContext({
+    intent: "unknown",
+    hasPasswordField: false,
+    hasVisibleLoginFailure: false,
+  });
+  await mock.dispatchContentMessage(
+    { type: "termkey.content.loginSubmitted", documentToken },
+    tabId
+  );
+  await mock.dispatchContentMessage(
+    { type: "termkey.content.pageContextChanged", documentToken },
+    tabId
+  );
+  return mountedCandidateId(mock, tabId);
+}
+
 describe("background security boundaries", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -211,6 +272,728 @@ describe("background security boundaries", () => {
     );
   });
 
+  it.each([
+    [
+      "popup page",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => ({
+        messageCandidateId: candidateId,
+        sender: mock.extensionSender,
+      }),
+    ],
+    [
+      "web page",
+      (
+        _mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => ({
+        messageCandidateId: candidateId,
+        sender: {
+          id: "extension-id",
+          url: "https://example.test/account",
+          tab: { id: 7, url: "https://example.test/account" },
+          frameId: 0,
+        },
+      }),
+    ],
+    [
+      "another extension",
+      (
+        _mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => ({
+        messageCandidateId: candidateId,
+        sender: {
+          id: "other-extension",
+          url: `chrome-extension://other-extension/prompt.html#candidate=${candidateId}`,
+          tab: { id: 7, url: "https://example.test/account" },
+          frameId: 1,
+        },
+      }),
+    ],
+    [
+      "wrong extension subframe URL",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => ({
+        messageCandidateId: candidateId,
+        sender: {
+          ...promptSenderFor(mock, candidateId),
+          url: `chrome-extension://extension-id/prompt.html?embedded=1#candidate=${candidateId}`,
+        },
+      }),
+    ],
+    [
+      "different tab",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => {
+        mock.setTab({ id: 8, url: "https://example.test/account" });
+        return {
+          messageCandidateId: candidateId,
+          sender: promptSenderFor(mock, candidateId, 8),
+        };
+      },
+    ],
+    [
+      "stale candidate ID",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        _candidateId: string
+      ) => ({
+        messageCandidateId: "f".repeat(64),
+        sender: promptSenderFor(mock, "f".repeat(64)),
+      }),
+    ],
+    [
+      "candidate fragment mismatch",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => ({
+        messageCandidateId: candidateId,
+        sender: promptSenderFor(mock, "f".repeat(64)),
+      }),
+    ],
+    [
+      "changed origin",
+      (
+        mock: ReturnType<typeof createChromeMock>,
+        candidateId: string
+      ) => {
+        mock.setTab({ id: 7, url: "https://elsewhere.test/account" });
+        return {
+          messageCandidateId: candidateId,
+          sender: promptSenderFor(mock, candidateId),
+        };
+      },
+    ],
+  ])("rejects prompt metadata from a %s", async (_caseName, arrangeSender) => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    const arranged = arrangeSender(mock, candidateId);
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.get",
+          candidateId: arranged.messageCandidateId,
+        },
+        arranged.sender
+      )
+    ).resolves.toMatchObject({ ok: false });
+  });
+
+  it("returns safe prompt metadata only to the exact candidate-bound prompt", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "sam@example.test",
+    });
+
+    const result = await new Promise<unknown>((resolve) => {
+      mock.runtimeOnMessage.emit(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        promptSenderFor(mock, candidateId),
+        resolve
+      );
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt",
+        candidate: {
+          candidateId,
+          origin: "https://example.test",
+          hostname: "example.test",
+          username: "sam@example.test",
+          defaultName: "example.test • sam@example.test",
+          mode: "save",
+          isHttp: false,
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("website-secret");
+    expect(mock.chrome.tabs.query).not.toHaveBeenCalled();
+  });
+
+  it("marks HTTP prompt metadata without exposing the submitted password", async () => {
+    const mock = createChromeMock({
+      id: 7,
+      url: "http://example.test/login",
+    });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : {
+            ...siteMatchesResponse,
+            siteUrl: "http://example.test",
+            siteOrigin: "http://example.test",
+            matches: [],
+          }
+    );
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+
+    const result = await service.handleMessage(
+      { type: "termkey.pendingLoginPrompt.get", candidateId },
+      promptSenderFor(mock, candidateId)
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          origin: "http://example.test",
+          isHttp: true,
+          mode: "save",
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("website-secret");
+  });
+
+  it.each([
+    [
+      "unprotected exact match",
+      statusResponse,
+      siteMatchesResponse,
+      "update",
+    ],
+    [
+      "protected exact match",
+      statusResponse,
+      {
+        ...siteMatchesResponse,
+        matches: [
+          { ...siteMatchesResponse.matches[0], hasSecondaryPassword: true },
+        ],
+      },
+      "protected-update",
+    ],
+    [
+      "locked vault",
+      { ...statusResponse, locked: true },
+      siteMatchesResponse,
+      "unlock",
+    ],
+  ])(
+    "classifies prompt metadata for an %s",
+    async (_caseName, status, matches, expectedMode) => {
+      const mock = createChromeMock();
+      mock.setNativeResponder((request) =>
+        (request as { type?: string }).type === "status" ? status : matches
+      );
+      const service = createBackgroundService(mock.chrome);
+      const candidateId = await captureReadyPendingLogin(mock, {
+        username: "person@example.test",
+      });
+
+      await expect(
+        service.handleMessage(
+          { type: "termkey.pendingLoginPrompt.get", candidateId },
+          promptSenderFor(mock, candidateId)
+        )
+      ).resolves.toMatchObject({
+        ok: true,
+        response: { candidate: { mode: expectedMode } },
+      });
+    }
+  );
+
+  it("returns resolve metadata and preserves the candidate on native lookup failure", async () => {
+    const mock = createChromeMock();
+    let failLookup = true;
+    mock.setNativeResponder((request) => {
+      if ((request as { type?: string }).type === "status") {
+        return statusResponse;
+      }
+      return failLookup
+        ? { type: "error", message: "Could not inspect saved logins." }
+        : { ...siteMatchesResponse, matches: [] };
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    const message = {
+      type: "termkey.pendingLoginPrompt.get" as const,
+      candidateId,
+    };
+    const sender = promptSenderFor(mock, candidateId);
+
+    await expect(service.handleMessage(message, sender)).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "resolve" } },
+    });
+
+    failLookup = false;
+    await expect(service.handleMessage(message, sender)).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "save" } },
+    });
+  });
+
+  it("directly saves a new login with background-owned fields", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      switch ((request as { type?: string }).type) {
+        case "status":
+          return statusResponse;
+        case "find_site_matches":
+          return { ...siteMatchesResponse, matches: [] };
+        case "save_password_entry":
+          return { type: "save_entry", entryName: "example.test • sam" };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "sam",
+    });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.save", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "saved",
+        entryName: "example.test • sam",
+      },
+    });
+    expect(nativeRequests).toContainEqual(
+      expect.objectContaining({
+        type: "save_password_entry",
+        name: "example.test • sam",
+        username: "sam",
+        password: "website-secret",
+        url: "https://example.test",
+        secondaryPassword: undefined,
+      })
+    );
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.complete",
+        candidateId,
+        outcome: "saved",
+      },
+      { frameId: 0 }
+    );
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(mock.chrome.tabs.query).toHaveBeenCalledOnce();
+  });
+
+  it("directly updates the exact unprotected match and preserves its saved name", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      switch ((request as { type?: string }).type) {
+        case "status":
+          return statusResponse;
+        case "find_site_matches":
+          return siteMatchesResponse;
+        case "update_password_entry":
+          return { type: "save_entry", entryName: "Example" };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "person@example.test",
+    });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.save", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "updated",
+        entryName: "Example",
+      },
+    });
+    expect(nativeRequests).toContainEqual(
+      expect.objectContaining({
+        type: "update_password_entry",
+        id: "entry-1",
+        origin: "https://example.test",
+        name: "Example",
+        username: "person@example.test",
+        password: "website-secret",
+        url: "https://example.test",
+        secondaryPassword: undefined,
+      })
+    );
+  });
+
+  it("hands a protected update to the popup without calling native update", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      return (request as { type?: string }).type === "status"
+        ? statusResponse
+        : {
+            ...siteMatchesResponse,
+            matches: [
+              { ...siteMatchesResponse.matches[0], hasSecondaryPassword: true },
+            ],
+          };
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "person@example.test",
+    });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.save", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "popup-opened",
+      },
+    });
+    expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
+    expect(
+      nativeRequests.some(
+        (request) => request.type === "update_password_entry"
+      )
+    ).toBe(false);
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "protected-update" } },
+    });
+  });
+
+  it("hands off when the vault locks between metadata and direct save", async () => {
+    const mock = createChromeMock();
+    let statusChecks = 0;
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      if ((request as { type?: string }).type === "status") {
+        statusChecks += 1;
+        return statusChecks === 1
+          ? statusResponse
+          : { ...statusResponse, locked: true };
+      }
+      return { ...siteMatchesResponse, matches: [] };
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    const sender = promptSenderFor(mock, candidateId);
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        sender
+      )
+    ).resolves.toMatchObject({
+      response: { candidate: { mode: "save" } },
+    });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.save", candidateId },
+        sender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { outcome: "popup-opened" },
+    });
+    expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
+    expect(
+      nativeRequests.some(
+        (request) => request.type === "save_password_entry"
+      )
+    ).toBe(false);
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        sender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "unlock" } },
+    });
+  });
+
+  it("retains a prompt candidate when direct native save fails", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      switch ((request as { type?: string }).type) {
+        case "status":
+          return statusResponse;
+        case "find_site_matches":
+          return { ...siteMatchesResponse, matches: [] };
+        case "save_password_entry":
+          return {
+            type: "error",
+            message: "Could not store website-secret.",
+          };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    const sender = promptSenderFor(mock, candidateId);
+
+    const result = await service.handleMessage(
+      { type: "termkey.pendingLoginPrompt.save", candidateId },
+      sender
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "TermKey could not save this login. Try again.",
+    });
+    expect(JSON.stringify(result)).not.toContain("website-secret");
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        sender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { candidateId } },
+    });
+  });
+
+  it("rejects concurrent direct actions for the same candidate", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      switch ((request as { type?: string }).type) {
+        case "status":
+          return undefined;
+        case "find_site_matches":
+          return { ...siteMatchesResponse, matches: [] };
+        case "save_password_entry":
+          return { type: "save_entry", entryName: "example.test" };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: null,
+    });
+    const message = {
+      type: "termkey.pendingLoginPrompt.save" as const,
+      candidateId,
+    };
+    const sender = promptSenderFor(mock, candidateId);
+
+    const first = service.handleMessage(message, sender);
+    await vi.waitFor(() => {
+      expect(
+        mock.ports.flatMap((port) =>
+          port.postMessage.mock.calls.filter(
+            ([request]) => (request as { type?: string }).type === "status"
+          )
+        )
+      ).toHaveLength(1);
+    });
+    await expect(service.handleMessage(message, sender)).resolves.toEqual({
+      ok: false,
+      error: "A pending login action is already in progress.",
+    });
+    const popupAttempt = service.handleMessage(
+      { type: "termkey.pendingLogin.save", name: "example.test" },
+      mock.extensionSender
+    );
+
+    const statusPort = mock.ports.find((port) =>
+      port.postMessage.mock.calls.some(
+        ([request]) => (request as { type?: string }).type === "status"
+      )
+    );
+    if (!statusPort) {
+      throw new Error("Status request was not sent.");
+    }
+    const statusCallIndex = statusPort.postMessage.mock.calls.findIndex(
+      ([request]) => (request as { type?: string }).type === "status"
+    );
+    statusPort.onMessage.emit(
+      correlatedResponse(statusPort, statusResponse, statusCallIndex)
+    );
+    await expect(popupAttempt).resolves.toEqual({
+      ok: false,
+      error: "A pending login action is already in progress.",
+    });
+    await expect(first).resolves.toMatchObject({
+      ok: true,
+      response: { outcome: "saved" },
+    });
+  });
+
+  it("dismisses only the candidate bound to the requesting prompt", async () => {
+    const mock = createChromeMock();
+    mock.setTab({ id: 8, url: "https://example.test/account" });
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    const service = createBackgroundService(mock.chrome);
+    const candidateId7 = await captureReadyPendingLogin(mock, {
+      tabId: 7,
+      username: "first-user",
+    });
+    const candidateId8 = await captureReadyPendingLogin(mock, {
+      tabId: 8,
+      username: "second-user",
+    });
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.dismiss",
+          candidateId: candidateId7,
+        },
+        promptSenderFor(mock, candidateId7, 7)
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "dismissed",
+      },
+    });
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.remove",
+        candidateId: candidateId7,
+      },
+      { frameId: 0 }
+    );
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId: candidateId7 },
+        promptSenderFor(mock, candidateId7, 7)
+      )
+    ).resolves.toMatchObject({ ok: false });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId: candidateId8 },
+        promptSenderFor(mock, candidateId8, 8)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { candidateId: candidateId8 } },
+    });
+  });
+
+  it("opens the trusted popup for a candidate-bound handoff", async () => {
+    const mock = createChromeMock();
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.openPopup",
+          candidateId,
+          reason: "more-options",
+        },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "popup-opened",
+      },
+    });
+    expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
+  });
+
+  it("reports a manual toolbar fallback and preserves the candidate when popup opening fails", async () => {
+    const mock = createChromeMock();
+    mock.chrome.action.openPopup.mockRejectedValue(
+      new Error("Popup API unavailable.")
+    );
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    const sender = promptSenderFor(mock, candidateId);
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.openPopup",
+          candidateId,
+          reason: "retry",
+        },
+        sender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login_prompt_result",
+        outcome: "popup-required",
+        fallbackInstruction:
+          "Click the TermKey toolbar icon to continue. This login is still available.",
+      },
+    });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        sender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { candidateId } },
+    });
+  });
+
   it("mounts one opaque prompt after a successful page transition", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({
@@ -223,7 +1006,12 @@ describe("background security boundaries", () => {
       hasPasswordField: false,
       hasVisibleLoginFailure: false,
     });
-    createBackgroundService(mock.chrome);
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    const service = createBackgroundService(mock.chrome);
 
     await mock.dispatchContentMessage(
       { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
@@ -249,6 +1037,21 @@ describe("background security boundaries", () => {
       },
       { frameId: 0 }
     );
+    const candidateId = mountedCandidateId(mock);
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          candidateId,
+          mode: "save",
+        },
+      },
+    });
     expect(JSON.stringify(mountCalls)).not.toContain("website-secret");
     expect(JSON.stringify(mountCalls)).not.toContain("sam@example.test");
   });
@@ -269,7 +1072,12 @@ describe("background security boundaries", () => {
     mock.chrome.tabs.get.mockImplementationOnce(
       () => new Promise((resolve) => { resolveTabGet = resolve; })
     );
-    createBackgroundService(mock.chrome);
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
+    const service = createBackgroundService(mock.chrome);
 
     const submitted = mock.dispatchContentMessage(
       { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
@@ -289,6 +1097,21 @@ describe("background security boundaries", () => {
       },
       { frameId: 0 }
     );
+    const candidateId = mountedCandidateId(mock);
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.get", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          candidateId,
+          mode: "save",
+        },
+      },
+    });
   });
 
   it("removes a mounted prompt when a later inspection finds an invalid login", async () => {
@@ -948,7 +1771,13 @@ describe("background security boundaries", () => {
       )
     ).resolves.toMatchObject({
       ok: true,
-      response: { candidate: { mode: "update" } },
+      response: {
+        candidate: {
+          mode: "update",
+          existingEntryName: "Example",
+          requiresSecondaryPassword: false,
+        },
+      },
     });
   });
 

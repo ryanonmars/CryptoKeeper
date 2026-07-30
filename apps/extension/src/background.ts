@@ -88,6 +88,15 @@ type PendingLoginDisposition =
   | { type: "remove" }
   | { type: "complete"; outcome: "saved" | "updated" };
 
+type PendingLoginResolution =
+  | { mode: "save" }
+  | {
+      mode: "update";
+      entryId: string;
+      entryName: string;
+      requiresSecondaryPassword: boolean;
+    };
+
 export type MatchGrant = {
   tabId: number;
   documentToken: string;
@@ -143,7 +152,7 @@ type BackgroundChrome = {
     };
   };
   action: {
-    openPopup(): Promise<unknown>;
+    openPopup?: () => Promise<unknown>;
   };
   scripting: {
     executeScript(details: {
@@ -793,6 +802,13 @@ export function canonicalizeWebOrigin(url: string) {
   return parsed.origin;
 }
 
+function defaultPendingLoginName(candidate: PendingLogin) {
+  const hostname = new URL(candidate.origin).hostname;
+  return candidate.username
+    ? `${hostname} • ${candidate.username}`
+    : hostname;
+}
+
 function isMissingContentScriptError(error: unknown) {
   if (!(error instanceof Error)) {
     return false;
@@ -822,6 +838,11 @@ type KnownPopupToBackgroundMessage = Exclude<
   { type: `termkey.pendingLoginPrompt.${string}` }
 >;
 
+type PendingLoginPromptMessage = Extract<
+  PopupToBackgroundMessage,
+  { type: `termkey.pendingLoginPrompt.${string}` }
+>;
+
 function isKnownPopupMessage(
   message: unknown
 ): message is KnownPopupToBackgroundMessage {
@@ -842,6 +863,33 @@ function isKnownPopupMessage(
     message.type === "termkey.autofill.fillSelectedMatch" ||
     message.type === "termkey.nativeHost.savePasswordEntry" ||
     message.type === "termkey.nativeHost.unlock"
+  );
+}
+
+function isPendingLoginPromptMessage(
+  message: unknown
+): message is PendingLoginPromptMessage {
+  if (
+    !isRecord(message) ||
+    typeof message.type !== "string" ||
+    typeof message.candidateId !== "string" ||
+    !/^[a-f0-9]{64}$/.test(message.candidateId)
+  ) {
+    return false;
+  }
+  if (
+    message.type === "termkey.pendingLoginPrompt.get" ||
+    message.type === "termkey.pendingLoginPrompt.save" ||
+    message.type === "termkey.pendingLoginPrompt.dismiss"
+  ) {
+    return true;
+  }
+  return (
+    message.type === "termkey.pendingLoginPrompt.openPopup" &&
+    (message.reason === "unlock" ||
+      message.reason === "secondary-password" ||
+      message.reason === "more-options" ||
+      message.reason === "retry")
   );
 }
 
@@ -897,6 +945,32 @@ export function isTrustedExtensionPageSender(
       senderUrl.host === extensionRoot.host &&
       senderUrl.username === "" &&
       senderUrl.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedPromptSender(
+  sender: MessageSender,
+  chromeApi: Pick<BackgroundChrome, "runtime">
+) {
+  if (
+    !isTrustedExtensionPageSender(sender, chromeApi) ||
+    typeof sender.tab?.id !== "number" ||
+    typeof sender.frameId !== "number" ||
+    sender.frameId === 0 ||
+    typeof sender.url !== "string"
+  ) {
+    return false;
+  }
+  try {
+    const senderUrl = new URL(sender.url);
+    const promptUrl = new URL(chromeApi.runtime.getURL("prompt.html"));
+    return (
+      senderUrl.origin === promptUrl.origin &&
+      senderUrl.pathname === promptUrl.pathname &&
+      senderUrl.search === ""
     );
   } catch {
     return false;
@@ -1525,7 +1599,11 @@ export function createBackgroundService(
     return getPendingLoginForTab(active.id, undefined, requireReady);
   }
 
-  async function resolvePendingLogin(candidate: PendingLogin) {
+  async function resolvePendingLogin(
+    candidate: PendingLogin,
+    isStillCurrent: () => Promise<boolean> = async () =>
+      (await getActivePendingLogin(true)) === candidate
+  ): Promise<PendingLoginResolution | { ok: false; error: string } | null> {
     const matches = await nativeClient.request({
       type: "find_site_matches",
       url: candidate.origin,
@@ -1542,24 +1620,27 @@ export function createBackgroundService(
         error: "Native host returned matches for a different origin.",
       };
     }
-    if ((await getActivePendingLogin(true)) !== candidate) return null;
+    if (!(await isStillCurrent())) return null;
     const matchingEntries =
       candidate.username === null
         ? []
         : matches.response.matches.filter(
             (match) => match.username === candidate.username
           );
-    candidate.updateEntryId =
-      matchingEntries.length === 1 ? matchingEntries[0].id : undefined;
-    candidate.updateEntryName =
-      matchingEntries.length === 1 ? matchingEntries[0].name : undefined;
+    const matchingEntry =
+      matchingEntries.length === 1 ? matchingEntries[0] : undefined;
+    candidate.updateEntryId = matchingEntry?.id;
+    candidate.updateEntryName = matchingEntry?.name;
     candidate.updateRequiresSecondaryPassword =
-      matchingEntries.length === 1
-        ? matchingEntries[0].hasSecondaryPassword
-        : undefined;
-    const mode: "save" | "update" =
-      candidate.updateEntryId === undefined ? "save" : "update";
-    return mode;
+      matchingEntry?.hasSecondaryPassword ?? false;
+    return matchingEntry === undefined
+      ? { mode: "save" }
+      : {
+          mode: "update",
+          entryId: matchingEntry.id,
+          entryName: matchingEntry.name,
+          requiresSecondaryPassword: matchingEntry.hasSecondaryPassword,
+        };
   }
 
   async function getPendingLogin() {
@@ -1593,14 +1674,14 @@ export function createBackgroundService(
         },
       };
     }
-    const mode = await resolvePendingLogin(candidate);
-    if (mode === null) {
+    const resolution = await resolvePendingLogin(candidate);
+    if (resolution === null) {
       return {
         ok: true as const,
         response: { type: "pending_login" as const, candidate: null },
       };
     }
-    if (typeof mode !== "string") return mode;
+    if ("ok" in resolution) return resolution;
     return {
       ok: true as const,
       response: {
@@ -1608,7 +1689,14 @@ export function createBackgroundService(
         candidate: {
           username: candidate.username,
           url: candidate.origin,
-          mode,
+          mode: resolution.mode,
+          ...(resolution.mode === "update"
+            ? {
+                existingEntryName: resolution.entryName,
+                requiresSecondaryPassword:
+                  resolution.requiresSecondaryPassword,
+              }
+            : {}),
         },
       },
     };
@@ -1678,15 +1766,26 @@ export function createBackgroundService(
         error: "No pending login is available to save.",
       };
     }
-    const response = await saveResolvedPendingLogin(candidate, message);
-    if (!response.ok) return { ok: false as const, error: response.error };
-    return {
-      ok: true as const,
-      response: {
-        type: "save_entry_result" as const,
-        entryName: response.entryName,
-      },
-    };
+    if (pendingLoginTransactions.has(candidate)) {
+      return {
+        ok: false as const,
+        error: "A pending login action is already in progress.",
+      };
+    }
+    pendingLoginTransactions.add(candidate);
+    try {
+      const response = await saveResolvedPendingLogin(candidate, message);
+      if (!response.ok) return { ok: false as const, error: response.error };
+      return {
+        ok: true as const,
+        response: {
+          type: "save_entry_result" as const,
+          entryName: response.entryName,
+        },
+      };
+    } finally {
+      pendingLoginTransactions.delete(candidate);
+    }
   }
 
   async function unlockAndSavePendingLogin(
@@ -1715,8 +1814,8 @@ export function createBackgroundService(
         unlock.response.recoveryNotice === undefined
           ? {}
           : { recoveryNotice: unlock.response.recoveryNotice };
-      const mode = await resolvePendingLogin(candidate);
-      if (mode === null) {
+      const resolution = await resolvePendingLogin(candidate);
+      if (resolution === null) {
         return {
           ok: true as const,
           response: {
@@ -1728,14 +1827,14 @@ export function createBackgroundService(
           },
         };
       }
-      if (typeof mode !== "string") {
+      if ("ok" in resolution) {
         return {
           ok: true as const,
           response: {
             type: "unlock_and_save_result" as const,
             unlocked: true,
             saved: false,
-            error: mode.error,
+            error: resolution.error,
             ...recoveryMetadata,
           },
         };
@@ -1748,7 +1847,7 @@ export function createBackgroundService(
               type: "unlock_and_save_result" as const,
               unlocked: true,
               saved: true,
-              mode,
+              mode: resolution.mode,
               entryName: save.entryName,
               ...recoveryMetadata,
             },
@@ -1759,13 +1858,284 @@ export function createBackgroundService(
               type: "unlock_and_save_result" as const,
               unlocked: true,
               saved: false,
-              mode,
+              mode: resolution.mode,
               error: save.error,
               ...recoveryMetadata,
             },
           };
     } finally {
       pendingLoginTransactions.delete(candidate);
+    }
+  }
+
+  function pendingLoginPromptMetadata(
+    candidate: PendingLogin,
+    mode: "save" | "update" | "unlock" | "protected-update" | "resolve"
+  ) {
+    const parsedOrigin = new URL(candidate.origin);
+    return {
+      candidateId: candidate.candidateId,
+      origin: candidate.origin,
+      hostname: parsedOrigin.hostname,
+      username: candidate.username,
+      defaultName: defaultPendingLoginName(candidate),
+      mode,
+      isHttp: parsedOrigin.protocol === "http:",
+    };
+  }
+
+  async function isCurrentPromptCandidate(candidate: PendingLogin) {
+    return (
+      (await getPendingLoginForTab(
+        candidate.tabId,
+        candidate.candidateId,
+        true
+      )) === candidate
+    );
+  }
+
+  async function getPendingLoginPrompt(candidate: PendingLogin) {
+    const status = await nativeClient.request({
+      type: "status",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+    });
+    if (!(await isCurrentPromptCandidate(candidate))) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt" as const,
+          candidate: null,
+        },
+      };
+    }
+    if (!status.ok || status.response.type !== "status") {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt" as const,
+          candidate: pendingLoginPromptMetadata(candidate, "resolve"),
+        },
+      };
+    }
+    if (status.response.locked) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt" as const,
+          candidate: pendingLoginPromptMetadata(candidate, "unlock"),
+        },
+      };
+    }
+    const resolution = await resolvePendingLogin(candidate, () =>
+      isCurrentPromptCandidate(candidate)
+    );
+    if (resolution === null) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt" as const,
+          candidate: null,
+        },
+      };
+    }
+    const mode =
+      "ok" in resolution
+        ? "resolve"
+        : resolution.mode === "update" &&
+            resolution.requiresSecondaryPassword
+          ? "protected-update"
+          : resolution.mode;
+    if ("ok" in resolution && !(await isCurrentPromptCandidate(candidate))) {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt" as const,
+          candidate: null,
+        },
+      };
+    }
+    return {
+      ok: true as const,
+      response: {
+        type: "pending_login_prompt" as const,
+        candidate: pendingLoginPromptMetadata(candidate, mode),
+      },
+    };
+  }
+
+  async function openPendingLoginPopup() {
+    try {
+      if (typeof chromeApi.action.openPopup !== "function") {
+        throw new Error("Popup API unavailable.");
+      }
+      await chromeApi.action.openPopup();
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt_result" as const,
+          outcome: "popup-opened" as const,
+        },
+      };
+    } catch {
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt_result" as const,
+          outcome: "popup-required" as const,
+          fallbackInstruction:
+            "Click the TermKey toolbar icon to continue. This login is still available.",
+        },
+      };
+    }
+  }
+
+  async function savePendingLoginPrompt(candidate: PendingLogin) {
+    if (
+      pendingLogins.get(candidate.tabId) !== candidate ||
+      pendingLoginTransactions.has(candidate)
+    ) {
+      return {
+        ok: false as const,
+        error: "A pending login action is already in progress.",
+      };
+    }
+    pendingLoginTransactions.add(candidate);
+    try {
+      const status = await nativeClient.request({
+        type: "status",
+        protocolVersion: NATIVE_PROTOCOL_VERSION,
+      });
+      if (!(await isCurrentPromptCandidate(candidate))) {
+        return {
+          ok: false as const,
+          error: "The pending login prompt is no longer available.",
+        };
+      }
+      if (
+        !status.ok ||
+        status.response.type !== "status" ||
+        status.response.locked
+      ) {
+        return openPendingLoginPopup();
+      }
+      const resolution = await resolvePendingLogin(candidate, () =>
+        isCurrentPromptCandidate(candidate)
+      );
+      if (resolution === null) {
+        return {
+          ok: false as const,
+          error: "The pending login prompt is no longer available.",
+        };
+      }
+      if (
+        "ok" in resolution ||
+        (resolution.mode === "update" &&
+          resolution.requiresSecondaryPassword)
+      ) {
+        if (
+          "ok" in resolution &&
+          !(await isCurrentPromptCandidate(candidate))
+        ) {
+          return {
+            ok: false as const,
+            error: "The pending login prompt is no longer available.",
+          };
+        }
+        return openPendingLoginPopup();
+      }
+      const save = await saveResolvedPendingLogin(candidate, {
+        name:
+          resolution.mode === "save"
+            ? defaultPendingLoginName(candidate)
+            : resolution.entryName,
+        username: candidate.username ?? undefined,
+        secondaryPassword: undefined,
+      });
+      if (!save.ok) {
+        return {
+          ok: false as const,
+          error: "TermKey could not save this login. Try again.",
+        };
+      }
+      return {
+        ok: true as const,
+        response: {
+          type: "pending_login_prompt_result" as const,
+          outcome: save.mode === "save" ? "saved" as const : "updated" as const,
+          entryName: save.entryName,
+        },
+      };
+    } finally {
+      pendingLoginTransactions.delete(candidate);
+    }
+  }
+
+  async function handlePendingLoginPromptMessage(
+    message: PendingLoginPromptMessage,
+    sender: MessageSender
+  ): Promise<PopupToBackgroundResponse> {
+    if (
+      !isTrustedPromptSender(sender, chromeApi) ||
+      typeof sender.url !== "string" ||
+      new URL(sender.url).hash !== `#candidate=${message.candidateId}`
+    ) {
+      return {
+        ok: false,
+        error: "Unauthorized pending login prompt sender.",
+      };
+    }
+    const tabId = sender.tab!.id!;
+    const candidate = await getPendingLoginForTab(
+      tabId,
+      message.candidateId,
+      true
+    );
+    if (!candidate) {
+      return {
+        ok: false,
+        error: "The pending login prompt is no longer available.",
+      };
+    }
+    if (pendingLogins.get(tabId) !== candidate) {
+      return {
+        ok: false,
+        error: "The pending login prompt is no longer available.",
+      };
+    }
+    switch (message.type) {
+      case "termkey.pendingLoginPrompt.get":
+        return getPendingLoginPrompt(candidate);
+      case "termkey.pendingLoginPrompt.save":
+        return savePendingLoginPrompt(candidate);
+      case "termkey.pendingLoginPrompt.dismiss":
+        if (
+          pendingLogins.get(candidate.tabId) !== candidate ||
+          pendingLoginTransactions.has(candidate)
+        ) {
+          return {
+            ok: false,
+            error: "A pending login action is already in progress.",
+          };
+        }
+        pendingLogins.remove(candidate);
+        return {
+          ok: true,
+          response: {
+            type: "pending_login_prompt_result",
+            outcome: "dismissed",
+          },
+        };
+      case "termkey.pendingLoginPrompt.openPopup":
+        if (
+          pendingLogins.get(candidate.tabId) !== candidate ||
+          pendingLoginTransactions.has(candidate)
+        ) {
+          return {
+            ok: false,
+            error: "A pending login action is already in progress.",
+          };
+        }
+        return openPendingLoginPopup();
     }
   }
 
@@ -1846,6 +2216,19 @@ export function createBackgroundService(
     message: PopupToBackgroundMessage,
     sender: MessageSender
   ): Promise<PopupToBackgroundResponse> {
+    if (isPendingLoginPromptMessage(message)) {
+      try {
+        return await handlePendingLoginPromptMessage(message, sender);
+      } catch (error) {
+        return {
+          ok: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "The pending login prompt request failed.",
+        };
+      }
+    }
     if (!isTrustedExtensionPageSender(sender, chromeApi)) {
       return {
         ok: false,
@@ -1898,9 +2281,13 @@ export function createBackgroundService(
         return true;
       }
       if (!isKnownPopupMessage(message)) {
-        return false;
+        if (!isPendingLoginPromptMessage(message)) {
+          return false;
+        }
       }
-      void service.handleMessage(message, sender).then(sendResponse);
+      void service
+        .handleMessage(message as PopupToBackgroundMessage, sender)
+        .then(sendResponse);
       return true;
     }
   );
