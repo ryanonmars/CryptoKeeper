@@ -31,6 +31,10 @@ type PendingLoginPopupOptions = {
   requiresSecondaryPassword?: boolean;
   existingEntryName?: string;
   pendingLoginGetErrors?: Array<string | undefined>;
+  handlePendingLoginGet?: (
+    requestIndex: number,
+    callback: (response: unknown) => void
+  ) => boolean;
   matches?: Array<{
     id: string;
     grantId: string;
@@ -223,7 +227,13 @@ async function openPendingLoginPopup(
           },
         });
       } else if (message.type === "termkey.pendingLogin.get") {
-        const error = options.pendingLoginGetErrors?.[pendingLoginGetCount++];
+        const requestIndex = pendingLoginGetCount++;
+        if (
+          options.handlePendingLoginGet?.(requestIndex, callback) === true
+        ) {
+          return;
+        }
+        const error = options.pendingLoginGetErrors?.[requestIndex];
         callback(
           error
             ? { ok: false, error }
@@ -966,6 +976,103 @@ it("refreshes a protected update after unlock and completes it without another s
     )
   ).toBe(false);
   expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
+});
+
+it("keeps the post-unlock refresh single-flight and ignores its late duplicate callback", async () => {
+  const deferredRefreshes: Array<(response: unknown) => void> = [];
+  const sendMessage = await openPendingLoginPopup(
+    "unlock",
+    (message, callback, _dismissCandidate, setCandidateMode) => {
+      if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        setCandidateMode("update", {
+          requiresSecondaryPassword: true,
+          existingEntryName: "Existing protected account",
+        });
+        callback({
+          ok: true,
+          response: {
+            type: "unlock_and_save_result",
+            unlocked: true,
+            saved: false,
+            mode: "update",
+            error: "Invalid secondary password.",
+          },
+        });
+      }
+    },
+    {
+      handlePendingLoginGet: (requestIndex, callback) => {
+        if (requestIndex === 0) {
+          return false;
+        }
+        deferredRefreshes.push(callback);
+        return true;
+      },
+    }
+  );
+
+  const masterPassword =
+    document.querySelector<HTMLInputElement>("#master-password");
+  const secondary = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password"
+  );
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!masterPassword || !secondary || !submit) {
+    throw new Error("Unlock refresh controls did not initialize.");
+  }
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  submit.click();
+
+  expect(submit.disabled).toBe(true);
+  expect(submit.textContent).toBe("Checking...");
+  expect(deferredRefreshes).toHaveLength(1);
+
+  submit.click();
+
+  expect(
+    sendMessage.mock.calls.filter(
+      ([request]) =>
+        (request as { type?: string }).type === "termkey.pendingLogin.get"
+    )
+  ).toHaveLength(2);
+  expect(deferredRefreshes).toHaveLength(1);
+
+  await Promise.resolve();
+  deferredRefreshes[0]({
+    ok: true,
+    response: {
+      type: "pending_login",
+      candidate: {
+        username: "sam@example.test",
+        url: "https://example.test",
+        mode: "update",
+        requiresSecondaryPassword: true,
+        existingEntryName: "Existing protected account",
+      },
+    },
+  });
+  secondary.value = "newest-current-secret";
+
+  await Promise.resolve();
+  deferredRefreshes[0]({
+    ok: true,
+    response: {
+      type: "pending_login",
+      candidate: {
+        username: "sam@example.test",
+        url: "https://example.test",
+        mode: "update",
+        requiresSecondaryPassword: true,
+        existingEntryName: "Stale protected account",
+      },
+    },
+  });
+
+  expect(
+    document.querySelector<HTMLInputElement>("#save-entry-name")?.value
+  ).toBe("Existing protected account");
+  expect(secondary.value).toBe("newest-current-secret");
 });
 
 it.each(["save", "update"] as const)(

@@ -643,6 +643,7 @@ let pendingLoginMode: "save" | "update" | "unlock" | "resolve" | null = null;
 let fillingEntryId: string | null = null;
 let generationInFlight = false;
 let saveInFlight = false;
+let pendingLoginRefreshVersion = 0;
 let backendConnected = false;
 let vaultExists = true;
 let vaultLocked = true;
@@ -839,6 +840,7 @@ function resetMatches(summaryText: string) {
 }
 
 function clearPendingSave() {
+  pendingLoginRefreshVersion += 1;
   pendingSaveCandidate = null;
   pendingLoginCandidate = null;
   pendingLoginMode = null;
@@ -1491,11 +1493,18 @@ function submitPendingSave() {
           const editedName = saveEntryNameInput.value;
           const editedUsername = saveUsernameInput.value;
           pendingLoginMode = "resolve";
+          const refreshVersion = ++pendingLoginRefreshVersion;
+          saveInFlight = true;
           renderPasswordPrompt();
           renderSavePrompt();
           updateFillButtonState();
           renderMessage("Refreshing this submitted login after unlock...");
           sendMessage({ type: "termkey.pendingLogin.get" }, (refreshResponse) => {
+            if (refreshVersion !== pendingLoginRefreshVersion) {
+              return;
+            }
+            pendingLoginRefreshVersion += 1;
+            saveInFlight = false;
             if (
               !refreshResponse.ok ||
               refreshResponse.response.type !== "pending_login"
@@ -1542,6 +1551,15 @@ function submitPendingSave() {
             ) {
               saveSecondaryPasswordInput.focus();
             }
+          }, () => {
+            if (refreshVersion !== pendingLoginRefreshVersion) {
+              return;
+            }
+            pendingLoginRefreshVersion += 1;
+            saveInFlight = false;
+            renderPasswordPrompt();
+            renderSavePrompt();
+            updateFillButtonState();
           });
           return;
         }
