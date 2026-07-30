@@ -661,6 +661,111 @@ describe("background security boundaries", () => {
     );
   });
 
+  it("keeps the direct write target immutable while delayed metadata resolution completes", async () => {
+    const mock = createChromeMock();
+    const findResolvers: Array<(response: unknown) => void> = [];
+    const nativeWrites: Array<Record<string, unknown>> = [];
+    const nativeClient = {
+      request: vi.fn((request: Record<string, unknown>) => {
+        switch (request.type) {
+          case "status":
+            return Promise.resolve({ ok: true, response: statusResponse });
+          case "find_site_matches":
+            return new Promise((resolve) => findResolvers.push(resolve));
+          case "save_password_entry":
+          case "update_password_entry":
+            nativeWrites.push(request);
+            return Promise.resolve({
+              ok: true,
+              response: { type: "save_entry", entryName: request.name },
+            });
+          default:
+            return Promise.resolve({
+              ok: false,
+              error: "Unexpected request.",
+            });
+        }
+      }),
+    } as unknown as NativeHostClient;
+    const service = createBackgroundService(mock.chrome, { nativeClient });
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "person@example.test",
+    });
+    const probeResolvers: Array<(response: unknown) => void> = [];
+    let probeCount = 0;
+    mock.setTabMessageHandler((_tabId, message) => {
+      if (
+        (message as { type?: string }).type !==
+        "termkey.contentScriptProbe"
+      ) {
+        throw new Error("Unexpected content-script message.");
+      }
+      probeCount += 1;
+      if (probeCount <= 4) {
+        return { ok: true, documentToken: "a".repeat(64) };
+      }
+      return new Promise((resolve) => probeResolvers.push(resolve));
+    });
+    const promptMessage = {
+      type: "termkey.pendingLoginPrompt.get" as const,
+      candidateId,
+    };
+    const promptSender = promptSenderFor(mock, candidateId);
+
+    const metadata = service.handleMessage(promptMessage, promptSender);
+    await vi.waitFor(() => expect(findResolvers).toHaveLength(1));
+    const directSave = service.handleMessage(
+      { type: "termkey.pendingLoginPrompt.save", candidateId },
+      promptSender
+    );
+    await vi.waitFor(() => expect(findResolvers).toHaveLength(2));
+
+    findResolvers[1]({
+      ok: true,
+      response: {
+        ...siteMatchesResponse,
+        matches: [
+          {
+            ...siteMatchesResponse.matches[0],
+            id: "direct-entry",
+            name: "Direct account",
+          },
+        ],
+      },
+    });
+    await vi.waitFor(() => expect(probeResolvers).toHaveLength(1));
+    findResolvers[0]({
+      ok: true,
+      response: { ...siteMatchesResponse, matches: [] },
+    });
+    await vi.waitFor(() => expect(probeResolvers).toHaveLength(2));
+    probeResolvers[0]({
+      ok: true,
+      documentToken: "a".repeat(64),
+    });
+    probeResolvers[1]({
+      ok: true,
+      documentToken: "a".repeat(64),
+    });
+
+    await expect(directSave).resolves.toMatchObject({
+      ok: true,
+      response: { outcome: "updated", entryName: "Direct account" },
+    });
+    await expect(metadata).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: { mode: "save" } },
+    });
+    expect(nativeWrites).toEqual([
+      expect.objectContaining({
+        type: "update_password_entry",
+        id: "direct-entry",
+        name: "Direct account",
+        password: "website-secret",
+      }),
+    ]);
+  });
+
   it("hands a protected update to the popup without calling native update", async () => {
     const mock = createChromeMock();
     const nativeRequests: Array<Record<string, unknown>> = [];
@@ -929,6 +1034,11 @@ describe("background security boundaries", () => {
 
   it("opens the trusted popup for a candidate-bound handoff", async () => {
     const mock = createChromeMock();
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : { ...siteMatchesResponse, matches: [] }
+    );
     const service = createBackgroundService(mock.chrome);
     const candidateId = await captureReadyPendingLogin(mock);
 
@@ -949,6 +1059,108 @@ describe("background security boundaries", () => {
       },
     });
     expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
+  });
+
+  it("stages the exact sender-bound candidate before opening the popup", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      const typed = request as Record<string, unknown>;
+      nativeRequests.push(typed);
+      switch (typed.type) {
+        case "status":
+          return statusResponse;
+        case "find_site_matches":
+          return siteMatchesResponse;
+        case "update_password_entry":
+          return { type: "save_entry", entryName: "Example" };
+        case "save_password_entry":
+          return { type: "error", message: "Wrong write mode." };
+        default:
+          return { type: "error", message: "Unexpected request." };
+      }
+    });
+    let nativeRequestTypesAtPopupOpen: unknown[] = [];
+    let activeTabQueriesAtPopupOpen = -1;
+    mock.chrome.action.openPopup.mockImplementation(async () => {
+      nativeRequestTypesAtPopupOpen = nativeRequests.map(
+        (request) => request.type
+      );
+      activeTabQueriesAtPopupOpen = mock.chrome.tabs.query.mock.calls.length;
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock, {
+      username: "person@example.test",
+    });
+    mock.setActiveTab({ id: 8, url: "https://other.test/account" });
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLoginPrompt.openPopup",
+          candidateId,
+          reason: "more-options",
+        },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { outcome: "popup-opened" },
+    });
+    expect(nativeRequestTypesAtPopupOpen).toEqual([
+      "status",
+      "find_site_matches",
+    ]);
+    expect(nativeRequests[1]).toMatchObject({
+      type: "find_site_matches",
+      url: "https://example.test",
+    });
+    expect(activeTabQueriesAtPopupOpen).toBe(0);
+
+    mock.setActiveTab({ id: 7, url: "https://example.test/account" });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.save", name: "Example" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { type: "save_entry_result", entryName: "Example" },
+    });
+    expect(nativeRequests).toContainEqual(
+      expect.objectContaining({
+        type: "update_password_entry",
+        id: "entry-1",
+        name: "Example",
+        password: "website-secret",
+      })
+    );
+    expect(
+      nativeRequests.some(
+        (request) => request.type === "save_password_entry"
+      )
+    ).toBe(false);
+  });
+
+  it("rejects a direct action after the same-origin document token changes", async () => {
+    const mock = createChromeMock();
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      nativeRequests.push(request as Record<string, unknown>);
+      return { type: "error", message: "Unexpected native request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+    const candidateId = await captureReadyPendingLogin(mock);
+    mock.setDocumentToken("b".repeat(64));
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLoginPrompt.save", candidateId },
+        promptSenderFor(mock, candidateId)
+      )
+    ).resolves.toMatchObject({ ok: false });
+    expect(nativeRequests).toHaveLength(0);
+    expect(mock.chrome.action.openPopup).not.toHaveBeenCalled();
   });
 
   it("reports a manual toolbar fallback and preserves the candidate when popup opening fails", async () => {

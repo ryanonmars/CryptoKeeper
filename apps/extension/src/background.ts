@@ -1704,10 +1704,10 @@ export function createBackgroundService(
 
   async function saveResolvedPendingLogin(
     candidate: PendingLogin,
+    resolution: PendingLoginResolution,
     message: Pick<Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.save" | "termkey.pendingLogin.unlockAndSave" }>, "name" | "username" | "secondaryPassword">
   ) {
-    const mode: "save" | "update" =
-      candidate.updateEntryId === undefined ? "save" : "update";
+    const mode = resolution.mode;
     const response =
       mode === "save"
         ? await nativeClient.request({
@@ -1720,7 +1720,7 @@ export function createBackgroundService(
           })
         : await nativeClient.request({
             type: "update_password_entry",
-            id: candidate.updateEntryId!,
+            id: resolution.entryId,
             origin: candidate.origin,
             name: message.name,
             username: message.username,
@@ -1737,6 +1737,21 @@ export function createBackgroundService(
       outcome: mode === "save" ? "saved" : "updated",
     });
     return { ok: true as const, mode, entryName: response.response.entryName };
+  }
+
+  function stagedPendingLoginResolution(
+    candidate: PendingLogin
+  ): PendingLoginResolution {
+    return candidate.updateEntryId === undefined ||
+      candidate.updateEntryName === undefined
+      ? { mode: "save" }
+      : {
+          mode: "update",
+          entryId: candidate.updateEntryId,
+          entryName: candidate.updateEntryName,
+          requiresSecondaryPassword:
+            candidate.updateRequiresSecondaryPassword ?? false,
+        };
   }
 
   async function dismissPendingLogin() {
@@ -1774,7 +1789,11 @@ export function createBackgroundService(
     }
     pendingLoginTransactions.add(candidate);
     try {
-      const response = await saveResolvedPendingLogin(candidate, message);
+      const response = await saveResolvedPendingLogin(
+        candidate,
+        stagedPendingLoginResolution(candidate),
+        message
+      );
       if (!response.ok) return { ok: false as const, error: response.error };
       return {
         ok: true as const,
@@ -1839,7 +1858,11 @@ export function createBackgroundService(
           },
         };
       }
-      const save = await saveResolvedPendingLogin(candidate, message);
+      const save = await saveResolvedPendingLogin(
+        candidate,
+        resolution,
+        message
+      );
       return save.ok
         ? {
             ok: true as const,
@@ -1989,6 +2012,33 @@ export function createBackgroundService(
     }
   }
 
+  async function stagePendingLoginForPopup(candidate: PendingLogin) {
+    const status = await nativeClient.request({
+      type: "status",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+    });
+    if (!(await isCurrentPromptCandidate(candidate))) {
+      return false;
+    }
+    if (
+      !status.ok ||
+      status.response.type !== "status" ||
+      status.response.locked
+    ) {
+      return true;
+    }
+    const resolution = await resolvePendingLogin(candidate, () =>
+      isCurrentPromptCandidate(candidate)
+    );
+    if (resolution === null) {
+      return false;
+    }
+    return (
+      !("ok" in resolution) ||
+      (await isCurrentPromptCandidate(candidate))
+    );
+  }
+
   async function savePendingLoginPrompt(candidate: PendingLogin) {
     if (
       pendingLogins.get(candidate.tabId) !== candidate ||
@@ -2043,14 +2093,18 @@ export function createBackgroundService(
         }
         return openPendingLoginPopup();
       }
-      const save = await saveResolvedPendingLogin(candidate, {
-        name:
-          resolution.mode === "save"
-            ? defaultPendingLoginName(candidate)
-            : resolution.entryName,
-        username: candidate.username ?? undefined,
-        secondaryPassword: undefined,
-      });
+      const save = await saveResolvedPendingLogin(
+        candidate,
+        resolution,
+        {
+          name:
+            resolution.mode === "save"
+              ? defaultPendingLoginName(candidate)
+              : resolution.entryName,
+          username: candidate.username ?? undefined,
+          secondaryPassword: undefined,
+        }
+      );
       if (!save.ok) {
         return {
           ok: false as const,
@@ -2135,7 +2189,21 @@ export function createBackgroundService(
             error: "A pending login action is already in progress.",
           };
         }
-        return openPendingLoginPopup();
+        pendingLoginTransactions.add(candidate);
+        try {
+          if (
+            !(await stagePendingLoginForPopup(candidate)) ||
+            pendingLogins.get(candidate.tabId) !== candidate
+          ) {
+            return {
+              ok: false,
+              error: "The pending login prompt is no longer available.",
+            };
+          }
+          return openPendingLoginPopup();
+        } finally {
+          pendingLoginTransactions.delete(candidate);
+        }
     }
   }
 
