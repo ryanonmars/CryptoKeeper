@@ -211,6 +211,171 @@ describe("background security boundaries", () => {
     );
   });
 
+  it("mounts one opaque prompt after a successful page transition", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam@example.test",
+      password: "website-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    createBackgroundService(mock.chrome);
+
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
+      7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) },
+      7
+    );
+
+    const mountCalls = mock.chrome.tabs.sendMessage.mock.calls.filter(
+      ([, message]) =>
+        (message as { type?: string }).type ===
+        "termkey.pendingLoginPrompt.mount"
+    );
+    expect(mountCalls).toHaveLength(1);
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.mount",
+        candidateId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        documentToken: "a".repeat(64),
+      },
+      { frameId: 0 }
+    );
+    expect(JSON.stringify(mountCalls)).not.toContain("website-secret");
+    expect(JSON.stringify(mountCalls)).not.toContain("sam@example.test");
+  });
+
+  it("uses the destination document token when an immediate same-origin reload succeeds", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam@example.test",
+      password: "website-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    let resolveTabGet!: (tab: { id: number; url: string }) => void;
+    mock.chrome.tabs.get.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveTabGet = resolve; })
+    );
+    createBackgroundService(mock.chrome);
+
+    const submitted = mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
+      7
+    );
+    mock.setTab({ id: 7, url: "https://example.test/account" });
+    mock.setDocumentToken("b".repeat(64));
+    resolveTabGet({ id: 7, url: "https://example.test/account" });
+    await submitted;
+
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.mount",
+        candidateId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        documentToken: "b".repeat(64),
+      },
+      { frameId: 0 }
+    );
+  });
+
+  it("removes a mounted prompt when a later inspection finds an invalid login", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({ ok: true, username: "sam", password: "website-secret" });
+    mock.setPageContext({ intent: "unknown", hasPasswordField: false, hasVisibleLoginFailure: false });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) }, 7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) }, 7
+    );
+    const mount = mock.chrome.tabs.sendMessage.mock.calls.find(
+      ([, message]) => (message as { type?: string }).type === "termkey.pendingLoginPrompt.mount"
+    );
+    const candidateId = (mount?.[1] as { candidateId: string }).candidateId;
+
+    mock.setPageContext({ intent: "login", hasPasswordField: true, hasVisibleLoginFailure: true });
+    await service.handleTabUpdated(7, { status: "complete" });
+
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      { type: "termkey.pendingLoginPrompt.remove", candidateId },
+      { frameId: 0 }
+    );
+  });
+
+  it("does not mount a prompt while the submitted login form is unchanged", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({ ok: true, username: "sam", password: "website-secret" });
+    mock.setPageContext({ intent: "login", hasPasswordField: true, hasVisibleLoginFailure: false });
+    createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) }, 7
+    );
+    await mock.dispatchTabUpdated(7, { status: "complete" });
+
+    expect(mock.chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ type: "termkey.pendingLoginPrompt.mount" }),
+      { frameId: 0 }
+    );
+  });
+
+  it.each([
+    ["replacement", async (mock: ReturnType<typeof createChromeMock>) => {
+      mock.setSubmittedLogin({ ok: true, username: "replacement", password: "replacement-secret" });
+      await mock.dispatchContentMessage(
+        { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) }, 7
+      );
+    }],
+    ["expiry", async (_mock: ReturnType<typeof createChromeMock>) => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    }],
+    ["tab close", async (mock: ReturnType<typeof createChromeMock>) => {
+      await mock.dispatchTabRemoved(7);
+    }],
+    ["cross-origin navigation", async (mock: ReturnType<typeof createChromeMock>) => {
+      await mock.dispatchTabUpdated(7, { url: "https://elsewhere.test/account" });
+    }],
+  ])("removes the matching mounted prompt on %s", async (_caseName, removeCandidate) => {
+    vi.useFakeTimers();
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({ ok: true, username: "sam", password: "website-secret" });
+    mock.setPageContext({ intent: "unknown", hasPasswordField: false, hasVisibleLoginFailure: false });
+    createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) }, 7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) }, 7
+    );
+    const mount = mock.chrome.tabs.sendMessage.mock.calls.find(
+      ([, message]) => (message as { type?: string }).type === "termkey.pendingLoginPrompt.mount"
+    );
+    const candidateId = (mount?.[1] as { candidateId: string }).candidateId;
+
+    await removeCandidate(mock);
+
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      { type: "termkey.pendingLoginPrompt.remove", candidateId },
+      { frameId: 0 }
+    );
+  });
+
   it("keeps directly submitted credentials when the login page reloads immediately", async () => {
     const mock = createChromeMock();
     mock.setNativeResponder((request) =>
@@ -366,7 +531,6 @@ describe("background security boundaries", () => {
       },
       7
     );
-
     await expect(
       service.handleMessage(
         { type: "termkey.pendingLogin.get" },
@@ -982,6 +1146,13 @@ describe("background security boundaries", () => {
       },
       7
     );
+    const mountedCandidateId = (
+      mock.chrome.tabs.sendMessage.mock.calls.find(
+        ([, message]) =>
+          (message as { type?: string }).type ===
+          "termkey.pendingLoginPrompt.mount"
+      )?.[1] as { candidateId: string }
+    ).candidateId;
 
     await expect(
       service.handleMessage(
@@ -1008,6 +1179,15 @@ describe("background security boundaries", () => {
       url: "https://example.test",
       secondaryPassword: "vault-secret",
     });
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.complete",
+        candidateId: mountedCandidateId,
+        outcome: "saved",
+      },
+      { frameId: 0 }
+    );
     await expect(
       service.handleMessage(
         { type: "termkey.pendingLogin.get" },
@@ -1397,6 +1577,13 @@ describe("background security boundaries", () => {
       },
       7
     );
+    const mountedCandidateId = (
+      mock.chrome.tabs.sendMessage.mock.calls.find(
+        ([, message]) =>
+          (message as { type?: string }).type ===
+          "termkey.pendingLoginPrompt.mount"
+      )?.[1] as { candidateId: string }
+    ).candidateId;
     await expect(
       service.handleMessage(
         { type: "termkey.pendingLogin.get" },
@@ -1441,6 +1628,15 @@ describe("background security boundaries", () => {
           (request as { type?: string }).type === "save_password_entry"
       )
     ).toBe(false);
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.complete",
+        candidateId: mountedCandidateId,
+        outcome: "updated",
+      },
+      { frameId: 0 }
+    );
   });
 
   it("retains a pending login when native save fails", async () => {

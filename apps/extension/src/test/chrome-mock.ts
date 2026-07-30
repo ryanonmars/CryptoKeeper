@@ -200,6 +200,9 @@ export function createChromeMock(initialTab: MockTab = {
         ]
       >(),
     },
+    action: {
+      openPopup: vi.fn(async () => undefined),
+    },
     scripting: {
       executeScript: vi.fn(async () => undefined),
     },
@@ -226,6 +229,15 @@ export function createChromeMock(initialTab: MockTab = {
     extensionSender: {
       id: "extension-id",
       url: "chrome-extension://extension-id/popup.html",
+    },
+    promptSender(tabId = 7) {
+      const tab = tabsById.get(tabId);
+      return {
+        id: "extension-id",
+        url: "chrome-extension://extension-id/prompt.html",
+        tab: tab ? { ...tab } : { id: tabId },
+        frameId: 1,
+      };
     },
     setActiveTab(tab: MockTab) {
       activeTab = { ...tab };

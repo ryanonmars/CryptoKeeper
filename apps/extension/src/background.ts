@@ -70,15 +70,23 @@ type NativeClientResponseFor<TRequest extends NativeHostRequest> =
   | { ok: false; error: string };
 
 type PendingLogin = {
+  candidateId: string;
   tabId: number;
   sourceDocumentToken: string;
+  promptDocumentToken?: string;
   origin: string;
   username: string | null;
   password: string;
   updateEntryId?: string;
+  updateEntryName?: string;
+  updateRequiresSecondaryPassword?: boolean;
   expiresAt: number;
   ready: boolean;
 };
+
+type PendingLoginDisposition =
+  | { type: "remove" }
+  | { type: "complete"; outcome: "saved" | "updated" };
 
 export type MatchGrant = {
   tabId: number;
@@ -133,6 +141,9 @@ type BackgroundChrome = {
         ) => void
       ): void;
     };
+  };
+  action: {
+    openPopup(): Promise<unknown>;
   };
   scripting: {
     executeScript(details: {
@@ -672,7 +683,11 @@ class PendingLoginStore {
 
   constructor(
     private readonly now: () => number,
-    private readonly ttlMs: number
+    private readonly ttlMs: number,
+    private readonly onRemoved: (
+      candidate: PendingLogin,
+      disposition: PendingLoginDisposition
+    ) => void
   ) {}
 
   add(
@@ -685,9 +700,11 @@ class PendingLoginStore {
     const previous = this.candidates.get(tabId);
     if (previous) {
       clearTimeout(previous.timerId);
+      this.onRemoved(previous.candidate, { type: "remove" });
       previous.candidate.password = "";
     }
     const candidate: PendingLogin = {
+      candidateId: generateOpaqueGrantId(),
       tabId,
       sourceDocumentToken,
       origin,
@@ -700,8 +717,7 @@ class PendingLoginStore {
     const timerId = setTimeout(() => {
       const current = this.candidates.get(tabId);
       if (current?.deadlineId === deadlineId) {
-        current.candidate.password = "";
-        this.candidates.delete(tabId);
+        this.remove(current.candidate);
       }
     }, this.ttlMs);
     this.candidates.set(tabId, { candidate, deadlineId, timerId });
@@ -718,24 +734,34 @@ class PendingLoginStore {
   }
 
   markReady(candidate: PendingLogin) {
-    if (this.candidates.get(candidate.tabId)?.candidate === candidate) {
+    if (
+      this.candidates.get(candidate.tabId)?.candidate === candidate &&
+      !candidate.ready
+    ) {
       candidate.ready = true;
+      return true;
     }
+    return false;
   }
 
   removeTab(tabId: number) {
     const current = this.candidates.get(tabId);
     if (current) {
       clearTimeout(current.timerId);
+      this.onRemoved(current.candidate, { type: "remove" });
       current.candidate.password = "";
     }
     this.candidates.delete(tabId);
   }
 
-  remove(candidate: PendingLogin) {
+  remove(
+    candidate: PendingLogin,
+    disposition: PendingLoginDisposition = { type: "remove" }
+  ) {
     const current = this.candidates.get(candidate.tabId);
     if (current?.candidate === candidate) {
       clearTimeout(current.timerId);
+      this.onRemoved(candidate, disposition);
       current.candidate.password = "";
       this.candidates.delete(candidate.tabId);
     }
@@ -891,7 +917,26 @@ export function createBackgroundService(
     now,
     options.grantTtlMs ?? MATCH_GRANT_TTL_MS
   );
-  const pendingLogins = new PendingLoginStore(now, PENDING_LOGIN_TTL_MS);
+  const pendingLogins = new PendingLoginStore(
+    now,
+    PENDING_LOGIN_TTL_MS,
+    (candidate, disposition) => {
+      const message =
+        disposition.type === "complete"
+          ? {
+              type: "termkey.pendingLoginPrompt.complete" as const,
+              candidateId: candidate.candidateId,
+              outcome: disposition.outcome,
+            }
+          : {
+              type: "termkey.pendingLoginPrompt.remove" as const,
+              candidateId: candidate.candidateId,
+            };
+      void chromeApi.tabs
+        .sendMessage(candidate.tabId, message, { frameId: 0 })
+        .catch(() => undefined);
+    }
+  );
   const pendingLoginTransactions = new WeakSet<PendingLogin>();
   const nativeClient =
     options.nativeClient ??
@@ -1294,7 +1339,23 @@ export function createBackgroundService(
       context.hasPasswordField !== true &&
       context.hasVisibleLoginFailure === false
     ) {
-      pendingLogins.markReady(candidate);
+      if (pendingLogins.markReady(candidate)) {
+        candidate.promptDocumentToken = context.documentToken;
+        try {
+          await chromeApi.tabs.sendMessage(
+            candidate.tabId,
+            {
+              type: "termkey.pendingLoginPrompt.mount",
+              candidateId: candidate.candidateId,
+              documentToken: context.documentToken,
+            },
+            { frameId: 0 }
+          );
+        } catch {
+          // A missing or torn-down content script leaves the toolbar popup
+          // available as the fallback for this candidate.
+        }
+      }
     }
   }
 
@@ -1403,23 +1464,24 @@ export function createBackgroundService(
     }
   }
 
-  async function getActivePendingLogin(requireReady: boolean) {
-    const tabs = await chromeApi.tabs.query({
-      active: true,
-      currentWindow: true,
-    });
-    const active = tabs[0];
-    if (typeof active?.id !== "number") {
+  async function getPendingLoginForTab(
+    tabId: number,
+    candidateId: string | undefined,
+    requireReady: boolean
+  ) {
+    const candidate = pendingLogins.get(tabId);
+    if (
+      !candidate ||
+      (candidateId !== undefined && candidate.candidateId !== candidateId) ||
+      (requireReady && !candidate.ready)
+    ) {
       return undefined;
     }
-    const candidate = pendingLogins.get(active.id);
-    if (!candidate || (requireReady && !candidate.ready)) {
-      return undefined;
-    }
+    let tab: { id?: number; url?: string };
     try {
-      const tab = await chromeApi.tabs.get(candidate.tabId);
+      tab = await chromeApi.tabs.get(tabId);
       if (
-        tab.id !== candidate.tabId ||
+        tab.id !== tabId ||
         typeof tab.url !== "string" ||
         canonicalizeWebOrigin(tab.url) !== candidate.origin
       ) {
@@ -1430,14 +1492,37 @@ export function createBackgroundService(
       pendingLogins.remove(candidate);
       return undefined;
     }
-    const current = pendingLogins.get(candidate.tabId);
+    if (candidateId !== undefined) {
+      try {
+        const currentDocumentToken = await probeDocument(tabId);
+        if (currentDocumentToken !== candidate.promptDocumentToken) {
+          return undefined;
+        }
+      } catch {
+        return undefined;
+      }
+    }
+    const current = pendingLogins.get(tabId);
     if (
       current !== candidate ||
+      (candidateId !== undefined && current.candidateId !== candidateId) ||
       (requireReady && !current.ready)
     ) {
       return undefined;
     }
     return candidate;
+  }
+
+  async function getActivePendingLogin(requireReady: boolean) {
+    const tabs = await chromeApi.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    const active = tabs[0];
+    if (typeof active?.id !== "number") {
+      return undefined;
+    }
+    return getPendingLoginForTab(active.id, undefined, requireReady);
   }
 
   async function resolvePendingLogin(candidate: PendingLogin) {
@@ -1466,6 +1551,12 @@ export function createBackgroundService(
           );
     candidate.updateEntryId =
       matchingEntries.length === 1 ? matchingEntries[0].id : undefined;
+    candidate.updateEntryName =
+      matchingEntries.length === 1 ? matchingEntries[0].name : undefined;
+    candidate.updateRequiresSecondaryPassword =
+      matchingEntries.length === 1
+        ? matchingEntries[0].hasSecondaryPassword
+        : undefined;
     const mode: "save" | "update" =
       candidate.updateEntryId === undefined ? "save" : "update";
     return mode;
@@ -1553,7 +1644,10 @@ export function createBackgroundService(
     if (response.response.type !== "save_entry") {
       return { ok: false as const, mode, error: "Native host returned the wrong response type." };
     }
-    pendingLogins.remove(candidate);
+    pendingLogins.remove(candidate, {
+      type: "complete",
+      outcome: mode === "save" ? "saved" : "updated",
+    });
     return { ok: true as const, mode, entryName: response.response.entryName };
   }
 
