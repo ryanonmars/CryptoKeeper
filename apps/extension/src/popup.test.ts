@@ -28,6 +28,9 @@ it("does not expose a manual save action", async () => {
 type PendingLoginPopupOptions = {
   canGeneratePassword?: boolean;
   hasEmptyLoginField?: boolean;
+  requiresSecondaryPassword?: boolean;
+  existingEntryName?: string;
+  pendingLoginGetErrors?: Array<string | undefined>;
   matches?: Array<{
     id: string;
     grantId: string;
@@ -144,18 +147,35 @@ async function openPendingLoginPopup(
     message: { type: string },
     callback: (response: unknown) => void,
     dismissCandidate: () => void,
-    setCandidateMode: (mode: "save" | "update" | "unlock") => void
+    setCandidateMode: (
+      mode: "save" | "update" | "unlock",
+      metadata?: {
+        requiresSecondaryPassword?: boolean;
+        existingEntryName?: string;
+      }
+    ) => void
   ) => void,
   options: PendingLoginPopupOptions = {}
 ) {
+  let pendingLoginGetCount = 0;
   let candidate: {
     username: string | null;
     url: string;
     mode: "save" | "update" | "unlock";
+    requiresSecondaryPassword?: boolean;
+    existingEntryName?: string;
   } | null = {
     username: "sam@example.test",
     url: "https://example.test",
     mode,
+    ...(options.requiresSecondaryPassword === undefined
+      ? {}
+      : {
+          requiresSecondaryPassword: options.requiresSecondaryPassword,
+        }),
+    ...(options.existingEntryName === undefined
+      ? {}
+      : { existingEntryName: options.existingEntryName }),
   };
   const sendMessage = vi.fn(
     (
@@ -203,13 +223,22 @@ async function openPendingLoginPopup(
           },
         });
       } else if (message.type === "termkey.pendingLogin.get") {
-        callback({ ok: true, response: { type: "pending_login", candidate } });
+        const error = options.pendingLoginGetErrors?.[pendingLoginGetCount++];
+        callback(
+          error
+            ? { ok: false, error }
+            : { ok: true, response: { type: "pending_login", candidate } }
+        );
       } else {
         handleMessage(message, callback, () => {
           candidate = null;
-        }, (nextMode) => {
+        }, (nextMode, metadata = {}) => {
           if (candidate) {
-            candidate.mode = nextMode;
+            candidate = {
+              ...candidate,
+              mode: nextMode,
+              ...metadata,
+            };
           }
         });
       }
@@ -601,6 +630,168 @@ it("saves a submitted login with editable metadata but never a candidate passwor
   expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
 });
 
+it("keeps More options editable and secondary-password protection optional for a new login", async () => {
+  await openPendingLoginPopup("save", () => {});
+
+  const name = document.querySelector<HTMLInputElement>("#save-entry-name");
+  const username = document.querySelector<HTMLInputElement>("#save-username");
+  const useSecondary = document.querySelector<HTMLInputElement>(
+    "#save-use-secondary-password"
+  );
+  const secondaryGroup = document.querySelector<HTMLElement>(
+    "#save-secondary-password-group"
+  );
+  const confirmation = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password-confirm"
+  );
+  if (!name || !username || !useSecondary || !secondaryGroup || !confirmation) {
+    throw new Error("Save controls did not initialize.");
+  }
+
+  expect(name.disabled).toBe(false);
+  expect(username.disabled).toBe(false);
+  expect(useSecondary.checked).toBe(false);
+  expect(useSecondary.disabled).toBe(false);
+  expect(useSecondary.nextElementSibling?.textContent).toBe(
+    "Protect this login with a secondary password"
+  );
+  expect(secondaryGroup.hidden).toBe(true);
+
+  useSecondary.checked = true;
+  useSecondary.dispatchEvent(new Event("change"));
+
+  expect(secondaryGroup.hidden).toBe(false);
+  expect(confirmation.hidden).toBe(false);
+});
+
+it("stages a protected update with its existing name and one required secondary password", async () => {
+  await openPendingLoginPopup(
+    "update",
+    () => {},
+    {
+      requiresSecondaryPassword: true,
+      existingEntryName: "Existing protected account",
+    }
+  );
+
+  const name = document.querySelector<HTMLInputElement>("#save-entry-name");
+  const useSecondary = document.querySelector<HTMLInputElement>(
+    "#save-use-secondary-password"
+  );
+  const secondaryGroup = document.querySelector<HTMLElement>(
+    "#save-secondary-password-group"
+  );
+  const confirmation = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password-confirm"
+  );
+  if (!name || !useSecondary || !secondaryGroup || !confirmation) {
+    throw new Error("Protected update controls did not initialize.");
+  }
+
+  expect(name.value).toBe("Existing protected account");
+  expect(useSecondary.checked).toBe(true);
+  expect(useSecondary.disabled).toBe(true);
+  expect(useSecondary.nextElementSibling?.textContent).toBe(
+    "Secondary password for this saved login"
+  );
+  expect(secondaryGroup.hidden).toBe(false);
+  expect(confirmation.hidden).toBe(true);
+
+  useSecondary.checked = false;
+  useSecondary.dispatchEvent(new Event("change"));
+
+  expect(useSecondary.checked).toBe(true);
+  expect(secondaryGroup.hidden).toBe(false);
+});
+
+it("keeps a protected update and its secondary-password field available after a wrong password", async () => {
+  const requests: unknown[] = [];
+  await openPendingLoginPopup(
+    "update",
+    (message, callback) => {
+      if (message.type === "termkey.pendingLogin.save") {
+        requests.push(message);
+        callback({ ok: false, error: "Invalid secondary password." });
+      }
+    },
+    {
+      requiresSecondaryPassword: true,
+      existingEntryName: "Existing protected account",
+    }
+  );
+
+  const secondary = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password"
+  );
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!secondary || !submit) {
+    throw new Error("Protected update controls did not initialize.");
+  }
+  secondary.value = "wrong-secondary-secret";
+  submit.click();
+
+  expect(requests).toEqual([
+    {
+      type: "termkey.pendingLogin.save",
+      name: "Existing protected account",
+      username: "sam@example.test",
+      secondaryPassword: "wrong-secondary-secret",
+    },
+  ]);
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(false);
+  expect(secondary.value).toBe("wrong-secondary-secret");
+  expect(secondary.disabled).toBe(false);
+  expect(document.querySelector("#native-host-status")?.textContent).toContain(
+    "Invalid secondary password."
+  );
+});
+
+it("updates a protected submitted login with one current secondary password", async () => {
+  let updateRequest: unknown;
+  await openPendingLoginPopup(
+    "update",
+    (message, callback, dismissCandidate) => {
+      if (message.type === "termkey.pendingLogin.save") {
+        updateRequest = message;
+        dismissCandidate();
+        callback({
+          ok: true,
+          response: {
+            type: "save_entry_result",
+            entryName: "Existing protected account",
+          },
+        });
+      }
+    },
+    {
+      requiresSecondaryPassword: true,
+      existingEntryName: "Existing protected account",
+    }
+  );
+
+  const secondary = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password"
+  );
+  const confirmation = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password-confirm"
+  );
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!secondary || !confirmation || !submit) {
+    throw new Error("Protected update controls did not initialize.");
+  }
+  secondary.value = "current-secondary-secret";
+  expect(confirmation.value).toBe("");
+  submit.click();
+
+  expect(updateRequest).toEqual({
+    type: "termkey.pendingLogin.save",
+    name: "Existing protected account",
+    username: "sam@example.test",
+    secondaryPassword: "current-secondary-secret",
+  });
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
+});
+
 it("offers a locked submitted login for unlock and save", async () => {
   await openPendingLoginPopup("unlock", () => {});
 
@@ -693,23 +884,25 @@ it("unlocks and saves a submitted login without exposing its website password", 
   );
 });
 
-it.each(["save", "update"] as const)(
-  "restores the ordinary %s retry after unlocking succeeds but saving fails",
-  async (mode) => {
-    const requests: Array<Record<string, unknown>> = [];
-    const recoveryNotice = "Configure a new recovery phrase.";
-    await openPendingLoginPopup("unlock", (message, callback, dismissCandidate) => {
+it("refreshes a protected update after unlock and completes it without another site login", async () => {
+  const requests: Array<Record<string, unknown>> = [];
+  const sendMessage = await openPendingLoginPopup(
+    "unlock",
+    (message, callback, dismissCandidate, setCandidateMode) => {
       requests.push(message);
       if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        setCandidateMode("update", {
+          requiresSecondaryPassword: true,
+          existingEntryName: "Existing protected account",
+        });
         callback({
           ok: true,
           response: {
             type: "unlock_and_save_result",
             unlocked: true,
             saved: false,
-            mode,
-            error: "Native save failed.",
-            recoveryNotice,
+            mode: "update",
+            error: "Invalid secondary password.",
           },
         });
       } else if (message.type === "termkey.pendingLogin.save") {
@@ -718,11 +911,97 @@ it.each(["save", "update"] as const)(
           ok: true,
           response: {
             type: "save_entry_result",
-            entryName: "Retried account",
+            entryName: "Existing protected account",
           },
         });
       }
-    });
+    }
+  );
+
+  const masterPassword =
+    document.querySelector<HTMLInputElement>("#master-password");
+  const secondary = document.querySelector<HTMLInputElement>(
+    "#save-secondary-password"
+  );
+  const useSecondary = document.querySelector<HTMLInputElement>(
+    "#save-use-secondary-password"
+  );
+  const name = document.querySelector<HTMLInputElement>("#save-entry-name");
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  if (!masterPassword || !secondary || !useSecondary || !name || !submit) {
+    throw new Error("Unlock handoff controls did not initialize.");
+  }
+  const pendingGetsBeforeUnlock = sendMessage.mock.calls.filter(
+    ([request]) =>
+      (request as { type?: string }).type === "termkey.pendingLogin.get"
+  ).length;
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  submit.click();
+
+  expect(
+    sendMessage.mock.calls.filter(
+      ([request]) =>
+        (request as { type?: string }).type === "termkey.pendingLogin.get"
+    )
+  ).toHaveLength(pendingGetsBeforeUnlock + 1);
+  expect(name.value).toBe("Existing protected account");
+  expect(useSecondary.checked).toBe(true);
+  expect(useSecondary.disabled).toBe(true);
+
+  secondary.value = "current-secondary-secret";
+  submit.click();
+
+  expect(requests.at(-1)).toEqual({
+    type: "termkey.pendingLogin.save",
+    name: "Existing protected account",
+    username: "sam@example.test",
+    secondaryPassword: "current-secondary-secret",
+  });
+  expect(
+    requests.some(
+      (request) =>
+        request.type === "termkey.content.captureSubmittedLogin" ||
+        request.type === "termkey.captureSubmittedLogin"
+    )
+  ).toBe(false);
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(true);
+});
+
+it.each(["save", "update"] as const)(
+  "restores the ordinary %s retry after unlocking succeeds but saving fails",
+  async (mode) => {
+    const requests: Array<Record<string, unknown>> = [];
+    const recoveryNotice = "Configure a new recovery phrase.";
+    await openPendingLoginPopup(
+      "unlock",
+      (message, callback, dismissCandidate, setCandidateMode) => {
+        requests.push(message);
+        if (message.type === "termkey.pendingLogin.unlockAndSave") {
+          setCandidateMode(mode);
+          callback({
+            ok: true,
+            response: {
+              type: "unlock_and_save_result",
+              unlocked: true,
+              saved: false,
+              mode,
+              error: "Native save failed.",
+              recoveryNotice,
+            },
+          });
+        } else if (message.type === "termkey.pendingLogin.save") {
+          dismissCandidate();
+          callback({
+            ok: true,
+            response: {
+              type: "save_entry_result",
+              entryName: "Retried account",
+            },
+          });
+        }
+      }
+    );
 
     const masterPassword =
       document.querySelector<HTMLInputElement>("#master-password");
@@ -803,12 +1082,10 @@ it("re-resolves an unlock result without a mode before enabling save or update",
   submit.click();
 
   expect(masterPassword.value).toBe("");
-  expect(submit.textContent).toBe("Retry match check");
+  expect(submit.textContent).toBe("Update login");
   expect(
     requests.filter((request) => request.type === "termkey.pendingLogin.save")
   ).toHaveLength(0);
-
-  submit.click();
 
   expect(sendMessage).toHaveBeenLastCalledWith(
     { type: "termkey.pendingLogin.get" },
@@ -818,6 +1095,66 @@ it("re-resolves an unlock result without a mode before enabling save or update",
     "Update the saved login for this site?"
   );
   expect(submit.textContent).toBe("Update login");
+});
+
+it("keeps the staged login through a match-resolution error and replaces it with the complete retry", async () => {
+  const sendMessage = await openPendingLoginPopup(
+    "unlock",
+    (message, callback, _dismissCandidate, setCandidateMode) => {
+      if (message.type === "termkey.pendingLogin.unlockAndSave") {
+        setCandidateMode("update", {
+          existingEntryName: "Existing protected account",
+          requiresSecondaryPassword: true,
+        });
+        callback({
+          ok: true,
+          response: {
+            type: "unlock_and_save_result",
+            unlocked: true,
+            saved: false,
+            error: "Could not inspect saved logins.",
+          },
+        });
+      }
+    },
+    {
+      pendingLoginGetErrors: [
+        undefined,
+        "Could not inspect saved logins.",
+        undefined,
+      ],
+    }
+  );
+
+  const masterPassword =
+    document.querySelector<HTMLInputElement>("#master-password");
+  const submit = document.querySelector<HTMLButtonElement>("#submit-save");
+  const name = document.querySelector<HTMLInputElement>("#save-entry-name");
+  const useSecondary = document.querySelector<HTMLInputElement>(
+    "#save-use-secondary-password"
+  );
+  if (!masterPassword || !submit || !name || !useSecondary) {
+    throw new Error("Resolve retry controls did not initialize.");
+  }
+  masterPassword.value = "master-secret";
+  masterPassword.dispatchEvent(new Event("input"));
+  submit.click();
+
+  expect(document.querySelector<HTMLElement>("#save-section")?.hidden).toBe(false);
+  expect(submit.textContent).toBe("Retry match check");
+  expect(document.querySelector("#native-host-status")?.textContent).toContain(
+    "Could not inspect saved logins."
+  );
+
+  submit.click();
+
+  expect(sendMessage).toHaveBeenLastCalledWith(
+    { type: "termkey.pendingLogin.get" },
+    expect.any(Function)
+  );
+  expect(name.value).toBe("Existing protected account");
+  expect(useSecondary.checked).toBe(true);
+  expect(useSecondary.disabled).toBe(true);
 });
 
 it("keeps the locked save prompt focused after an unlock failure", async () => {

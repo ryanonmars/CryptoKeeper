@@ -445,7 +445,7 @@ document.body.innerHTML = `
         />
         <label class="checkbox-row">
           <input id="save-use-secondary-password" type="checkbox" />
-          <span>Protect this login with a secondary password</span>
+          <span id="save-secondary-password-label">Protect this login with a secondary password</span>
         </label>
         <div id="save-secondary-password-group" class="secondary-password-group" hidden>
           <div class="password-stack">
@@ -525,6 +525,8 @@ const saveUsernameInputEl =
   document.querySelector<HTMLInputElement>("#save-username");
 const saveUseSecondaryPasswordInputEl =
   document.querySelector<HTMLInputElement>("#save-use-secondary-password");
+const saveSecondaryPasswordLabelEl =
+  document.querySelector<HTMLSpanElement>("#save-secondary-password-label");
 const saveSecondaryPasswordGroupEl =
   document.querySelector<HTMLElement>("#save-secondary-password-group");
 const saveSecondaryPasswordInputEl =
@@ -573,6 +575,7 @@ if (
   !saveEntryNameInputEl ||
   !saveUsernameInputEl ||
   !saveUseSecondaryPasswordInputEl ||
+  !saveSecondaryPasswordLabelEl ||
   !saveSecondaryPasswordGroupEl ||
   !saveSecondaryPasswordInputEl ||
   !saveSecondaryPasswordConfirmInputEl ||
@@ -610,6 +613,7 @@ const savePanelLabel = savePanelLabelEl;
 const saveEntryNameInput = saveEntryNameInputEl;
 const saveUsernameInput = saveUsernameInputEl;
 const saveUseSecondaryPasswordInput = saveUseSecondaryPasswordInputEl;
+const saveSecondaryPasswordLabel = saveSecondaryPasswordLabelEl;
 const saveSecondaryPasswordGroup = saveSecondaryPasswordGroupEl;
 const saveSecondaryPasswordInput = saveSecondaryPasswordInputEl;
 const saveSecondaryPasswordConfirmInput = saveSecondaryPasswordConfirmInputEl;
@@ -778,12 +782,12 @@ function stagePendingLogin(
   pendingSaveCandidate = null;
   pendingLoginCandidate = candidate;
   pendingLoginMode = candidate.mode;
-  saveEntryNameInput.value = suggestEntryName(
-    siteDetails.hostname,
-    candidate.username
-  );
+  saveEntryNameInput.value =
+    candidate.existingEntryName ??
+    suggestEntryName(siteDetails.hostname, candidate.username);
   saveUsernameInput.value = candidate.username ?? "";
-  saveUseSecondaryPasswordInput.checked = false;
+  saveUseSecondaryPasswordInput.checked =
+    candidate.requiresSecondaryPassword === true;
   saveSecondaryPasswordInput.value = "";
   saveSecondaryPasswordConfirmInput.value = "";
   savePanelHint.textContent =
@@ -895,12 +899,19 @@ function renderSavePrompt() {
   const activeSave =
     pendingSaveCandidate !== null || pendingLoginCandidate !== null;
   const isPendingLogin = pendingLoginCandidate !== null;
+  const isProtectedUpdate =
+    pendingLoginCandidate?.requiresSecondaryPassword === true &&
+    pendingLoginMode === "update";
   const isUnlockingPendingLogin =
     pendingLoginCandidate !== null && pendingLoginMode === "unlock";
   const isResolvingPendingLogin =
     pendingLoginCandidate !== null && pendingLoginMode === "resolve";
   saveSection.hidden = !activeSave;
   saveSecondaryPasswordGroup.hidden = !saveUseSecondaryPasswordInput.checked;
+  saveSecondaryPasswordLabel.textContent = isProtectedUpdate
+    ? "Secondary password for this saved login"
+    : "Protect this login with a secondary password";
+  saveSecondaryPasswordConfirmInput.hidden = isProtectedUpdate;
 
   if (!activeSave) {
     submitSaveButton.disabled = true;
@@ -936,9 +947,9 @@ function renderSavePrompt() {
     (isUnlockingPendingLogin && !masterPasswordInput.value);
   saveEntryNameInput.disabled = saveInFlight;
   saveUsernameInput.disabled = saveInFlight;
-  saveUseSecondaryPasswordInput.disabled = saveInFlight;
+  saveUseSecondaryPasswordInput.disabled = saveInFlight || isProtectedUpdate;
   saveSecondaryPasswordInput.disabled = saveInFlight;
-  saveSecondaryPasswordConfirmInput.disabled = saveInFlight;
+  saveSecondaryPasswordConfirmInput.disabled = saveInFlight || isProtectedUpdate;
   cancelSaveButton.disabled = saveInFlight;
   submitSaveButton.disabled = disabled;
   if (saveInFlight) {
@@ -1367,6 +1378,9 @@ function submitPendingSave() {
   const secondaryPasswordConfirm = saveUseSecondaryPasswordInput.checked
     ? saveSecondaryPasswordConfirmInput.value
     : "";
+  const isProtectedUpdate =
+    submittedLogin?.requiresSecondaryPassword === true &&
+    pendingLoginMode === "update";
 
   if (saveUseSecondaryPasswordInput.checked && !secondaryPassword) {
     renderMessage("Enter a secondary password for this login.", "error");
@@ -1376,6 +1390,7 @@ function submitPendingSave() {
 
   if (
     saveUseSecondaryPasswordInput.checked &&
+    !isProtectedUpdate &&
     secondaryPassword !== secondaryPasswordConfirm
   ) {
     renderMessage("Secondary passwords do not match.", "error");
@@ -1469,17 +1484,65 @@ function submitPendingSave() {
         masterPasswordInput.value = "";
         showRecoveryNotice(result.recoveryNotice);
         if (!result.saved) {
-          pendingLoginMode = result.mode ?? "resolve";
-          if (pendingLoginCandidate && result.mode) {
-            pendingLoginCandidate = {
-              ...pendingLoginCandidate,
-              mode: result.mode,
-            };
-          }
+          const previousCandidate = pendingLoginCandidate;
+          const previousSuggestedName = previousCandidate
+            ? suggestEntryName(siteDetails.hostname, previousCandidate.username)
+            : "";
+          const editedName = saveEntryNameInput.value;
+          const editedUsername = saveUsernameInput.value;
+          pendingLoginMode = "resolve";
           renderPasswordPrompt();
           renderSavePrompt();
           updateFillButtonState();
-          renderMessage(result.error ?? "Save failed.", "error");
+          renderMessage("Refreshing this submitted login after unlock...");
+          sendMessage({ type: "termkey.pendingLogin.get" }, (refreshResponse) => {
+            if (
+              !refreshResponse.ok ||
+              refreshResponse.response.type !== "pending_login"
+            ) {
+              renderPasswordPrompt();
+              renderSavePrompt();
+              updateFillButtonState();
+              renderMessage(
+                refreshResponse.ok
+                  ? "Background returned the wrong response type for the saved-login check."
+                  : `Saved-login check failed: ${refreshResponse.error}`,
+                "error"
+              );
+              return;
+            }
+            if (!refreshResponse.response.candidate) {
+              clearPendingSave();
+              renderPasswordPrompt();
+              renderSavePrompt();
+              updateFillButtonState();
+              renderMessage(
+                "This submitted login is no longer available.",
+                "error"
+              );
+              return;
+            }
+
+            vaultLocked = refreshResponse.response.candidate.mode === "unlock";
+            stagePendingLogin(refreshResponse.response.candidate);
+            if (editedName !== previousSuggestedName) {
+              saveEntryNameInput.value = editedName;
+            }
+            if (
+              previousCandidate &&
+              editedUsername !== (previousCandidate.username ?? "")
+            ) {
+              saveUsernameInput.value = editedUsername;
+            }
+            renderMessage(result.error ?? "Save failed.", "error");
+            if (pendingLoginMode === "unlock") {
+              masterPasswordInput.focus();
+            } else if (
+              pendingLoginCandidate?.requiresSecondaryPassword === true
+            ) {
+              saveSecondaryPasswordInput.focus();
+            }
+          });
           return;
         }
 
@@ -1777,6 +1840,14 @@ function dismissPendingLogin(onDismissed: () => void) {
 }
 
 saveUseSecondaryPasswordInput.addEventListener("change", () => {
+  if (
+    pendingLoginCandidate?.requiresSecondaryPassword === true &&
+    pendingLoginMode === "update"
+  ) {
+    saveUseSecondaryPasswordInput.checked = true;
+    renderSavePrompt();
+    return;
+  }
   if (!saveUseSecondaryPasswordInput.checked) {
     saveSecondaryPasswordInput.value = "";
     saveSecondaryPasswordConfirmInput.value = "";

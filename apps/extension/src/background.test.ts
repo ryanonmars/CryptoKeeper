@@ -2680,6 +2680,156 @@ describe("background security boundaries", () => {
     );
   });
 
+  it("retains a protected pending update after a wrong secondary password and accepts a retry", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "person@example.test",
+      password: "background-only-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    const nativeRequests: Array<Record<string, unknown>> = [];
+    mock.setNativeResponder((request) => {
+      const typed = request as Record<string, unknown>;
+      nativeRequests.push(typed);
+      if (typed.type === "status") {
+        return statusResponse;
+      }
+      if (typed.type === "find_site_matches") {
+        return {
+          ...siteMatchesResponse,
+          matches: siteMatchesResponse.matches.map((entry) => ({
+            ...entry,
+            name: "Existing protected account",
+            hasSecondaryPassword: true,
+          })),
+        };
+      }
+      if (
+        typed.type === "update_password_entry" &&
+        typed.secondaryPassword === "wrong-secondary-secret"
+      ) {
+        return { type: "error", message: "Invalid secondary password." };
+      }
+      if (
+        typed.type === "update_password_entry" &&
+        typed.secondaryPassword === "current-secondary-secret"
+      ) {
+        return {
+          type: "save_entry",
+          entryName: "Existing protected account",
+        };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          mode: "update",
+          existingEntryName: "Existing protected account",
+          requiresSecondaryPassword: true,
+        },
+      },
+    });
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLogin.save",
+          name: "Existing protected account",
+          username: "person@example.test",
+          secondaryPassword: "wrong-secondary-secret",
+        },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: "Invalid secondary password.",
+    });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        candidate: {
+          mode: "update",
+          existingEntryName: "Existing protected account",
+          requiresSecondaryPassword: true,
+        },
+      },
+    });
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.pendingLogin.save",
+          name: "Existing protected account",
+          username: "person@example.test",
+          secondaryPassword: "current-secondary-secret",
+        },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "save_entry_result",
+        entryName: "Existing protected account",
+      },
+    });
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { candidate: null },
+    });
+    expect(
+      nativeRequests.filter(
+        (request) => request.type === "update_password_entry"
+      )
+    ).toEqual([
+      expect.objectContaining({
+        password: "background-only-secret",
+        secondaryPassword: "wrong-secondary-secret",
+      }),
+      expect.objectContaining({
+        password: "background-only-secret",
+        secondaryPassword: "current-secondary-secret",
+      }),
+    ]);
+  });
+
   it("retains a pending login when native save fails", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({
