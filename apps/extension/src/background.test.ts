@@ -1061,7 +1061,7 @@ describe("background security boundaries", () => {
     expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
   });
 
-  it("stages the exact sender-bound candidate before opening the popup", async () => {
+  it("keeps popup get and save bound to the handed-off candidate after the active tab changes", async () => {
     const mock = createChromeMock();
     const nativeRequests: Array<Record<string, unknown>> = [];
     mock.setNativeResponder((request) => {
@@ -1071,9 +1071,25 @@ describe("background security boundaries", () => {
         case "status":
           return statusResponse;
         case "find_site_matches":
-          return siteMatchesResponse;
+          return typed.url === "https://example.test"
+            ? siteMatchesResponse
+            : {
+                ...siteMatchesResponse,
+                siteUrl: "https://other.test",
+                siteOrigin: "https://other.test",
+                siteHostname: "other.test",
+                matches: [
+                  {
+                    ...siteMatchesResponse.matches[0],
+                    id: "other-entry",
+                    name: "Other account",
+                    username: "other@example.test",
+                    url: "https://other.test",
+                  },
+                ],
+              };
         case "update_password_entry":
-          return { type: "save_entry", entryName: "Example" };
+          return { type: "save_entry", entryName: typed.name };
         case "save_password_entry":
           return { type: "error", message: "Wrong write mode." };
         default:
@@ -1091,8 +1107,14 @@ describe("background security boundaries", () => {
     const service = createBackgroundService(mock.chrome);
     const candidateId = await captureReadyPendingLogin(mock, {
       username: "person@example.test",
+      password: "originating-secret",
     });
     mock.setActiveTab({ id: 8, url: "https://other.test/account" });
+    await captureReadyPendingLogin(mock, {
+      tabId: 8,
+      username: "other@example.test",
+      password: "other-tab-secret",
+    });
 
     await expect(
       service.handleMessage(
@@ -1117,27 +1139,49 @@ describe("background security boundaries", () => {
     });
     expect(activeTabQueriesAtPopupOpen).toBe(0);
 
-    mock.setActiveTab({ id: 7, url: "https://example.test/account" });
-    await expect(
-      service.handleMessage(
-        { type: "termkey.pendingLogin.save", name: "Example" },
-        mock.extensionSender
-      )
-    ).resolves.toMatchObject({
+    const popupGet = await service.handleMessage(
+      { type: "termkey.pendingLogin.get" },
+      mock.extensionSender
+    );
+    const popupSave = await service.handleMessage(
+      { type: "termkey.pendingLogin.save", name: "Originating account" },
+      mock.extensionSender
+    );
+
+    expect(popupGet).toMatchObject({
       ok: true,
-      response: { type: "save_entry_result", entryName: "Example" },
+      response: {
+        candidate: {
+          url: "https://example.test",
+          username: "person@example.test",
+          mode: "update",
+        },
+      },
+    });
+    expect(JSON.stringify(popupGet)).not.toContain("originating-secret");
+    expect(JSON.stringify(popupGet)).not.toContain("other-tab-secret");
+    expect(popupSave).toMatchObject({
+      ok: true,
+      response: {
+        type: "save_entry_result",
+        entryName: "Originating account",
+      },
     });
     expect(nativeRequests).toContainEqual(
       expect.objectContaining({
         type: "update_password_entry",
         id: "entry-1",
-        name: "Example",
-        password: "website-secret",
+        origin: "https://example.test",
+        name: "Originating account",
+        password: "originating-secret",
       })
     );
     expect(
       nativeRequests.some(
-        (request) => request.type === "save_password_entry"
+        (request) =>
+          request.type === "save_password_entry" ||
+          request.password === "other-tab-secret" ||
+          request.id === "other-entry"
       )
     ).toBe(false);
   });

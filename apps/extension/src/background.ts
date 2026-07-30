@@ -991,10 +991,14 @@ export function createBackgroundService(
     now,
     options.grantTtlMs ?? MATCH_GRANT_TTL_MS
   );
+  let trustedPopupPendingLogin: PendingLogin | undefined;
   const pendingLogins = new PendingLoginStore(
     now,
     PENDING_LOGIN_TTL_MS,
     (candidate, disposition) => {
+      if (trustedPopupPendingLogin === candidate) {
+        trustedPopupPendingLogin = undefined;
+      }
       const message =
         disposition.type === "complete"
           ? {
@@ -1599,6 +1603,54 @@ export function createBackgroundService(
     return getPendingLoginForTab(active.id, undefined, requireReady);
   }
 
+  type PopupPendingLoginSelection = {
+    candidate: PendingLogin;
+    source: "trusted-handoff" | "active-tab";
+  };
+
+  async function getPopupPendingLogin(
+    requireReady: boolean
+  ): Promise<PopupPendingLoginSelection | undefined> {
+    const handedOffCandidate = trustedPopupPendingLogin;
+    if (handedOffCandidate) {
+      const current = await getPendingLoginForTab(
+        handedOffCandidate.tabId,
+        handedOffCandidate.candidateId,
+        requireReady
+      );
+      if (current === handedOffCandidate) {
+        return {
+          candidate: handedOffCandidate,
+          source: "trusted-handoff",
+        };
+      }
+      if (trustedPopupPendingLogin === handedOffCandidate) {
+        trustedPopupPendingLogin = undefined;
+      }
+      return undefined;
+    }
+    const candidate = await getActivePendingLogin(requireReady);
+    return candidate === undefined
+      ? undefined
+      : { candidate, source: "active-tab" };
+  }
+
+  async function isCurrentPopupPendingLogin(
+    selection: PopupPendingLoginSelection
+  ) {
+    if (selection.source === "trusted-handoff") {
+      return (
+        trustedPopupPendingLogin === selection.candidate &&
+        (await getPendingLoginForTab(
+          selection.candidate.tabId,
+          selection.candidate.candidateId,
+          true
+        )) === selection.candidate
+      );
+    }
+    return (await getActivePendingLogin(true)) === selection.candidate;
+  }
+
   async function resolvePendingLogin(
     candidate: PendingLogin,
     isStillCurrent: () => Promise<boolean> = async () =>
@@ -1644,18 +1696,19 @@ export function createBackgroundService(
   }
 
   async function getPendingLogin() {
-    const candidate = await getActivePendingLogin(true);
-    if (!candidate) {
+    const selection = await getPopupPendingLogin(true);
+    if (!selection) {
       return {
         ok: true as const,
         response: { type: "pending_login" as const, candidate: null },
       };
     }
+    const { candidate } = selection;
     const status = await nativeClient.request({
       type: "status",
       protocolVersion: NATIVE_PROTOCOL_VERSION,
     });
-    if ((await getActivePendingLogin(true)) !== candidate) {
+    if (!(await isCurrentPopupPendingLogin(selection))) {
       return {
         ok: true as const,
         response: { type: "pending_login" as const, candidate: null },
@@ -1674,7 +1727,9 @@ export function createBackgroundService(
         },
       };
     }
-    const resolution = await resolvePendingLogin(candidate);
+    const resolution = await resolvePendingLogin(candidate, () =>
+      isCurrentPopupPendingLogin(selection)
+    );
     if (resolution === null) {
       return {
         ok: true as const,
@@ -1755,9 +1810,13 @@ export function createBackgroundService(
   }
 
   async function dismissPendingLogin() {
-    const candidate = await getActivePendingLogin(false);
-    if (candidate) {
-      pendingLogins.remove(candidate);
+    const selection = await getPopupPendingLogin(false);
+    if (
+      selection &&
+      (selection.source === "active-tab" ||
+        (await isCurrentPopupPendingLogin(selection)))
+    ) {
+      pendingLogins.remove(selection.candidate);
     }
     return {
       ok: true as const,
@@ -1774,13 +1833,14 @@ export function createBackgroundService(
       { type: "termkey.pendingLogin.save" }
     >
   ) {
-    const candidate = await getActivePendingLogin(true);
-    if (!candidate) {
+    const selection = await getPopupPendingLogin(true);
+    if (!selection) {
       return {
         ok: false as const,
         error: "No pending login is available to save.",
       };
     }
+    const { candidate } = selection;
     if (pendingLoginTransactions.has(candidate)) {
       return {
         ok: false as const,
@@ -1789,6 +1849,12 @@ export function createBackgroundService(
     }
     pendingLoginTransactions.add(candidate);
     try {
+      if (!(await isCurrentPopupPendingLogin(selection))) {
+        return {
+          ok: false as const,
+          error: "No pending login is available to save.",
+        };
+      }
       const response = await saveResolvedPendingLogin(
         candidate,
         stagedPendingLoginResolution(candidate),
@@ -1810,8 +1876,9 @@ export function createBackgroundService(
   async function unlockAndSavePendingLogin(
     message: Extract<PopupToBackgroundMessage, { type: "termkey.pendingLogin.unlockAndSave" }>
   ) {
-    const candidate = await getActivePendingLogin(true);
-    if (!candidate) return { ok: false as const, error: "No pending login is available to save." };
+    const selection = await getPopupPendingLogin(true);
+    if (!selection) return { ok: false as const, error: "No pending login is available to save." };
+    const { candidate } = selection;
     if (pendingLoginTransactions.has(candidate)) {
       return { ok: false as const, error: "A pending login save is already in progress." };
     }
@@ -1833,7 +1900,9 @@ export function createBackgroundService(
         unlock.response.recoveryNotice === undefined
           ? {}
           : { recoveryNotice: unlock.response.recoveryNotice };
-      const resolution = await resolvePendingLogin(candidate);
+      const resolution = await resolvePendingLogin(candidate, () =>
+        isCurrentPopupPendingLogin(selection)
+      );
       if (resolution === null) {
         return {
           ok: true as const,
@@ -1986,7 +2055,9 @@ export function createBackgroundService(
     };
   }
 
-  async function openPendingLoginPopup() {
+  async function openPendingLoginPopup(candidate: PendingLogin) {
+    const previousCandidate = trustedPopupPendingLogin;
+    trustedPopupPendingLogin = candidate;
     try {
       if (typeof chromeApi.action.openPopup !== "function") {
         throw new Error("Popup API unavailable.");
@@ -2000,6 +2071,9 @@ export function createBackgroundService(
         },
       };
     } catch {
+      if (trustedPopupPendingLogin === candidate) {
+        trustedPopupPendingLogin = previousCandidate;
+      }
       return {
         ok: true as const,
         response: {
@@ -2066,7 +2140,7 @@ export function createBackgroundService(
         status.response.type !== "status" ||
         status.response.locked
       ) {
-        return openPendingLoginPopup();
+        return openPendingLoginPopup(candidate);
       }
       const resolution = await resolvePendingLogin(candidate, () =>
         isCurrentPromptCandidate(candidate)
@@ -2091,7 +2165,7 @@ export function createBackgroundService(
             error: "The pending login prompt is no longer available.",
           };
         }
-        return openPendingLoginPopup();
+        return openPendingLoginPopup(candidate);
       }
       const save = await saveResolvedPendingLogin(
         candidate,
@@ -2200,7 +2274,7 @@ export function createBackgroundService(
               error: "The pending login prompt is no longer available.",
             };
           }
-          return openPendingLoginPopup();
+          return openPendingLoginPopup(candidate);
         } finally {
           pendingLoginTransactions.delete(candidate);
         }
