@@ -36,6 +36,22 @@ type InspectPageContextMessage = {
   type: "termkey.inspectPageContext";
 };
 
+type PendingLoginPromptContentMessage =
+  | {
+      type: "termkey.pendingLoginPrompt.mount";
+      candidateId: string;
+      documentToken: string;
+    }
+  | {
+      type: "termkey.pendingLoginPrompt.remove";
+      candidateId: string;
+    }
+  | {
+      type: "termkey.pendingLoginPrompt.complete";
+      candidateId: string;
+      outcome: "saved" | "updated";
+    };
+
 type FillAttemptResult = {
   filledFields: number;
   filledUsername: boolean;
@@ -56,6 +72,7 @@ type GeneratedPasswordTargets = {
 };
 
 const FILL_RETRY_DELAYS_MS = [0, 150, 350, 700] as const;
+const PROMPT_IFRAME_ID = "termkey-pending-login-prompt";
 const DOCUMENT_TOKEN = Array.from(
   crypto.getRandomValues(new Uint8Array(32)),
   (byte) => byte.toString(16).padStart(2, "0")
@@ -67,6 +84,7 @@ const contentGlobal = globalThis as typeof globalThis & {
 let submittedLoginSnapshot: SubmittedLoginCapture | undefined;
 let submittedLoginNotification: Promise<unknown> | undefined;
 let pageContextNotificationQueued = false;
+let mountedPromptCandidateId: string | undefined;
 
 if (runtimeChrome?.runtime && contentGlobal.__termkeyContentScriptLoaded) {
   return;
@@ -79,6 +97,64 @@ function sleep(delayMs: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, delayMs);
   });
+}
+
+function isPendingLoginPromptCandidateId(candidateId: unknown) {
+  return typeof candidateId === "string" && /^[a-f0-9]{64}$/.test(candidateId);
+}
+
+function removeMountedPrompt() {
+  document.getElementById(PROMPT_IFRAME_ID)?.remove();
+  mountedPromptCandidateId = undefined;
+}
+
+function mountPendingLoginPrompt(candidateId: string) {
+  if (
+    mountedPromptCandidateId === candidateId &&
+    document.getElementById(PROMPT_IFRAME_ID)
+  ) {
+    return;
+  }
+
+  removeMountedPrompt();
+  const iframe = document.createElement("iframe");
+  iframe.id = PROMPT_IFRAME_ID;
+  iframe.src =
+    `${runtimeChrome!.runtime.getURL("prompt.html")}#candidate=${candidateId}`;
+  iframe.title = "TermKey password save prompt";
+  iframe.referrerPolicy = "no-referrer";
+  iframe.setAttribute("title", "TermKey password save prompt");
+  iframe.setAttribute("allow", "");
+  iframe.setAttribute("referrerpolicy", "no-referrer");
+  Object.assign(iframe.style, {
+    position: "fixed",
+    top: "16px",
+    right: "16px",
+    width: "min(380px, calc(100vw - 32px))",
+    height: "280px",
+    border: "0",
+    background: "transparent",
+    zIndex: "2147483647",
+  });
+  mountedPromptCandidateId = candidateId;
+  document.documentElement.append(iframe);
+}
+
+function removePendingLoginPrompt(candidateId: string) {
+  if (mountedPromptCandidateId === candidateId) {
+    removeMountedPrompt();
+  }
+}
+
+function completePendingLoginPrompt(
+  candidateId: string,
+  _outcome: "saved" | "updated"
+) {
+  if (mountedPromptCandidateId !== candidateId) {
+    return;
+  }
+
+  window.setTimeout(() => removePendingLoginPrompt(candidateId), 900);
 }
 
 function getInputType(input: HTMLInputElement) {
@@ -1058,7 +1134,8 @@ runtimeChrome?.runtime?.onMessage?.addListener(
       | FillGeneratedPasswordMessage
       | ContentScriptProbeMessage
       | CaptureSubmittedLoginMessage
-      | InspectPageContextMessage,
+      | InspectPageContextMessage
+      | PendingLoginPromptContentMessage,
     sender: { id?: string },
     sendResponse: (response: unknown) => void
   ) => {
@@ -1069,6 +1146,33 @@ runtimeChrome?.runtime?.onMessage?.addListener(
     if (message?.type === "termkey.contentScriptProbe") {
       sendResponse({ ok: true, documentToken: DOCUMENT_TOKEN });
       return true;
+    }
+
+    if (message?.type === "termkey.pendingLoginPrompt.mount") {
+      if (
+        isPendingLoginPromptCandidateId(message.candidateId) &&
+        message.documentToken === DOCUMENT_TOKEN
+      ) {
+        mountPendingLoginPrompt(message.candidateId);
+      }
+      return false;
+    }
+
+    if (message?.type === "termkey.pendingLoginPrompt.remove") {
+      if (isPendingLoginPromptCandidateId(message.candidateId)) {
+        removePendingLoginPrompt(message.candidateId);
+      }
+      return false;
+    }
+
+    if (message?.type === "termkey.pendingLoginPrompt.complete") {
+      if (
+        isPendingLoginPromptCandidateId(message.candidateId) &&
+        (message.outcome === "saved" || message.outcome === "updated")
+      ) {
+        completePendingLoginPrompt(message.candidateId, message.outcome);
+      }
+      return false;
     }
 
     if (
@@ -1201,6 +1305,7 @@ if (runtimeChrome?.runtime) {
   wrapHistoryMethod("replaceState");
   window.addEventListener("popstate", schedulePageContextChanged);
   window.addEventListener("hashchange", schedulePageContextChanged);
+  window.addEventListener("pagehide", removeMountedPrompt, { once: true });
   new MutationObserver(schedulePageContextChanged).observe(document, {
     childList: true,
     subtree: true,

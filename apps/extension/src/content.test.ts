@@ -46,6 +46,7 @@ beforeEach(async () => {
   vi.stubGlobal("chrome", {
     runtime: {
       id: "extension-id",
+      getURL: (path: string) => `chrome-extension://extension-id/${path}`,
       onMessage,
       sendMessage,
     },
@@ -59,6 +60,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   document.body.innerHTML = "";
+  document.getElementById("termkey-pending-login-prompt")?.remove();
   vi.unstubAllGlobals();
 });
 
@@ -124,6 +126,138 @@ it("selects the current password in a login form", async () => {
   expect(input("#login-username").value).toBe("person@example.test");
   expect(input("#login-current").value).toBe("login-secret");
   expect(input("#login-otp").value).toBe("");
+});
+
+it("mounts an isolated pending-login prompt iframe", () => {
+  const candidateId = "b".repeat(64);
+  const message = {
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId,
+    documentToken,
+  };
+
+  expect(message).not.toHaveProperty("username");
+  expect(message).not.toHaveProperty("password");
+  dispatch(message);
+
+  const iframe = document.querySelector<HTMLIFrameElement>(
+    "#termkey-pending-login-prompt"
+  );
+  expect(iframe?.src).toBe(
+    `chrome-extension://extension-id/prompt.html#candidate=${candidateId}`
+  );
+  expect(iframe?.style.position).toBe("fixed");
+  expect(iframe?.style.zIndex).toBe("2147483647");
+  expect(iframe?.getAttribute("title")).toBe("TermKey password save prompt");
+  expect(iframe?.getAttribute("allow")).toBe("");
+  expect(iframe?.getAttribute("referrerpolicy")).toBe("no-referrer");
+});
+
+it("does not mount a pending-login prompt for a stale document token", () => {
+  dispatch({
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId: "b".repeat(64),
+    documentToken: "a".repeat(64),
+  });
+
+  expect(document.querySelector("#termkey-pending-login-prompt")).toBeNull();
+});
+
+it("does not duplicate a pending-login prompt for the same candidate", () => {
+  const message = {
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId: "b".repeat(64),
+    documentToken,
+  };
+
+  dispatch(message);
+  const original = document.querySelector("#termkey-pending-login-prompt");
+  dispatch(message);
+
+  expect(
+    document.querySelectorAll("#termkey-pending-login-prompt")
+  ).toHaveLength(1);
+  expect(document.querySelector("#termkey-pending-login-prompt")).toBe(original);
+});
+
+it("replaces a pending-login prompt for a different candidate", () => {
+  dispatch({
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId: "b".repeat(64),
+    documentToken,
+  });
+  const original = document.querySelector("#termkey-pending-login-prompt");
+  const candidateId = "c".repeat(64);
+
+  dispatch({
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId,
+    documentToken,
+  });
+
+  const replacement = document.querySelector<HTMLIFrameElement>(
+    "#termkey-pending-login-prompt"
+  );
+  expect(replacement).not.toBe(original);
+  expect(replacement?.src).toBe(
+    `chrome-extension://extension-id/prompt.html#candidate=${candidateId}`
+  );
+});
+
+it("removes only the pending-login prompt for its matching candidate", () => {
+  const candidateId = "b".repeat(64);
+  dispatch({
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId,
+    documentToken,
+  });
+
+  dispatch({
+    type: "termkey.pendingLoginPrompt.remove",
+    candidateId: "c".repeat(64),
+  });
+  expect(document.querySelector("#termkey-pending-login-prompt")).not.toBeNull();
+
+  dispatch({
+    type: "termkey.pendingLoginPrompt.remove",
+    candidateId,
+  });
+  expect(document.querySelector("#termkey-pending-login-prompt")).toBeNull();
+});
+
+it("keeps a completed pending-login prompt mounted before removing it", () => {
+  vi.useFakeTimers();
+  const candidateId = "b".repeat(64);
+  dispatch({
+    type: "termkey.pendingLoginPrompt.mount",
+    candidateId,
+    documentToken,
+  });
+
+  dispatch({
+    type: "termkey.pendingLoginPrompt.complete",
+    candidateId,
+    outcome: "saved",
+  });
+  expect(document.querySelector("#termkey-pending-login-prompt")).not.toBeNull();
+
+  vi.advanceTimersByTime(899);
+  expect(document.querySelector("#termkey-pending-login-prompt")).not.toBeNull();
+  vi.advanceTimersByTime(1);
+  expect(document.querySelector("#termkey-pending-login-prompt")).toBeNull();
+});
+
+it("rejects a pending-login prompt command from another extension", () => {
+  dispatch(
+    {
+      type: "termkey.pendingLoginPrompt.mount",
+      candidateId: "b".repeat(64),
+      documentToken,
+    },
+    { id: "another-extension-id" }
+  );
+
+  expect(document.querySelector("#termkey-pending-login-prompt")).toBeNull();
 });
 
 it("selects both new-password fields in a signup form", () => {
