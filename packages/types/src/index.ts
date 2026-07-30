@@ -145,6 +145,8 @@ export type PopupPendingLoginResponse = {
     username: string | null;
     url: string;
     mode: "save" | "update" | "unlock";
+    requiresSecondaryPassword?: boolean;
+    existingEntryName?: string;
   } | null;
 };
 
@@ -170,6 +172,59 @@ export type PopupSaveResultResponse = {
   type: "save_entry_result";
   entryName: string;
 };
+
+export type PendingLoginPromptMode =
+  | "save"
+  | "update"
+  | "unlock"
+  | "protected-update"
+  | "resolve";
+
+export type PendingLoginPromptMetadata = {
+  candidateId: string;
+  origin: string;
+  hostname: string;
+  username: string | null;
+  defaultName: string;
+  mode: PendingLoginPromptMode;
+  isHttp: boolean;
+};
+
+export type PendingLoginPromptToBackgroundMessage =
+  | {
+      type: "termkey.pendingLoginPrompt.get";
+      candidateId: string;
+    }
+  | {
+      type: "termkey.pendingLoginPrompt.save";
+      candidateId: string;
+    }
+  | {
+      type: "termkey.pendingLoginPrompt.dismiss";
+      candidateId: string;
+    }
+  | {
+      type: "termkey.pendingLoginPrompt.openPopup";
+      candidateId: string;
+      reason: "unlock" | "secondary-password" | "more-options" | "retry";
+    };
+
+export type PendingLoginPromptActionResponse =
+  | {
+      type: "pending_login_prompt";
+      candidate: PendingLoginPromptMetadata | null;
+    }
+  | {
+      type: "pending_login_prompt_result";
+      outcome:
+        | "saved"
+        | "updated"
+        | "dismissed"
+        | "popup-opened"
+        | "popup-required";
+      entryName?: string;
+      fallbackInstruction?: string;
+    };
 
 export type PopupUnlockAndSaveResponse = {
   type: "unlock_and_save_result";
@@ -221,6 +276,7 @@ export type NativeHostResponse = (
 };
 
 export type PopupToBackgroundMessage =
+  | PendingLoginPromptToBackgroundMessage
   | {
       type: "termkey.nativeHost.ping";
     }
@@ -288,7 +344,8 @@ export type PopupToBackgroundResponse =
         | PopupGeneratedPasswordResponse
         | PopupFillResultResponse
         | PopupSaveResultResponse
-        | PopupUnlockAndSaveResponse;
+        | PopupUnlockAndSaveResponse
+        | PendingLoginPromptActionResponse;
     }
   | {
       ok: false;

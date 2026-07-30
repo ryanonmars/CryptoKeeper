@@ -791,9 +791,14 @@ function parseDocumentToken(response: unknown) {
   return response.documentToken;
 }
 
+type KnownPopupToBackgroundMessage = Exclude<
+  PopupToBackgroundMessage,
+  { type: `termkey.pendingLoginPrompt.${string}` }
+>;
+
 function isKnownPopupMessage(
   message: unknown
-): message is PopupToBackgroundMessage {
+): message is KnownPopupToBackgroundMessage {
   if (!isRecord(message) || typeof message.type !== "string") {
     return false;
   }
@@ -1671,7 +1676,7 @@ export function createBackgroundService(
   }
 
   async function handleTrustedMessage(
-    message: PopupToBackgroundMessage
+    message: KnownPopupToBackgroundMessage
   ): Promise<PopupToBackgroundResponse> {
     switch (message.type) {
       case "termkey.nativeHost.ping":

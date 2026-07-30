@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { PopupPendingLoginResponse } from "@termkey/types";
+import type {
+  PendingLoginPromptMetadata,
+  PopupPendingLoginResponse,
+} from "@termkey/types";
 
 import {
   NATIVE_REQUEST_TIMEOUT_MS,
@@ -169,6 +172,8 @@ describe("background security boundaries", () => {
           username: string | null;
           url: string;
           mode: "save" | "update" | "unlock";
+          requiresSecondaryPassword?: boolean;
+          existingEntryName?: string;
         }
       | null
     >();
@@ -185,6 +190,25 @@ describe("background security boundaries", () => {
       ok: true,
       response: { type: "pending_login", candidate: null },
     });
+  });
+
+  it("keeps in-page prompt metadata free of submitted passwords", () => {
+    expectTypeOf<PendingLoginPromptMetadata>().toMatchTypeOf<{
+      candidateId: string;
+      origin: string;
+      hostname: string;
+      username: string | null;
+      defaultName: string;
+      mode: "save" | "update" | "unlock" | "protected-update" | "resolve";
+      isHttp: boolean;
+    }>();
+    expectTypeOf<PendingLoginPromptMetadata>().not.toHaveProperty("password");
+    expectTypeOf<PendingLoginPromptMetadata>().not.toHaveProperty(
+      "masterPassword"
+    );
+    expectTypeOf<PendingLoginPromptMetadata>().not.toHaveProperty(
+      "secondaryPassword"
+    );
   });
 
   it("keeps directly submitted credentials when the login page reloads immediately", async () => {
