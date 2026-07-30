@@ -926,6 +926,36 @@ function captureClickedLogin(button: HTMLElement): SubmittedLoginCapture {
   return captureSubmittedLoginFromInputs(inputs);
 }
 
+function notifySubmittedLogin(snapshot: SubmittedLoginCapture | undefined) {
+  const message = snapshot?.ok
+    ? {
+        type: "termkey.content.loginSubmitted" as const,
+        documentToken: DOCUMENT_TOKEN,
+        username: snapshot.username,
+        password: snapshot.password,
+      }
+    : {
+        type: "termkey.content.loginSubmitted" as const,
+        documentToken: DOCUMENT_TOKEN,
+      };
+  const notification = runtimeChrome?.runtime?.sendMessage?.(message);
+  if (
+    notification &&
+    typeof (notification as PromiseLike<unknown>).then === "function"
+  ) {
+    const settled = Promise.resolve(notification).catch(() => undefined);
+    submittedLoginNotification = settled;
+    void settled.finally(() => {
+      if (submittedLoginNotification === settled) {
+        submittedLoginNotification = undefined;
+      }
+      if (submittedLoginSnapshot === snapshot) {
+        submittedLoginSnapshot = undefined;
+      }
+    });
+  }
+}
+
 function fillGeneratedPassword(message: FillGeneratedPasswordMessage) {
   const inputs = collectInputElements();
   const {
@@ -1139,25 +1169,7 @@ document.addEventListener(
         ? captureSubmittedLogin(event.target)
         : undefined;
     submittedLoginSnapshot = snapshot;
-    const notification = runtimeChrome?.runtime?.sendMessage?.({
-      type: "termkey.content.loginSubmitted",
-      documentToken: DOCUMENT_TOKEN,
-    });
-    if (
-      notification &&
-      typeof (notification as PromiseLike<unknown>).then === "function"
-    ) {
-      const settled = Promise.resolve(notification).catch(() => undefined);
-      submittedLoginNotification = settled;
-      void settled.finally(() => {
-        if (submittedLoginNotification === settled) {
-          submittedLoginNotification = undefined;
-        }
-        if (submittedLoginSnapshot === snapshot) {
-          submittedLoginSnapshot = undefined;
-        }
-      });
-    }
+    notifySubmittedLogin(snapshot);
   },
   true
 );
@@ -1179,18 +1191,7 @@ document.addEventListener(
       return;
     }
     submittedLoginSnapshot = snapshot;
-    const notification = runtimeChrome?.runtime?.sendMessage?.({
-      type: "termkey.content.loginSubmitted",
-      documentToken: DOCUMENT_TOKEN,
-    });
-    if (notification && typeof (notification as PromiseLike<unknown>).then === "function") {
-      const settled = Promise.resolve(notification).catch(() => undefined);
-      submittedLoginNotification = settled;
-      void settled.finally(() => {
-        if (submittedLoginNotification === settled) submittedLoginNotification = undefined;
-        if (submittedLoginSnapshot === snapshot) submittedLoginSnapshot = undefined;
-      });
-    }
+    notifySubmittedLogin(snapshot);
   },
   true
 );

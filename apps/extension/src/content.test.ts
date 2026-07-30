@@ -480,7 +480,7 @@ it("ignores empty ineligible decoys beside a filled eligible login form", () => 
   });
 });
 
-it("notifies the background of a submitted login without credentials", () => {
+it("notifies the background with submitted credentials", () => {
   document.body.innerHTML = `
     <form>
       <input autocomplete="username" value="sam">
@@ -497,11 +497,12 @@ it("notifies the background of a submitted login without credentials", () => {
   expect(sendMessage).toHaveBeenCalledWith({
     type: "termkey.content.loginSubmitted",
     documentToken,
+    username: "sam",
+    password: "secret",
   });
-  expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
 });
 
-it("snapshots submitted credentials before a site handler clears the form", () => {
+it("sends submitted credentials before a site handler clears the form", () => {
   document.body.innerHTML = `
     <form>
       <input autocomplete="username" value="sam">
@@ -519,14 +520,12 @@ it("snapshots submitted credentials before a site handler clears the form", () =
   form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 
   expect(document.querySelector("form")).toBeNull();
-  expect(
-    dispatch({ type: "termkey.captureSubmittedLogin", documentToken }).response
-  ).toEqual({ ok: true, username: "sam", password: "secret" });
   expect(sendMessage).toHaveBeenCalledWith({
     type: "termkey.content.loginSubmitted",
     documentToken,
+    username: "sam",
+    password: "secret",
   });
-  expect(sendMessage.mock.calls[0][0]).not.toHaveProperty("password");
 });
 
 it("captures a login when a non-submit button handles authentication", () => {
@@ -547,6 +546,8 @@ it("captures a login when a non-submit button handles authentication", () => {
   expect(sendMessage).toHaveBeenCalledWith({
     type: "termkey.content.loginSubmitted",
     documentToken,
+    username: "sam",
+    password: "secret",
   });
 });
 

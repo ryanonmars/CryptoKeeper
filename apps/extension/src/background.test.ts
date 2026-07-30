@@ -187,13 +187,8 @@ describe("background security boundaries", () => {
     });
   });
 
-  it("offers a submitted login only after a successful full-page navigation", async () => {
+  it("keeps directly submitted credentials when the login page reloads immediately", async () => {
     const mock = createChromeMock();
-    mock.setSubmittedLogin({
-      ok: true,
-      username: "sam",
-      password: "submitted-secret",
-    });
     mock.setNativeResponder((request) =>
       (request as { type?: string }).type === "status"
         ? statusResponse
@@ -208,16 +203,15 @@ describe("background security boundaries", () => {
         {
           type: "termkey.content.loginSubmitted",
           documentToken: "a".repeat(64),
+          username: "sam",
+          password: "submitted-secret",
         },
         7
       )
     ).resolves.toEqual({ ok: true });
-    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+    expect(mock.chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
       7,
-      {
-        type: "termkey.captureSubmittedLogin",
-        documentToken: "a".repeat(64),
-      },
+      expect.objectContaining({ type: "termkey.captureSubmittedLogin" }),
       { frameId: 0 }
     );
     await expect(
@@ -256,6 +250,61 @@ describe("background security boundaries", () => {
     });
     expect(JSON.stringify(result)).not.toContain("submitted-secret");
     expect(mock.chrome.storage.session.set).not.toHaveBeenCalled();
+  });
+
+  it("checks a direct submission after navigation already completed", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) =>
+      (request as { type?: string }).type === "status"
+        ? statusResponse
+        : (request as { type?: string }).type === "find_site_matches"
+        ? { ...siteMatchesResponse, matches: [] }
+        : { type: "error", message: "Unexpected request." }
+    );
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    let resolveTabGet!: (tab: { id: number; url: string }) => void;
+    mock.chrome.tabs.get.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveTabGet = resolve;
+        })
+    );
+    const service = createBackgroundService(mock.chrome);
+
+    const submitted = mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+        username: "sam",
+        password: "submitted-secret",
+      },
+      7
+    );
+    mock.setTab({ id: 7, url: "https://example.test/account" });
+    mock.setDocumentToken("b".repeat(64));
+    resolveTabGet({ id: 7, url: "https://example.test/account" });
+    await expect(submitted).resolves.toEqual({ ok: true });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "pending_login",
+        candidate: {
+          username: "sam",
+          url: "https://example.test",
+          mode: "save",
+        },
+      },
+    });
   });
 
   it("offers a submitted login after a successful same-origin SPA transition", async () => {
@@ -955,11 +1004,20 @@ describe("background security boundaries", () => {
       hasPasswordField: false,
       hasVisibleLoginFailure: false,
     });
-    mock.setNativeResponder((request) =>
-      (request as { type?: string }).type === "status"
-        ? { ...statusResponse, locked: true }
-        : { type: "error", message: "Unexpected request." }
-    );
+    mock.setNativeResponder((request) => {
+      const typed = request as { type?: string; protocolVersion?: number };
+      if (typed.type === "status" && typed.protocolVersion === 3) {
+        return { ...statusResponse, locked: true };
+      }
+      if (typed.type === "status") {
+        return {
+          type: "error",
+          message:
+            "TermKey browser integration is out of date. Run `termkey browser repair`.",
+        };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
     const service = createBackgroundService(mock.chrome);
     await mock.dispatchContentMessage(
       { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },

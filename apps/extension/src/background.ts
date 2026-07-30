@@ -819,17 +819,31 @@ type ContentLifecycleMessage = {
     | "termkey.content.loginSubmitted"
     | "termkey.content.pageContextChanged";
   documentToken: string;
+  username?: string | null;
+  password?: string;
 };
 
 function isContentLifecycleMessage(
   message: unknown
 ): message is ContentLifecycleMessage {
-  return (
+  const isLifecycleMessage =
     isRecord(message) &&
     (message.type === "termkey.content.loginSubmitted" ||
       message.type === "termkey.content.pageContextChanged") &&
     typeof message.documentToken === "string" &&
-    /^[a-f0-9]{64}$/.test(message.documentToken)
+    /^[a-f0-9]{64}$/.test(message.documentToken);
+  if (!isLifecycleMessage) {
+    return false;
+  }
+  if (message.type !== "termkey.content.loginSubmitted") {
+    return true;
+  }
+  const hasCaptureField = "username" in message || "password" in message;
+  return (
+    !hasCaptureField ||
+    ((typeof message.username === "string" || message.username === null) &&
+      typeof message.password === "string" &&
+      message.password.trim() !== "")
   );
 }
 
@@ -1285,14 +1299,21 @@ export function createBackgroundService(
   ) {
     const page = await getTrustedContentPage(sender);
     if (message.type === "termkey.content.loginSubmitted") {
-      const capture = await chromeApi.tabs.sendMessage(
-        page.tabId,
-        {
-          type: "termkey.captureSubmittedLogin",
-          documentToken: message.documentToken,
-        },
-        { frameId: 0 }
-      );
+      const capture =
+        typeof message.password === "string"
+          ? {
+              ok: true as const,
+              username: message.username ?? null,
+              password: message.password,
+            }
+          : await chromeApi.tabs.sendMessage(
+              page.tabId,
+              {
+                type: "termkey.captureSubmittedLogin",
+                documentToken: message.documentToken,
+              },
+              { frameId: 0 }
+            );
       if (
         !isRecord(capture) ||
         capture.ok !== true ||
@@ -1308,13 +1329,22 @@ export function createBackgroundService(
               : "Could not capture the submitted login.",
         };
       }
-      pendingLogins.add(
+      const candidate = pendingLogins.add(
         page.tabId,
         message.documentToken,
         page.origin,
         capture.username,
         capture.password
       );
+      try {
+        const currentDocumentToken = await probeDocument(page.tabId);
+        if (currentDocumentToken !== message.documentToken) {
+          await inspectPendingLogin(candidate);
+        }
+      } catch {
+        // The normal tab-update lifecycle will inspect the candidate once the
+        // destination document is available.
+      }
       return { ok: true as const };
     }
 
@@ -1444,7 +1474,10 @@ export function createBackgroundService(
         response: { type: "pending_login" as const, candidate: null },
       };
     }
-    const status = await nativeClient.request({ type: "status" });
+    const status = await nativeClient.request({
+      type: "status",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+    });
     if ((await getActivePendingLogin(true)) !== candidate) {
       return {
         ok: true as const,
