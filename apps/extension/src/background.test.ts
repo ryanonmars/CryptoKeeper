@@ -3415,6 +3415,140 @@ describe("background security boundaries", () => {
     );
   });
 
+  it("does not offer an update after submitting credentials just filled by TermKey", async () => {
+    const mock = createChromeMock();
+    installHappyPathResponders(mock);
+    const service = createBackgroundService(mock.chrome, {
+      generateGrantId: () => "filled-login-grant",
+    });
+    const discovery = await service.handleMessage(
+      { type: "termkey.nativeHost.findSiteMatches" },
+      mock.extensionSender
+    );
+
+    await expect(
+      service.handleMessage(
+        {
+          type: "termkey.autofill.fillSelectedMatch",
+          grantId: grantIdFromDiscovery(discovery),
+          entryId: "entry-1",
+        },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({ ok: true });
+    mock.setTabMessageHandler((_tabId, message) => {
+      const type = (message as { type?: string }).type;
+      if (type === "termkey.contentScriptProbe") {
+        return { ok: true, documentToken: "a".repeat(64) };
+      }
+      if (type === "termkey.inspectPageContext") {
+        return {
+          ok: true,
+          documentToken: "a".repeat(64),
+          intent: "unknown",
+          hasPasswordField: false,
+          hasVisibleLoginFailure: false,
+        };
+      }
+      return { ok: true };
+    });
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+        username: "person@example.test",
+        password: "secret",
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.pendingLogin.get" },
+        mock.extensionSender
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "pending_login", candidate: null },
+    });
+    expect(mock.chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: "termkey.pendingLoginPrompt.mount",
+      }),
+      { frameId: 0 }
+    );
+  });
+
+  it("still offers an update when the filled password is changed before submit", async () => {
+    const mock = createChromeMock();
+    installHappyPathResponders(mock);
+    const service = createBackgroundService(mock.chrome, {
+      generateGrantId: () => "changed-login-grant",
+    });
+    const discovery = await service.handleMessage(
+      { type: "termkey.nativeHost.findSiteMatches" },
+      mock.extensionSender
+    );
+    await service.handleMessage(
+      {
+        type: "termkey.autofill.fillSelectedMatch",
+        grantId: grantIdFromDiscovery(discovery),
+        entryId: "entry-1",
+      },
+      mock.extensionSender
+    );
+    mock.setTabMessageHandler((_tabId, message) => {
+      const type = (message as { type?: string }).type;
+      if (type === "termkey.contentScriptProbe") {
+        return { ok: true, documentToken: "a".repeat(64) };
+      }
+      if (type === "termkey.inspectPageContext") {
+        return {
+          ok: true,
+          documentToken: "a".repeat(64),
+          intent: "unknown",
+          hasPasswordField: false,
+          hasVisibleLoginFailure: false,
+        };
+      }
+      return { ok: true };
+    });
+
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.loginSubmitted",
+        documentToken: "a".repeat(64),
+        username: "person@example.test",
+        password: "changed-secret",
+      },
+      7
+    );
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.pageContextChanged",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: "termkey.pendingLoginPrompt.mount",
+      }),
+      { frameId: 0 }
+    );
+  });
+
   it("releases a reserved grant after a native secondary-password error so the popup can retry", async () => {
     const mock = createChromeMock();
     installHappyPathResponders(mock);

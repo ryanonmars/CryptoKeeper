@@ -11,6 +11,7 @@ import type {
 const NATIVE_HOST_NAME = "com.ryanonmars.termkey";
 const MATCH_GRANT_TTL_MS = 30_000;
 const PENDING_LOGIN_TTL_MS = 120_000;
+const RECENT_AUTOFILL_TTL_MS = 120_000;
 const MAX_MATCH_GRANTS = 100;
 export const NATIVE_PROTOCOL_VERSION = 3;
 export const REQUIRED_NATIVE_CAPABILITIES = [
@@ -82,6 +83,14 @@ type PendingLogin = {
   updateRequiresSecondaryPassword?: boolean;
   expiresAt: number;
   ready: boolean;
+};
+
+type RecentAutofill = {
+  documentToken: string;
+  origin: string;
+  username: string | null;
+  passwordFingerprint: string;
+  expiresAt: number;
 };
 
 type PendingLoginDisposition =
@@ -1041,7 +1050,54 @@ export function createBackgroundService(
         "Native host disconnected. Please try again."
     );
   const contentScriptAttempts = new Map<number, Promise<string>>();
+  const recentAutofills = new Map<number, RecentAutofill>();
+  const autofillFingerprintSalt = crypto.getRandomValues(new Uint8Array(32));
   const generateGrantId = options.generateGrantId ?? generateOpaqueGrantId;
+
+  async function fingerprintAutofillPassword(password: string) {
+    const passwordBytes = new TextEncoder().encode(password);
+    const input = new Uint8Array(
+      autofillFingerprintSalt.length + passwordBytes.length
+    );
+    input.set(autofillFingerprintSalt);
+    input.set(passwordBytes, autofillFingerprintSalt.length);
+    const digest = await crypto.subtle.digest("SHA-256", input);
+    return Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0")
+    ).join("");
+  }
+
+  function clearRecentAutofill(tabId: number) {
+    recentAutofills.delete(tabId);
+  }
+
+  async function matchesRecentAutofill(
+    tabId: number,
+    documentToken: string,
+    origin: string,
+    username: string | null,
+    password: string
+  ) {
+    const recent = recentAutofills.get(tabId);
+    if (
+      !recent ||
+      recent.expiresAt <= now() ||
+      recent.documentToken !== documentToken ||
+      recent.origin !== origin
+    ) {
+      clearRecentAutofill(tabId);
+      return false;
+    }
+    const passwordFingerprint = await fingerprintAutofillPassword(password);
+    if (
+      recent.username === username &&
+      recent.passwordFingerprint === passwordFingerprint
+    ) {
+      return true;
+    }
+    clearRecentAutofill(tabId);
+    return false;
+  }
 
   async function getActiveTabOnce() {
     const tabs = await chromeApi.tabs.query({
@@ -1327,6 +1383,16 @@ export function createBackgroundService(
         error: "The selected login match expired before delivery.",
       };
     }
+    const passwordFingerprint = await fingerprintAutofillPassword(
+      nativeResponse.response.entry.password
+    );
+    recentAutofills.set(grant.tabId, {
+      documentToken: grant.documentToken,
+      origin: grant.origin,
+      username: nativeResponse.response.entry.username,
+      passwordFingerprint,
+      expiresAt: now() + RECENT_AUTOFILL_TTL_MS,
+    });
     const fillResponse = await chromeApi.tabs.sendMessage(
       grant.tabId,
       {
@@ -1338,13 +1404,17 @@ export function createBackgroundService(
       { frameId: 0 }
     );
     if (!isRecord(fillResponse) || fillResponse.ok !== true) {
+      clearRecentAutofill(grant.tabId);
       return {
         ok: false as const,
         error:
           isRecord(fillResponse) && typeof fillResponse.error === "string"
             ? fillResponse.error
-            : "Content script could not fill the page.",
+          : "Content script could not fill the page.",
       };
+    }
+    if (fillResponse.filledPassword !== true) {
+      clearRecentAutofill(grant.tabId);
     }
     return {
       ok: true as const,
@@ -1489,6 +1559,17 @@ export function createBackgroundService(
               : "Could not capture the submitted login.",
         };
       }
+      if (
+        await matchesRecentAutofill(
+          page.tabId,
+          message.documentToken,
+          page.origin,
+          capture.username,
+          capture.password
+        )
+      ) {
+        return { ok: true as const };
+      }
       const candidate = pendingLogins.add(
         page.tabId,
         message.documentToken,
@@ -1523,6 +1604,18 @@ export function createBackgroundService(
     tabId: number,
     changeInfo: { status?: string; url?: string }
   ) {
+    const recentAutofill = recentAutofills.get(tabId);
+    if (recentAutofill && changeInfo.url !== undefined) {
+      try {
+        if (
+          canonicalizeWebOrigin(changeInfo.url) !== recentAutofill.origin
+        ) {
+          clearRecentAutofill(tabId);
+        }
+      } catch {
+        clearRecentAutofill(tabId);
+      }
+    }
     const candidate = pendingLogins.get(tabId);
     if (!candidate) {
       return;
@@ -2473,6 +2566,7 @@ export function createBackgroundService(
     handleMessage,
     handleTabRemoved(tabId: number) {
       grants.removeTab(tabId);
+      clearRecentAutofill(tabId);
       pendingLogins.removeTab(tabId);
     },
     handleTabUpdated,
