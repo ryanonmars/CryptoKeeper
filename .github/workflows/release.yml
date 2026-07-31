@@ -406,6 +406,13 @@ jobs:
             "TermKey ${{ matrix.target }}" \
             "${{ github.workspace }}"
 
+          if [[ ! -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg" \
+            && -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg.dmg" ]]; then
+            mv "${{ github.workspace }}/${{ matrix.asset_name }}.dmg.dmg" \
+              "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
+          fi
+          test -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
+
           if [[ "${APPLE_SIGNING_ENABLED:-false}" == "true" ]]; then
             codesign --force --timestamp \
               --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" \
