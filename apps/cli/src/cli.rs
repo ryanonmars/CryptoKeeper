@@ -86,6 +86,13 @@ pub enum Commands {
     #[command(alias = "upgrade")]
     Update,
 
+    /// Remove TermKey data and browser integration (encrypted backups are preserved)
+    Uninstall {
+        /// Skip the interactive confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// View or change configuration settings
     Config {
         /// Display current configuration
@@ -120,4 +127,7 @@ pub enum BrowserCommands {
 
     /// Reinstall the browser integration files
     Repair,
+
+    /// Remove the managed browser integration files
+    Uninstall,
 }

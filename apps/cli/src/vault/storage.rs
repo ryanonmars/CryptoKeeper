@@ -61,11 +61,11 @@ pub fn vault_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TERMKEY_VAULT_DIR") {
         PathBuf::from(dir)
     } else {
-        dirs_fallback()
+        default_vault_dir()
     }
 }
 
-fn dirs_fallback() -> PathBuf {
+pub fn default_vault_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_else(|_| ".".to_string());

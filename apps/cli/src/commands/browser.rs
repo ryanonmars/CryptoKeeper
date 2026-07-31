@@ -19,7 +19,42 @@ pub fn run(command: &BrowserCommands) -> Result<()> {
         BrowserCommands::Install => install_browser_support("installed"),
         BrowserCommands::Repair => install_browser_support("reinstalled"),
         BrowserCommands::Status => print_status(),
+        BrowserCommands::Uninstall => {
+            let report = uninstall_browser_support()?;
+            if report.removed_extension || report.removed_native_host_manifest {
+                print_success("Chrome integration removed.");
+            } else {
+                println!("  Chrome integration is already removed.");
+            }
+            Ok(())
+        }
     }
+}
+
+#[derive(Default)]
+pub(crate) struct BrowserUninstallReport {
+    pub removed_extension: bool,
+    pub removed_native_host_manifest: bool,
+}
+
+pub(crate) fn uninstall_browser_support() -> Result<BrowserUninstallReport> {
+    remove_browser_support_at(&managed_extension_dir(), &native_host_manifest_path()?)
+}
+
+fn remove_browser_support_at(
+    managed_extension_dir: &Path,
+    native_host_manifest: &Path,
+) -> Result<BrowserUninstallReport> {
+    let mut report = BrowserUninstallReport::default();
+    if managed_extension_dir.exists() {
+        fs::remove_dir_all(managed_extension_dir)?;
+        report.removed_extension = true;
+    }
+    if native_host_manifest.exists() {
+        fs::remove_file(native_host_manifest)?;
+        report.removed_native_host_manifest = true;
+    }
+    Ok(report)
 }
 
 fn install_browser_support(action: &str) -> Result<()> {
@@ -629,6 +664,23 @@ mod tests {
         assert!(target.join("manifest.json").exists());
         assert!(target.join("dist").join("background.js").exists());
         assert!(!target.join("old.txt").exists());
+    }
+
+    #[test]
+    fn browser_uninstall_removes_managed_files() {
+        let dir = TempDir::new().unwrap();
+        let extension_dir = dir.path().join("TermKey Browser Extension");
+        let manifest_path = dir.path().join("native-host.json");
+        fs::create_dir_all(&extension_dir).unwrap();
+        fs::write(extension_dir.join("manifest.json"), "{}").unwrap();
+        fs::write(&manifest_path, "{}").unwrap();
+
+        let report = remove_browser_support_at(&extension_dir, &manifest_path).unwrap();
+
+        assert!(report.removed_extension);
+        assert!(report.removed_native_host_manifest);
+        assert!(!extension_dir.exists());
+        assert!(!manifest_path.exists());
     }
 
     #[test]

@@ -13,6 +13,7 @@ pub mod passwd;
 pub mod recover;
 pub mod rename;
 pub mod search;
+pub mod uninstall;
 pub mod update_cmd;
 pub mod view;
 

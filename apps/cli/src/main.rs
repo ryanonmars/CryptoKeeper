@@ -38,6 +38,7 @@ fn main() {
             Commands::Passwd => commands::passwd::run(),
             Commands::Recover => commands::recover::run(),
             Commands::Update => commands::update_cmd::run(),
+            Commands::Uninstall { yes } => commands::uninstall::run(yes),
             Commands::Config {
                 show,
                 ref clipboard_timeout,
