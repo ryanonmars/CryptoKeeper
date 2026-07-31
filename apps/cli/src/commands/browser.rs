@@ -230,6 +230,7 @@ fn extension_source_candidates(current_exe: &Path) -> Vec<PathBuf> {
 fn is_extension_bundle_dir(path: &Path) -> bool {
     path.join("manifest.json").is_file()
         && path.join("popup.html").is_file()
+        && path.join("prompt.html").is_file()
         && path.join("dist").join("background.js").is_file()
 }
 
@@ -633,6 +634,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("manifest.json"), "{}").unwrap();
         fs::write(dir.path().join("popup.html"), "<!doctype html>").unwrap();
+        fs::write(dir.path().join("prompt.html"), "<!doctype html>").unwrap();
         fs::create_dir_all(dir.path().join("dist")).unwrap();
         fs::write(
             dir.path().join("dist").join("background.js"),
@@ -650,6 +652,7 @@ mod tests {
 
         fs::write(source.path().join("manifest.json"), "{}").unwrap();
         fs::write(source.path().join("popup.html"), "<!doctype html>").unwrap();
+        fs::write(source.path().join("prompt.html"), "<!doctype html>").unwrap();
         fs::create_dir_all(source.path().join("dist")).unwrap();
         fs::write(
             source.path().join("dist").join("background.js"),

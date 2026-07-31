@@ -324,6 +324,7 @@ jobs:
           Copy-Item (Join-Path $releaseDir "termkey-native-host.exe") $stagingDir
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\manifest.json") (Join-Path $extensionDir "manifest.json")
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\popup.html") (Join-Path $extensionDir "popup.html")
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\prompt.html") (Join-Path $extensionDir "prompt.html")
           Copy-Item -Recurse -Force (Join-Path $env:GITHUB_WORKSPACE "apps\extension\dist") (Join-Path $extensionDir "dist")
           Copy-Item -Recurse -Force (Join-Path $env:GITHUB_WORKSPACE "apps\extension\public") (Join-Path $extensionDir "public")
 
@@ -357,6 +358,7 @@ jobs:
           cp "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
           cp "${{ github.workspace }}/apps/extension/manifest.json" "$staging_dir/browser-extension/chrome/manifest.json"
           cp "${{ github.workspace }}/apps/extension/popup.html" "$staging_dir/browser-extension/chrome/popup.html"
+          cp "${{ github.workspace }}/apps/extension/prompt.html" "$staging_dir/browser-extension/chrome/prompt.html"
           cp -R "${{ github.workspace }}/apps/extension/dist" "$staging_dir/browser-extension/chrome/dist"
           cp -R "${{ github.workspace }}/apps/extension/public" "$staging_dir/browser-extension/chrome/public"
 
@@ -381,6 +383,7 @@ jobs:
           cp "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
           cp "${{ github.workspace }}/apps/extension/manifest.json" "$staging_dir/browser-extension/chrome/manifest.json"
           cp "${{ github.workspace }}/apps/extension/popup.html" "$staging_dir/browser-extension/chrome/popup.html"
+          cp "${{ github.workspace }}/apps/extension/prompt.html" "$staging_dir/browser-extension/chrome/prompt.html"
           cp -R "${{ github.workspace }}/apps/extension/dist" "$staging_dir/browser-extension/chrome/dist"
           cp -R "${{ github.workspace }}/apps/extension/public" "$staging_dir/browser-extension/chrome/public"
 
