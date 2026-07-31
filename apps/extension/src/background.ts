@@ -1564,7 +1564,11 @@ export function createBackgroundService(
       context.hasPasswordField !== true &&
       context.hasVisibleLoginFailure === false
     ) {
-      if (pendingLogins.markReady(candidate)) {
+      const becameReady = pendingLogins.markReady(candidate);
+      if (
+        becameReady ||
+        candidate.promptDocumentToken !== context.documentToken
+      ) {
         candidate.promptDocumentToken = context.documentToken;
         try {
           await chromeApi.tabs.sendMessage(

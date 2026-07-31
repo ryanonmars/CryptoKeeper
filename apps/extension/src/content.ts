@@ -82,6 +82,9 @@ type GeneratedPasswordTargets = {
 };
 
 const FILL_RETRY_DELAYS_MS = [0, 150, 350, 700] as const;
+const SUBMITTED_LOGIN_DEDUPE_MS = 1_000;
+const LOGIN_ACTION_SELECTOR =
+  "button, input[type='submit'], input[type='button'], [role='button']";
 const PROMPT_IFRAME_ID = "termkey-pending-login-prompt";
 const INLINE_AUTOFILL_HOST_ID = "termkey-inline-autofill";
 const DOCUMENT_TOKEN = Array.from(
@@ -94,6 +97,9 @@ const contentGlobal = globalThis as typeof globalThis & {
 };
 let submittedLoginSnapshot: SubmittedLoginCapture | undefined;
 let submittedLoginNotification: Promise<unknown> | undefined;
+let recentlyNotifiedSubmittedLogin: SubmittedLoginCapture | undefined;
+let submittedLoginDedupeTimer: number | undefined;
+let rememberedLoginUsername: string | undefined;
 let recentTermKeyFill:
   | {
       receipt: string;
@@ -1004,6 +1010,10 @@ async function fillCredentials(message: FillCredentialsMessage) {
 function captureSubmittedLoginFromInputs(inputs: HTMLInputElement[]): SubmittedLoginCapture {
   const inferred = inferPageIntent(inputs);
   const { passwordInput, usernameInput } = findBestLoginTargets(inputs);
+  const currentUsername = usernameInput?.value.trim();
+  if (currentUsername) {
+    rememberedLoginUsername = currentUsername;
+  }
 
   if (
     inferred.intent !== "login" ||
@@ -1018,7 +1028,7 @@ function captureSubmittedLoginFromInputs(inputs: HTMLInputElement[]): SubmittedL
 
   const capture = {
     ok: true,
-    username: usernameInput?.value.trim() || null,
+    username: currentUsername || rememberedLoginUsername || null,
     password: passwordInput.value,
   } as const;
   if (
@@ -1041,12 +1051,72 @@ function captureSubmittedLogin(submittedForm: HTMLFormElement): SubmittedLoginCa
   );
 }
 
-function captureClickedLogin(button: HTMLElement): SubmittedLoginCapture {
-  const root = getCandidateRoot(button);
+function captureLoginAction(element: HTMLElement): SubmittedLoginCapture {
+  const root = getCandidateRoot(element);
   const inputs = root
     ? Array.from(root.querySelectorAll<HTMLInputElement>("input"))
     : collectInputElements();
   return captureSubmittedLoginFromInputs(inputs);
+}
+
+function rememberLoginUsername(input: HTMLInputElement) {
+  const username = input.value.trim();
+  const score = getUsernameCandidateScore(input, undefined);
+  if (
+    username &&
+    Number.isFinite(score) &&
+    score > 0
+  ) {
+    rememberedLoginUsername = username;
+  }
+}
+
+function sameSubmittedLogin(
+  left: SubmittedLoginCapture | undefined,
+  right: SubmittedLoginCapture | undefined
+) {
+  return (
+    left?.ok === true &&
+    right?.ok === true &&
+    left.username === right.username &&
+    left.password === right.password &&
+    left.autofillReceipt === right.autofillReceipt
+  );
+}
+
+function stageSubmittedLogin(snapshot: SubmittedLoginCapture | undefined) {
+  if (sameSubmittedLogin(recentlyNotifiedSubmittedLogin, snapshot)) {
+    return;
+  }
+  recentlyNotifiedSubmittedLogin = snapshot;
+  if (submittedLoginDedupeTimer !== undefined) {
+    window.clearTimeout(submittedLoginDedupeTimer);
+  }
+  submittedLoginDedupeTimer = window.setTimeout(() => {
+    recentlyNotifiedSubmittedLogin = undefined;
+    submittedLoginDedupeTimer = undefined;
+  }, SUBMITTED_LOGIN_DEDUPE_MS);
+  submittedLoginSnapshot = snapshot;
+  notifySubmittedLogin(snapshot);
+}
+
+function findLoginAction(event: Event) {
+  return event.composedPath().find(
+    (candidate): candidate is HTMLElement =>
+      candidate instanceof HTMLElement &&
+      candidate.matches(LOGIN_ACTION_SELECTOR)
+  );
+}
+
+function captureLoginActionEvent(event: Event) {
+  const action = findLoginAction(event);
+  if (!action) {
+    return;
+  }
+  const snapshot = captureLoginAction(action);
+  if (snapshot.ok) {
+    stageSubmittedLogin(snapshot);
+  }
 }
 
 function notifySubmittedLogin(snapshot: SubmittedLoginCapture | undefined) {
@@ -1823,37 +1893,40 @@ function wrapHistoryMethod(method: "pushState" | "replaceState") {
   }) as History["pushState"];
 }
 
-document.addEventListener(
+window.addEventListener(
   "submit",
   (event) => {
     const snapshot =
       event.target instanceof HTMLFormElement
         ? captureSubmittedLogin(event.target)
         : undefined;
-    submittedLoginSnapshot = snapshot;
-    notifySubmittedLogin(snapshot);
+    stageSubmittedLogin(snapshot);
   },
   true
 );
 
-document.addEventListener(
-  "click",
+window.addEventListener("pointerdown", captureLoginActionEvent, true);
+window.addEventListener("click", captureLoginActionEvent, true);
+
+window.addEventListener(
+  "keydown",
   (event) => {
-    const button = event.target instanceof HTMLElement
-      ? event.target.closest("button, input[type='submit'], input[type='button']")
-      : null;
     if (
-      !(button instanceof HTMLElement) ||
-      (button instanceof HTMLButtonElement && button.type === "submit")
+      event.key !== "Enter" ||
+      event.repeat ||
+      event.isComposing ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      !(event.target instanceof HTMLInputElement) ||
+      getInputType(event.target) !== "password"
     ) {
       return;
     }
-    const snapshot = captureClickedLogin(button);
-    if (!snapshot.ok) {
-      return;
+    const snapshot = captureLoginAction(event.target);
+    if (snapshot.ok) {
+      stageSubmittedLogin(snapshot);
     }
-    submittedLoginSnapshot = snapshot;
-    notifySubmittedLogin(snapshot);
   },
   true
 );
@@ -1868,9 +1941,12 @@ document.addEventListener(
   true
 );
 
-document.addEventListener(
+window.addEventListener(
   "input",
-  () => {
+  (event) => {
+    if (event.target instanceof HTMLInputElement) {
+      rememberLoginUsername(event.target);
+    }
     if (!inlineAutofillTarget) return;
     const context = inspectPageContext();
     if (!context.hasEmptyLoginField) {

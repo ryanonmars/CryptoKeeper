@@ -888,6 +888,181 @@ it("captures a login when a non-submit button handles authentication", () => {
   });
 });
 
+it("captures a submit button click when site JavaScript cancels native submission", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <button type="submit">Log in</button>
+    </form>
+  `;
+  const button = document.querySelector("button");
+  if (!button) throw new Error("Missing login button fixture.");
+  button.addEventListener("click", (event) => event.preventDefault());
+
+  button.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam",
+    password: "secret",
+  });
+});
+
+it("captures before a site stops login events at the window", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <button type="submit">Log in</button>
+    </form>
+  `;
+  const button = document.querySelector("button");
+  if (!button) throw new Error("Missing login button fixture.");
+  window.addEventListener(
+    "click",
+    (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },
+    { capture: true, once: true }
+  );
+
+  button.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam",
+    password: "secret",
+  });
+});
+
+it("retains a username across a same-document multi-step login", () => {
+  document.body.innerHTML = `
+    <main>
+      <input id="identifier" autocomplete="username" value="sam@example.test">
+      <div id="next" role="button">Next</div>
+    </main>
+  `;
+  input("#identifier").dispatchEvent(new Event("input", { bubbles: true }));
+  document.querySelector("#next")?.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  document.body.innerHTML = `
+    <main>
+      <input id="password" type="password" autocomplete="current-password" value="secret">
+      <div id="login" role="button">Log in</div>
+    </main>
+  `;
+  document.querySelector("#login")?.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam@example.test",
+    password: "secret",
+  });
+});
+
+it("captures Enter-key authentication from a password field", () => {
+  document.body.innerHTML = `
+    <section>
+      <input autocomplete="username" value="sam">
+      <input id="password" type="password" autocomplete="current-password" value="secret">
+    </section>
+  `;
+
+  input("#password").dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    })
+  );
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam",
+    password: "secret",
+  });
+});
+
+it("does not capture Enter from an OTP password input", () => {
+  document.body.innerHTML = `
+    <form aria-label="Verification code">
+      <input id="otp" type="password" autocomplete="one-time-code" value="123456">
+    </form>
+  `;
+
+  input("#otp").dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true })
+  );
+
+  expect(sendMessage).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "termkey.content.loginSubmitted" })
+  );
+});
+
+it("does not capture a submit-button click from a signup form", () => {
+  document.body.innerHTML = `
+    <form aria-label="Create account">
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="new-password" value="secret">
+      <button type="submit">Create account</button>
+    </form>
+  `;
+
+  const button = document.querySelector("button");
+  if (!button) throw new Error("Missing signup button fixture.");
+  button.addEventListener("click", (event) => event.preventDefault());
+  button.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  expect(sendMessage).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "termkey.content.loginSubmitted" })
+  );
+});
+
+it("deduplicates click and submit capture for one login action", () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username" value="sam">
+      <input type="password" autocomplete="current-password" value="secret">
+      <button type="submit">Log in</button>
+    </form>
+  `;
+  const form = document.querySelector("form");
+  const button = document.querySelector("button");
+  if (!form || !button) throw new Error("Missing login fixture.");
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  });
+
+  button.dispatchEvent(
+    new MouseEvent("click", { bubbles: true, cancelable: true })
+  );
+
+  expect(
+    sendMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type ===
+        "termkey.content.loginSubmitted"
+    )
+  ).toHaveLength(1);
+});
+
 it("emits a token-bound page-context event after a history API transition", async () => {
   history.pushState({}, "", "/signed-in");
 

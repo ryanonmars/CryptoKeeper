@@ -1879,6 +1879,50 @@ describe("background security boundaries", () => {
     });
   });
 
+  it("remounts a ready prompt after a later same-origin navigation", async () => {
+    const mock = createChromeMock();
+    mock.setSubmittedLogin({
+      ok: true,
+      username: "sam@example.test",
+      password: "website-secret",
+    });
+    mock.setPageContext({
+      intent: "unknown",
+      hasPasswordField: false,
+      hasVisibleLoginFailure: false,
+    });
+    createBackgroundService(mock.chrome);
+
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.loginSubmitted", documentToken: "a".repeat(64) },
+      7
+    );
+    await mock.dispatchContentMessage(
+      { type: "termkey.content.pageContextChanged", documentToken: "a".repeat(64) },
+      7
+    );
+
+    mock.setTab({ id: 7, url: "https://example.test/account" });
+    mock.setDocumentToken("b".repeat(64));
+    await mock.dispatchTabUpdated(7, { status: "complete" });
+
+    const mountCalls = mock.chrome.tabs.sendMessage.mock.calls.filter(
+      ([, message]) =>
+        (message as { type?: string }).type ===
+        "termkey.pendingLoginPrompt.mount"
+    );
+    expect(mountCalls).toHaveLength(2);
+    expect(mountCalls[1]).toEqual([
+      7,
+      {
+        type: "termkey.pendingLoginPrompt.mount",
+        candidateId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        documentToken: "b".repeat(64),
+      },
+      { frameId: 0 },
+    ]);
+  });
+
   it("removes a mounted prompt when a later inspection finds an invalid login", async () => {
     const mock = createChromeMock();
     mock.setSubmittedLogin({ ok: true, username: "sam", password: "website-secret" });
