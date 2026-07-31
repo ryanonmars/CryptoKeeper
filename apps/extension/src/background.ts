@@ -19,6 +19,7 @@ export const REQUIRED_NATIVE_CAPABILITIES = [
   "origin-only-save",
   "password-entry-update",
   "bounded-native-output",
+  "terminal-launch",
 ] as const;
 const PROTOCOL_REPAIR_ERROR =
   "TermKey browser integration is out of date. Run `termkey browser repair`.";
@@ -49,8 +50,10 @@ type NativeClientResponse =
 type NativeResponseForRequest<TRequest extends NativeHostRequest> =
   TRequest["type"] extends "ping"
     ? Extract<NativeHostResponse, { type: "pong" }>
-    : TRequest["type"] extends "status"
+      : TRequest["type"] extends "status"
       ? Extract<NativeHostResponse, { type: "status" }>
+      : TRequest["type"] extends "launch_termkey"
+        ? Extract<NativeHostResponse, { type: "terminal_launched" }>
       : TRequest["type"] extends "get_autofill_entry"
         ? Extract<NativeHostResponse, { type: "autofill_entry" }>
         : TRequest["type"] extends "find_site_matches"
@@ -266,6 +269,8 @@ export function isNativeHostResponse(value: unknown): value is NativeHostRespons
       return isAutofillEntry(value.entry);
     case "generated_password":
       return hasString(value, "password");
+    case "terminal_launched":
+      return value.launched === true;
     case "save_entry":
       return hasString(value, "entryName");
     case "site_matches":
@@ -307,6 +312,8 @@ function expectedResponseType(
       return "site_matches";
     case "generate_password":
       return "generated_password";
+    case "launch_termkey":
+      return "terminal_launched";
     case "save_password_entry":
     case "update_password_entry":
       return "save_entry";
@@ -861,6 +868,7 @@ function isKnownPopupMessage(
     message.type === "termkey.pendingLogin.save" ||
     message.type === "termkey.pendingLogin.unlockAndSave" ||
     message.type === "termkey.passwords.generateForPage" ||
+    message.type === "termkey.nativeHost.launchTermKey" ||
     message.type === "termkey.autofill.fillSelectedMatch" ||
     message.type === "termkey.nativeHost.savePasswordEntry" ||
     message.type === "termkey.nativeHost.unlock"
@@ -903,6 +911,72 @@ type ContentLifecycleMessage = {
   password?: string;
   autofillReceipt?: string;
 };
+
+type ContentAutofillMessage =
+  | {
+      type: "termkey.content.inlineAutofill.request";
+      documentToken: string;
+    }
+  | {
+      type: "termkey.content.inlineAutofill.fill";
+      documentToken: string;
+      grantId: string;
+      entryId: string;
+    }
+  | {
+      type: "termkey.content.inlineAutofill.openPopup";
+      documentToken: string;
+      grantId?: string;
+      entryId?: string;
+      name?: string;
+      username?: string | null;
+      hasSecondaryPassword?: boolean;
+    };
+
+function isContentAutofillMessage(
+  message: unknown
+): message is ContentAutofillMessage {
+  if (
+    !isRecord(message) ||
+    typeof message.type !== "string" ||
+    typeof message.documentToken !== "string" ||
+    !/^[a-f0-9]{64}$/.test(message.documentToken)
+  ) {
+    return false;
+  }
+  if (
+    message.type === "termkey.content.inlineAutofill.request"
+  ) {
+    return true;
+  }
+  if (message.type === "termkey.content.inlineAutofill.openPopup") {
+    const hasSelection =
+      "grantId" in message ||
+      "entryId" in message ||
+      "name" in message ||
+      "username" in message ||
+      "hasSecondaryPassword" in message;
+    return (
+      !hasSelection ||
+      (typeof message.grantId === "string" &&
+        /^[a-f0-9]{64}$/.test(message.grantId) &&
+        typeof message.entryId === "string" &&
+        message.entryId.length > 0 &&
+        typeof message.name === "string" &&
+        message.name.length > 0 &&
+        (typeof message.username === "string" ||
+          message.username === null) &&
+        typeof message.hasSecondaryPassword === "boolean")
+    );
+  }
+  return (
+    message.type === "termkey.content.inlineAutofill.fill" &&
+    typeof message.grantId === "string" &&
+    /^[a-f0-9]{64}$/.test(message.grantId) &&
+    typeof message.entryId === "string" &&
+    message.entryId.length > 0
+  );
+}
 
 function isContentLifecycleMessage(
   message: unknown
@@ -1042,6 +1116,18 @@ export function createBackgroundService(
         "Native host disconnected. Please try again."
     );
   const contentScriptAttempts = new Map<number, Promise<string>>();
+  const siteMatchRequestVersions = new Map<number, number>();
+  let pendingInlinePopupSelection:
+    | {
+        tabId: number;
+        documentToken: string;
+        origin: string;
+        name: string;
+        username: string | null;
+        hasSecondaryPassword: boolean;
+        expiresAt: number;
+      }
+    | undefined;
   const generateGrantId = options.generateGrantId ?? generateOpaqueGrantId;
 
   async function getActiveTabOnce() {
@@ -1120,9 +1206,12 @@ export function createBackgroundService(
     }
   }
 
-  async function findSiteMatches() {
-    const page = await getActiveTabOnce();
-    const documentToken = await ensureContentScript(page.tabId);
+  async function findSiteMatchesForPage(
+    page: { tabId: number; origin: string },
+    documentToken: string
+  ) {
+    const requestVersion = (siteMatchRequestVersions.get(page.tabId) ?? 0) + 1;
+    siteMatchRequestVersions.set(page.tabId, requestVersion);
     const nativeResponse = await nativeClient.request({
       type: "find_site_matches",
       url: page.origin,
@@ -1143,6 +1232,12 @@ export function createBackgroundService(
       return {
         ok: false as const,
         error: "Native host returned matches for a different origin.",
+      };
+    }
+    if (siteMatchRequestVersions.get(page.tabId) !== requestVersion) {
+      return {
+        ok: false as const,
+        error: "A newer saved-login lookup replaced this request.",
       };
     }
 
@@ -1167,6 +1262,40 @@ export function createBackgroundService(
         matches,
       },
     };
+  }
+
+  async function findSiteMatches() {
+    const page = await getActiveTabOnce();
+    const documentToken = await ensureContentScript(page.tabId);
+    const result = await findSiteMatchesForPage(page, documentToken);
+    const selection = pendingInlinePopupSelection;
+    pendingInlinePopupSelection = undefined;
+    if (
+      !result.ok ||
+      result.response.type !== "site_matches" ||
+      !selection ||
+      selection.expiresAt <= now() ||
+      selection.tabId !== page.tabId ||
+      selection.documentToken !== documentToken ||
+      selection.origin !== page.origin
+    ) {
+      return result;
+    }
+    const selectedMatches = result.response.matches.filter(
+      (match) =>
+        match.name === selection.name &&
+        match.username === selection.username &&
+        match.hasSecondaryPassword === selection.hasSecondaryPassword
+    );
+    return selectedMatches.length === 1
+      ? {
+          ...result,
+          response: {
+            ...result.response,
+            selectedInlineMatchId: selectedMatches[0].id,
+          },
+        }
+      : result;
   }
 
   async function inspectPageContext() {
@@ -1525,6 +1654,137 @@ export function createBackgroundService(
       await inspectPendingLogin(candidate, message.documentToken);
     }
     return { ok: true as const };
+  }
+
+  async function handleContentAutofillMessage(
+    message: ContentAutofillMessage,
+    sender: MessageSender
+  ) {
+    const page = await getTrustedContentPage(sender);
+    if ((await probeDocument(page.tabId)) !== message.documentToken) {
+      return {
+        ok: false as const,
+        error: "The login page changed before the autofill action.",
+      };
+    }
+
+    if (message.type === "termkey.content.inlineAutofill.openPopup") {
+      if (typeof chromeApi.action.openPopup !== "function") {
+        return {
+          ok: false as const,
+          error: "Open the TermKey extension to unlock and fill this login.",
+        };
+      }
+      if (
+        message.grantId !== undefined &&
+        message.entryId !== undefined &&
+        message.name !== undefined &&
+        message.username !== undefined &&
+        message.hasSecondaryPassword !== undefined
+      ) {
+        const grant = grants.reserve(message.grantId);
+        if (!grant || grant.entryId !== message.entryId) {
+          return {
+            ok: false as const,
+            error:
+              "This login match is already in use or no longer available.",
+            refreshMatches: true,
+          };
+        }
+        try {
+          await validateGrant(grant, message.entryId);
+        } catch (error) {
+          grants.invalidate(message.grantId);
+          throw error;
+        }
+        grants.release(message.grantId);
+        pendingInlinePopupSelection = {
+          tabId: page.tabId,
+          documentToken: message.documentToken,
+          origin: page.origin,
+          name: message.name,
+          username: message.username,
+          hasSecondaryPassword: message.hasSecondaryPassword,
+          expiresAt: now() + MATCH_GRANT_TTL_MS,
+        };
+      } else {
+        pendingInlinePopupSelection = undefined;
+      }
+      try {
+        await chromeApi.action.openPopup();
+      } catch (error) {
+        pendingInlinePopupSelection = undefined;
+        throw error;
+      }
+      return {
+        ok: true as const,
+        response: { type: "inline_autofill_popup_opened" as const },
+      };
+    }
+
+    if (message.type === "termkey.content.inlineAutofill.fill") {
+      const result = await fillSelectedMatch({
+        type: "termkey.autofill.fillSelectedMatch",
+        grantId: message.grantId,
+        entryId: message.entryId,
+      });
+      return result.ok
+        ? result
+        : {
+            ...result,
+            refreshMatches:
+              result.error ===
+              "This login match is already in use or no longer available.",
+          };
+    }
+
+    const status = await nativeClient.request({
+      type: "status",
+      protocolVersion: NATIVE_PROTOCOL_VERSION,
+    });
+    if (!status.ok) {
+      return status;
+    }
+    if (status.response.type !== "status") {
+      return {
+        ok: false as const,
+        error: "Native host returned the wrong response type for status.",
+      };
+    }
+    if (!status.response.vaultExists) {
+      return {
+        ok: true as const,
+        response: {
+          type: "inline_autofill" as const,
+          state: "missing_vault" as const,
+          matches: [],
+        },
+      };
+    }
+    if (status.response.locked) {
+      return {
+        ok: true as const,
+        response: {
+          type: "inline_autofill" as const,
+          state: "locked" as const,
+          matches: [],
+        },
+      };
+    }
+
+    const matches = await findSiteMatchesForPage(page, message.documentToken);
+    if (!matches.ok || matches.response.type !== "site_matches") {
+      return matches;
+    }
+    return {
+      ok: true as const,
+      response: {
+        type: "inline_autofill" as const,
+        state: "ready" as const,
+        siteHostname: matches.response.siteHostname,
+        matches: matches.response.matches,
+      },
+    };
   }
 
   async function handleTabUpdated(
@@ -2398,6 +2658,8 @@ export function createBackgroundService(
         return unlockAndSavePendingLogin(message, sender);
       case "termkey.passwords.generateForPage":
         return generateForPage();
+      case "termkey.nativeHost.launchTermKey":
+        return nativeClient.request({ type: "launch_termkey" });
       case "termkey.autofill.fillSelectedMatch":
         return fillSelectedMatch(message);
       case "termkey.nativeHost.savePasswordEntry": {
@@ -2481,6 +2743,10 @@ export function createBackgroundService(
     handleMessage,
     handleTabRemoved(tabId: number) {
       grants.removeTab(tabId);
+      siteMatchRequestVersions.delete(tabId);
+      if (pendingInlinePopupSelection?.tabId === tabId) {
+        pendingInlinePopupSelection = undefined;
+      }
       pendingLogins.removeTab(tabId);
     },
     handleTabUpdated,
@@ -2502,6 +2768,18 @@ export function createBackgroundService(
               error instanceof Error
                 ? error.message
                 : "The content lifecycle request failed.",
+          }))
+          .then(sendResponse);
+        return true;
+      }
+      if (isContentAutofillMessage(message)) {
+        void handleContentAutofillMessage(message, sender)
+          .catch((error) => ({
+            ok: false as const,
+            error:
+              error instanceof Error
+                ? error.message
+                : "The inline autofill request failed.",
           }))
           .then(sendResponse);
         return true;

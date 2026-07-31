@@ -15,7 +15,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["prompt.html"],
+      "resources": ["prompt.html", "public/icons/termkey-icon-32.png"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ],

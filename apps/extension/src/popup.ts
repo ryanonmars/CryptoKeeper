@@ -388,6 +388,47 @@ document.body.innerHTML = `
     .message[data-tone="error"] {
       color: #fca5a5;
     }
+
+    .quick-access {
+      display: flex;
+    }
+
+    .open-termkey-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 9px 12px;
+      border: 1px solid rgba(125, 211, 252, 0.22);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.48);
+      color: #cbd5e1;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      transition:
+        border-color 140ms ease,
+        background 140ms ease,
+        color 140ms ease;
+    }
+
+    .open-termkey-button:hover:not(:disabled) {
+      border-color: rgba(125, 211, 252, 0.52);
+      background: rgba(15, 23, 42, 0.8);
+      color: #f8fafc;
+    }
+
+    .open-termkey-button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .open-termkey-button img {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+    }
   </style>
   <main class="popup">
     <header class="header">
@@ -503,6 +544,13 @@ document.body.innerHTML = `
       <p id="password-panel-hint" class="hint">Your password is only used for this fill request.</p>
     </section>
 
+    <div class="quick-access">
+      <button id="open-termkey" class="open-termkey-button" type="button" disabled>
+        <img src="./public/icons/termkey-icon-32.png" alt="" />
+        <span>Open TermKey</span>
+      </button>
+    </div>
+
     <p id="recovery-notice" class="message" data-tone="error" hidden></p>
     <p id="native-host-status" class="message">Checking TermKey status...</p>
   </main>
@@ -561,6 +609,8 @@ const passwordPanelLabelEl =
   document.querySelector<HTMLSpanElement>("#password-panel-label");
 const passwordPanelHintEl =
   document.querySelector<HTMLParagraphElement>("#password-panel-hint");
+const openTermKeyButtonEl =
+  document.querySelector<HTMLButtonElement>("#open-termkey");
 const secondaryPasswordGroupEl =
   document.querySelector<HTMLElement>("#secondary-password-group");
 
@@ -595,7 +645,8 @@ if (
   !matchListEl ||
   !passwordPanelLabelEl ||
   !passwordPanelHintEl ||
-  !secondaryPasswordGroupEl
+  !secondaryPasswordGroupEl ||
+  !openTermKeyButtonEl
 ) {
   throw new Error("Popup UI failed to initialize.");
 }
@@ -634,6 +685,7 @@ const matchList = matchListEl;
 const passwordPanelLabel = passwordPanelLabelEl;
 const passwordPanelHint = passwordPanelHintEl;
 const secondaryPasswordGroup = secondaryPasswordGroupEl;
+const openTermKeyButton = openTermKeyButtonEl;
 
 let currentSiteMatches: PopupSiteMatch[] = [];
 let pendingFillMatch: PopupSiteMatch | null = null;
@@ -645,6 +697,7 @@ let generationInFlight = false;
 let saveInFlight = false;
 let pendingLoginRefreshVersion = 0;
 let backendConnected = false;
+let launchingTermKey = false;
 let vaultExists = true;
 let vaultLocked = true;
 let hasSupportedPage = true;
@@ -719,6 +772,7 @@ function setBackendStatus(connected: boolean, label: string) {
   backendConnected = connected;
   backendDot.classList.toggle("status-dot--online", connected);
   backendLabel.textContent = label;
+  openTermKeyButton.disabled = !connected || launchingTermKey;
   updateFillButtonState();
 }
 
@@ -1714,21 +1768,30 @@ function findSiteMatches() {
       return;
     }
 
-    setCurrentSiteMatches(response.response.matches);
+    const siteMatches = response.response;
+    setCurrentSiteMatches(siteMatches.matches);
+    const selectedInlineMatch =
+      siteMatches.selectedInlineMatchId === undefined
+        ? undefined
+        : siteMatches.matches.find(
+            (match) => match.id === siteMatches.selectedInlineMatchId
+          );
     setSiteVisibility(true);
-    const matchSummary = describeMatches(response.response.matches);
+    const matchSummary = describeMatches(siteMatches.matches);
     renderSite(
-      response.response.siteOrigin,
-      response.response.siteOrigin.startsWith("http://")
+      siteMatches.siteOrigin,
+      siteMatches.siteOrigin.startsWith("http://")
         ? `Unencrypted HTTP site. ${matchSummary}`
         : matchSummary
     );
 
-    if (response.response.matches.length === 0) {
-      renderMessage(`No saved login found for ${response.response.siteHostname}.`);
-    } else if (response.response.matches.length === 1) {
+    if (selectedInlineMatch) {
+      beginFill(selectedInlineMatch);
+    } else if (siteMatches.matches.length === 0) {
+      renderMessage(`No saved login found for ${siteMatches.siteHostname}.`);
+    } else if (siteMatches.matches.length === 1) {
       renderMessage(
-        `Ready to fill ${response.response.matches[0].name}.`,
+        `Ready to fill ${siteMatches.matches[0].name}.`,
         "success"
       );
     } else {
@@ -1823,7 +1886,47 @@ fillButton.addEventListener("click", () => {
   beginFill(singleMatch);
 });
 
+function launchTermKey() {
+  if (!backendConnected || launchingTermKey) {
+    return;
+  }
+  const label = openTermKeyButton.querySelector("span");
+  launchingTermKey = true;
+  openTermKeyButton.disabled = true;
+  if (label) label.textContent = "Opening…";
+  renderMessage("Opening TermKey in Terminal...");
+  sendMessage(
+    { type: "termkey.nativeHost.launchTermKey" },
+    (response) => {
+      launchingTermKey = false;
+      openTermKeyButton.disabled = !backendConnected;
+      if (label) label.textContent = "Open TermKey";
+      if (!response.ok) {
+        renderMessage(`Could not open TermKey: ${response.error}`, "error");
+        return;
+      }
+      if (
+        response.response.type !== "terminal_launched" ||
+        response.response.launched !== true
+      ) {
+        renderMessage(
+          "Native host returned the wrong response for terminal launch.",
+          "error"
+        );
+        return;
+      }
+      renderMessage("Opened TermKey in Terminal.", "success");
+    },
+    () => {
+      launchingTermKey = false;
+      openTermKeyButton.disabled = !backendConnected;
+      if (label) label.textContent = "Open TermKey";
+    }
+  );
+}
+
 generatePasswordButton.addEventListener("click", beginGeneratedPasswordFlow);
+openTermKeyButton.addEventListener("click", launchTermKey);
 cancelSaveButton.addEventListener("click", cancelPendingSave);
 submitSaveButton.addEventListener("click", submitPendingSave);
 unlockVaultButton.addEventListener("click", submitPendingFill);

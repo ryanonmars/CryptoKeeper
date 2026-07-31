@@ -60,10 +60,12 @@ async function openPopupWithSiteContext({
   hasEmptyLoginField,
   matches,
   pageContextValues = [hasEmptyLoginField],
+  selectedInlineMatchId,
 }: {
   hasEmptyLoginField: boolean;
   matches: typeof match[];
   pageContextValues?: boolean[];
+  selectedInlineMatchId?: string;
 }) {
   let pageContextRequestCount = 0;
   const sendMessage = vi.fn(
@@ -113,6 +115,7 @@ async function openPopupWithSiteContext({
             siteOrigin: "https://example.test",
             siteHostname: "example.test",
             matches,
+            selectedInlineMatchId,
           },
         });
       } else if (message.type === "termkey.pendingLogin.get") {
@@ -126,6 +129,14 @@ async function openPopupWithSiteContext({
             filledFields: 2,
             filledUsername: true,
             filledPassword: true,
+          },
+        });
+      } else if (message.type === "termkey.nativeHost.launchTermKey") {
+        callback({
+          ok: true,
+          response: {
+            type: "terminal_launched",
+            launched: true,
           },
         });
       }
@@ -284,6 +295,24 @@ it("shows Fill when an eligible login field is empty", async () => {
   ).toBe(false);
 });
 
+it("opens TermKey through the native host quick-access action", async () => {
+  const sendMessage = await openPopupWithSiteContext({
+    hasEmptyLoginField: false,
+    matches: [],
+  });
+
+  document.querySelector<HTMLButtonElement>("#open-termkey")?.click();
+
+  expect(sendMessage).toHaveBeenCalledWith(
+    { type: "termkey.nativeHost.launchTermKey" },
+    expect.any(Function)
+  );
+  expect(
+    document.querySelector<HTMLParagraphElement>("#native-host-status")
+      ?.textContent
+  ).toBe("Opened TermKey in Terminal.");
+});
+
 it("hides the match picker when eligible login fields are already filled", async () => {
   await openPopupWithSiteContext({
     hasEmptyLoginField: false,
@@ -304,6 +333,29 @@ it("shows the match picker when eligible login fields are empty", async () => {
   expect(document.querySelector<HTMLElement>("#match-picker")?.hidden).toBe(
     false
   );
+});
+
+it("continues a selected protected inline login in the popup", async () => {
+  const protectedMatch = {
+    ...match,
+    hasSecondaryPassword: true,
+  };
+  const sendMessage = await openPopupWithSiteContext({
+    hasEmptyLoginField: true,
+    matches: [protectedMatch],
+    selectedInlineMatchId: protectedMatch.id,
+  });
+
+  expect(
+    document.querySelector<HTMLElement>("#secondary-password-group")?.hidden
+  ).toBe(false);
+  expect(
+    sendMessage.mock.calls.some(
+      ([message]) =>
+        (message as { type?: string }).type ===
+        "termkey.autofill.fillSelectedMatch"
+    )
+  ).toBe(false);
 });
 
 it("refreshes page context after filling and hides Fill when the fields are filled", async () => {

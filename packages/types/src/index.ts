@@ -21,6 +21,9 @@ export type NativeHostRequest =
       type: "generate_password";
     }
   | {
+      type: "launch_termkey";
+    }
+  | {
       type: "save_password_entry";
       name: string;
       username?: string;
@@ -100,6 +103,7 @@ export type PopupSiteMatchesResponse = {
   siteOrigin: string;
   siteHostname: string;
   matches: PopupSiteMatch[];
+  selectedInlineMatchId?: string;
 };
 
 export type NativeHostAutofillEntry = {
@@ -117,6 +121,7 @@ export type ProtocolInfo = {
 export type FillCredentialsMessage = {
   type: "termkey-fill-credentials";
   documentToken: string;
+  autofillReceipt: string;
   username?: string;
   password: string;
 };
@@ -248,6 +253,10 @@ export type NativeHostResponse = (
       password: string;
     }
   | {
+      type: "terminal_launched";
+      launched: true;
+    }
+  | {
       type: "save_entry";
       entryName: string;
     }
@@ -313,6 +322,9 @@ export type PopupToBackgroundMessage =
     }
   | {
       type: "termkey.passwords.generateForPage";
+    }
+  | {
+      type: "termkey.nativeHost.launchTermKey";
     }
   | {
       type: "termkey.autofill.fillSelectedMatch";

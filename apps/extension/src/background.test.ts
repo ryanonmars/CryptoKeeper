@@ -22,6 +22,7 @@ const protocolInfo = {
     "origin-only-save",
     "password-entry-update",
     "bounded-native-output",
+    "terminal-launch",
   ],
 } as const;
 
@@ -191,6 +192,322 @@ describe("background security boundaries", () => {
     vi.useRealTimers();
   });
 
+  it("offers an unlock action to inline autofill while the vault is locked", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      if ((request as { type?: string }).type === "status") {
+        return { ...statusResponse, locked: true };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    createBackgroundService(mock.chrome);
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.request",
+          documentToken: "a".repeat(64),
+        },
+        7
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: {
+        type: "inline_autofill",
+        state: "locked",
+        matches: [],
+      },
+    });
+    expect(
+      mock.ports.flatMap((port) => port.postMessage.mock.calls)
+    ).not.toContainEqual([
+      expect.objectContaining({ type: "find_site_matches" }),
+    ]);
+  });
+
+  it("returns origin-bound matches to inline autofill while unlocked", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "status") return statusResponse;
+      if (type === "find_site_matches") return siteMatchesResponse;
+      return { type: "error", message: "Unexpected request." };
+    });
+    createBackgroundService(mock.chrome, {
+      generateGrantId: () => "d".repeat(64),
+    });
+
+    const response = await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.inlineAutofill.request",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    expect(response).toEqual({
+      ok: true,
+      response: {
+        type: "inline_autofill",
+        state: "ready",
+        siteHostname: "example.test",
+        matches: [
+          {
+            ...siteMatchesResponse.matches[0],
+            grantId: "d".repeat(64),
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(response)).not.toContain("secret");
+    expect(JSON.stringify(response)).not.toContain("password");
+  });
+
+  it("rejects inline autofill after the page document changes", async () => {
+    const mock = createChromeMock();
+    mock.setDocumentToken("b".repeat(64));
+    mock.setNativeResponder(() => {
+      throw new Error("Native host should not be contacted.");
+    });
+    createBackgroundService(mock.chrome);
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.request",
+          documentToken: "a".repeat(64),
+        },
+        7
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: "The login page changed before the autofill action.",
+    });
+  });
+
+  it("keeps only the newest overlapping inline match lookup", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "status") return statusResponse;
+      if (type === "find_site_matches") return siteMatchesResponse;
+      return { type: "error", message: "Unexpected request." };
+    });
+    createBackgroundService(mock.chrome, {
+      generateGrantId: () => "e".repeat(64),
+    });
+    const message = {
+      type: "termkey.content.inlineAutofill.request",
+      documentToken: "a".repeat(64),
+    };
+
+    const first = mock.dispatchContentMessage(message, 7);
+    const second = mock.dispatchContentMessage(message, 7);
+
+    await expect(first).resolves.toEqual({
+      ok: false,
+      error: "A newer saved-login lookup replaced this request.",
+    });
+    await expect(second).resolves.toMatchObject({
+      ok: true,
+      response: {
+        type: "inline_autofill",
+        state: "ready",
+        matches: [{ grantId: "e".repeat(64) }],
+      },
+    });
+  });
+
+  it("asks inline autofill to refresh after its grant expires", async () => {
+    let now = 1_000;
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "status") return statusResponse;
+      if (type === "find_site_matches") return siteMatchesResponse;
+      return { type: "error", message: "Unexpected request." };
+    });
+    createBackgroundService(mock.chrome, {
+      now: () => now,
+      grantTtlMs: 30_000,
+      generateGrantId: () => "e".repeat(64),
+    });
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.inlineAutofill.request",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+    now += 30_001;
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.fill",
+          documentToken: "a".repeat(64),
+          grantId: "e".repeat(64),
+          entryId: "entry-1",
+        },
+        7
+      )
+    ).resolves.toEqual({
+      ok: false,
+      error: "This login match is already in use or no longer available.",
+      refreshMatches: true,
+    });
+  });
+
+  it("fills an inline match without opening the extension popup", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "status") return statusResponse;
+      if (type === "find_site_matches") return siteMatchesResponse;
+      if (type === "get_autofill_entry") {
+        return {
+          type: "autofill_entry",
+          entry: {
+            id: "entry-1",
+            name: "Example",
+            username: "person@example.test",
+            password: "secret",
+          },
+        };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    mock.setTabMessageHandler((_tabId, message) => {
+      const type = (message as { type?: string }).type;
+      if (type === "termkey.contentScriptProbe") {
+        return { ok: true, documentToken: "a".repeat(64) };
+      }
+      if (type === "termkey-fill-credentials") {
+        return {
+          ok: true,
+          filledFields: 2,
+          filledUsername: true,
+          filledPassword: true,
+        };
+      }
+      return undefined;
+    });
+    createBackgroundService(mock.chrome, {
+      generateGrantId: () => "d".repeat(64),
+    });
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.inlineAutofill.request",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.fill",
+          documentToken: "a".repeat(64),
+          grantId: "d".repeat(64),
+          entryId: "entry-1",
+        },
+        7
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        type: "fill_result",
+        entryName: "Example",
+        filledPassword: true,
+      },
+    });
+    expect(mock.chrome.action.openPopup).not.toHaveBeenCalled();
+    expect(mock.chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({
+        type: "termkey-fill-credentials",
+        username: "person@example.test",
+        password: "secret",
+      }),
+      { frameId: 0 }
+    );
+  });
+
+  it("opens the extension when inline autofill requests unlock", async () => {
+    const mock = createChromeMock();
+    createBackgroundService(mock.chrome);
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.openPopup",
+          documentToken: "a".repeat(64),
+        },
+        7
+      )
+    ).resolves.toEqual({
+      ok: true,
+      response: { type: "inline_autofill_popup_opened" },
+    });
+    expect(mock.chrome.action.openPopup).toHaveBeenCalledOnce();
+  });
+
+  it("hands a selected protected inline match to the popup", async () => {
+    const mock = createChromeMock();
+    const protectedMatches = {
+      ...siteMatchesResponse,
+      matches: [
+        {
+          ...siteMatchesResponse.matches[0],
+          hasSecondaryPassword: true,
+        },
+      ],
+    };
+    mock.setNativeResponder((request) => {
+      const type = (request as { type?: string }).type;
+      if (type === "status") return statusResponse;
+      if (type === "find_site_matches") return protectedMatches;
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome, {
+      generateGrantId: () => "d".repeat(64),
+    });
+    await mock.dispatchContentMessage(
+      {
+        type: "termkey.content.inlineAutofill.request",
+        documentToken: "a".repeat(64),
+      },
+      7
+    );
+
+    await expect(
+      mock.dispatchContentMessage(
+        {
+          type: "termkey.content.inlineAutofill.openPopup",
+          documentToken: "a".repeat(64),
+          grantId: "d".repeat(64),
+          entryId: "entry-1",
+          name: "Example",
+          username: "person@example.test",
+          hasSecondaryPassword: true,
+        },
+        7
+      )
+    ).resolves.toMatchObject({ ok: true });
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.nativeHost.findSiteMatches" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: {
+        type: "site_matches",
+        selectedInlineMatchId: "entry-1",
+      },
+    });
+  });
+
   it("forwards empty eligible login-field metadata from the content script", async () => {
     const mock = createChromeMock();
     mock.setTabMessageHandler((_tabId, message) => {
@@ -225,6 +542,34 @@ describe("background security boundaries", () => {
         context: { hasEmptyLoginField: true },
       },
     });
+  });
+
+  it("forwards the fixed TermKey launch request to the native host", async () => {
+    const mock = createChromeMock();
+    mock.setNativeResponder((request) => {
+      if ((request as { type?: string }).type === "launch_termkey") {
+        return { type: "terminal_launched", launched: true };
+      }
+      return { type: "error", message: "Unexpected request." };
+    });
+    const service = createBackgroundService(mock.chrome);
+
+    await expect(
+      service.handleMessage(
+        { type: "termkey.nativeHost.launchTermKey" },
+        mock.extensionSender
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      response: { type: "terminal_launched", launched: true },
+    });
+    expect(
+      mock.ports.flatMap((port) => port.postMessage.mock.calls)
+    ).toContainEqual([
+      expect.objectContaining({
+        type: "launch_termkey",
+      }),
+    ]);
   });
 
   it("returns no pending login when the extension has not captured one", async () => {

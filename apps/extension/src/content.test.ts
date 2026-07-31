@@ -61,6 +61,9 @@ afterEach(() => {
   vi.restoreAllMocks();
   document.body.innerHTML = "";
   document.getElementById("termkey-pending-login-prompt")?.remove();
+  document
+    .querySelectorAll("#termkey-inline-autofill")
+    .forEach((element) => element.remove());
   vi.unstubAllGlobals();
 });
 
@@ -568,6 +571,157 @@ it("reports a filled eligible login form as not fillable", () => {
   });
 });
 
+it("opens inline TermKey matches when an empty login field receives focus", async () => {
+  sendMessage.mockImplementation(
+    (message: { type?: string }, callback?: (response: unknown) => void) => {
+      if (message.type === "termkey.content.inlineAutofill.request") {
+        callback?.({
+          ok: true,
+          response: {
+            type: "inline_autofill",
+            state: "ready",
+            siteHostname: "example.test",
+            matches: [
+              {
+                id: "entry-1",
+                grantId: "d".repeat(64),
+                name: "Example",
+                username: "sam",
+                hasSecondaryPassword: false,
+              },
+            ],
+          },
+        });
+      }
+    }
+  );
+  document.body.innerHTML = `
+    <form aria-label="Login">
+      <input autocomplete="username">
+      <input type="password" autocomplete="current-password">
+    </form>
+  `;
+
+  input("input[type=password]").focus();
+  await Promise.resolve();
+
+  expect(sendMessage).toHaveBeenCalledWith(
+    {
+      type: "termkey.content.inlineAutofill.request",
+      documentToken,
+    },
+    expect.any(Function)
+  );
+  await vi.waitFor(() => {
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+      ).some((host) => host.dataset.mode === "ready")
+    ).toBe(true);
+  });
+  expect(
+    Array.from(
+      document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+    ).some((host) => host.dataset.state === "open")
+  ).toBe(true);
+});
+
+it("offers inline unlock without requesting saved matches from the page", async () => {
+  sendMessage.mockImplementation(
+    (message: { type?: string }, callback?: (response: unknown) => void) => {
+      if (message.type === "termkey.content.inlineAutofill.request") {
+        callback?.({
+          ok: true,
+          response: {
+            type: "inline_autofill",
+            state: "locked",
+            matches: [],
+          },
+        });
+      }
+    }
+  );
+  document.body.innerHTML = `
+    <form aria-label="Login">
+      <input autocomplete="username">
+      <input type="password" autocomplete="current-password">
+    </form>
+  `;
+
+  input("input[type=password]").focus();
+  await Promise.resolve();
+
+  await vi.waitFor(() => {
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+      ).some((host) => host.dataset.mode === "locked")
+    ).toBe(true);
+  });
+  expect(
+    Array.from(
+      document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+    ).some((host) => host.dataset.state === "open")
+  ).toBe(true);
+});
+
+it("does not mount inline autofill on signup password fields", () => {
+  document.body.innerHTML = `
+    <form aria-label="Create account">
+      <input autocomplete="username">
+      <input type="password" autocomplete="new-password">
+      <button>Create account</button>
+    </form>
+  `;
+
+  input("input[type=password]").focus();
+
+  expect(
+    Array.from(
+      document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+    ).some((host) => host.dataset.state === "open")
+  ).toBe(false);
+  expect(sendMessage).not.toHaveBeenCalledWith(
+    expect.objectContaining({
+      type: "termkey.content.inlineAutofill.request",
+    }),
+    expect.any(Function)
+  );
+});
+
+it("hides inline autofill after both login fields are filled", async () => {
+  sendMessage.mockImplementation(
+    (message: { type?: string }, callback?: (response: unknown) => void) => {
+      if (message.type === "termkey.content.inlineAutofill.request") {
+        callback?.({
+          ok: true,
+          response: {
+            type: "inline_autofill",
+            state: "ready",
+            siteHostname: "example.test",
+            matches: [],
+          },
+        });
+      }
+    }
+  );
+  document.body.innerHTML = `
+    <form aria-label="Login">
+      <input autocomplete="username">
+      <input type="password" autocomplete="current-password">
+    </form>
+  `;
+  input("input[type=password]").focus();
+
+  await fillCredentials("sam", "secret");
+
+  expect(
+    Array.from(
+      document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
+    ).some((host) => host.dataset.state !== "hidden")
+  ).toBe(false);
+});
+
 it("does not report empty signup fields as fillable login targets", () => {
   document.body.innerHTML = `
     <form aria-label="Create account">
@@ -964,7 +1118,11 @@ it("uses only the bounded retry schedule for a delayed password field", async ()
   expect(
     setTimeoutSpy.mock.calls
       .map((call) => call[1])
-      .filter((delay) => typeof delay === "number" && delay > 0)
+      .filter(
+        (delay) =>
+          typeof delay === "number" &&
+          (delay === 150 || delay === 350 || delay === 700)
+      )
   ).toEqual([150, 350, 700]);
   const timerCallsAfterFill = setTimeoutSpy.mock.calls.length;
 

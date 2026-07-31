@@ -50,6 +50,7 @@ export class MockNativePort {
               "origin-only-save",
               "password-entry-update",
               "bounded-native-output",
+              "terminal-launch",
             ],
             requestId: request.requestId,
           });
@@ -134,6 +135,7 @@ export function createChromeMock(initialTab: MockTab = {
                     "origin-only-save",
                     "password-entry-update",
                     "bounded-native-output",
+                    "terminal-launch",
                   ],
                 }
               : nativeResponder?.(request, port);

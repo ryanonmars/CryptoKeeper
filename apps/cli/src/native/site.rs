@@ -12,6 +12,7 @@ pub const NATIVE_CAPABILITIES: &[&str] = &[
     "origin-only-save",
     "password-entry-update",
     "bounded-native-output",
+    "terminal-launch",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]

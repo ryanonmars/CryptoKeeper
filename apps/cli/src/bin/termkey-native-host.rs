@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -43,6 +46,7 @@ enum NativeRequest {
         protocol_version: Option<u32>,
     },
     GeneratePassword,
+    LaunchTermkey,
     GetAutofillEntry {
         id: String,
         origin: String,
@@ -158,6 +162,9 @@ enum NativeResponse {
     Status(StatusResponse),
     GeneratedPassword {
         password: String,
+    },
+    TerminalLaunched {
+        launched: bool,
     },
     AutofillEntry {
         entry: AutofillEntryResponse,
@@ -364,6 +371,89 @@ fn require_unlocked_session(
     state.session.as_ref().ok_or_else(|| NativeResponse::Error {
         message: "Vault is locked. Unlock it first.".to_string(),
     })
+}
+
+fn termkey_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "termkey.exe"
+    } else {
+        "termkey"
+    }
+}
+
+fn termkey_binary_candidates(native_host: &Path) -> Vec<PathBuf> {
+    let Some(executable_dir) = native_host.parent() else {
+        return Vec::new();
+    };
+    let binary_name = termkey_binary_name();
+    let mut candidates = vec![executable_dir.join(binary_name)];
+    for ancestor in executable_dir.ancestors().take(4) {
+        candidates.push(ancestor.join("bin").join(binary_name));
+    }
+    candidates
+}
+
+fn locate_termkey_binary() -> io::Result<PathBuf> {
+    let native_host = std::env::current_exe()?;
+    for candidate in termkey_binary_candidates(&native_host) {
+        if candidate.is_file() {
+            return std::fs::canonicalize(candidate);
+        }
+    }
+    Err(io::Error::new(
+        ErrorKind::NotFound,
+        "The TermKey executable was not found beside the native host installation.",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn launch_termkey_terminal() -> io::Result<()> {
+    let termkey_binary = locate_termkey_binary()?;
+    let status = Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "set termkeyPath to item 1 of argv",
+            "-e",
+            "tell application \"Terminal\"",
+            "-e",
+            "do script quoted form of termkeyPath",
+            "-e",
+            "activate",
+            "-e",
+            "end tell",
+            "-e",
+            "end run",
+            "--",
+        ])
+        .arg(termkey_binary)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "macOS Terminal rejected the TermKey launch request.",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launch_termkey_terminal() -> io::Result<()> {
+    let _ = locate_termkey_binary()?;
+    Err(io::Error::new(
+        ErrorKind::Unsupported,
+        "Opening TermKey in a terminal is currently supported only on macOS.",
+    ))
+}
+
+fn launch_termkey() -> NativeResponse {
+    match launch_termkey_terminal() {
+        Ok(()) => NativeResponse::TerminalLaunched { launched: true },
+        Err(error) => NativeResponse::Error {
+            message: error.to_string(),
+        },
+    }
 }
 
 fn summarize_entry(index: usize, entry: &Entry) -> EntrySummary {
@@ -940,6 +1030,7 @@ fn handle_request(state: &mut HostState, payload: &[u8]) -> NativeResponse {
         NativeRequest::GeneratePassword => NativeResponse::GeneratedPassword {
             password: crypto::passwords::generate_password(),
         },
+        NativeRequest::LaunchTermkey => launch_termkey(),
         NativeRequest::GetAutofillEntry {
             id,
             origin,
@@ -1053,9 +1144,10 @@ mod tests {
     use super::{
         encode_wire_response, entry_fingerprint, find_unique_entry_by_fingerprint, handle_request,
         handle_wire_request, load_status_for_state, protocol_info_json, read_message,
-        write_message, write_wire_message, AutofillEntryResponse, HostState, NativeRequest,
-        NativeResponse, NativeWireResponse, SensitiveString, MAX_ISSUED_MATCHES,
-        MAX_NATIVE_RESPONSE_BYTES, NATIVE_CAPABILITIES, NATIVE_PROTOCOL_VERSION,
+        termkey_binary_candidates, write_message, write_wire_message, AutofillEntryResponse,
+        HostState, NativeRequest, NativeResponse, NativeWireResponse, SensitiveString,
+        MAX_ISSUED_MATCHES, MAX_NATIVE_RESPONSE_BYTES, NATIVE_CAPABILITIES,
+        NATIVE_PROTOCOL_VERSION,
     };
     use chrono::Utc;
     use std::collections::HashMap;
@@ -1298,6 +1390,34 @@ mod tests {
         let response = handle_request(&mut HostState::default(), b"not-json");
 
         assert!(matches!(response, NativeResponse::Error { .. }));
+    }
+
+    #[test]
+    fn terminal_launch_request_contains_no_command_or_path_fields() {
+        let request = serde_json::from_slice::<NativeRequest>(br#"{"type":"launch_termkey"}"#)
+            .expect("fixed launch request should deserialize");
+        assert!(matches!(request, NativeRequest::LaunchTermkey));
+        let request_with_ignored_fields = serde_json::from_slice::<NativeRequest>(
+            br#"{"type":"launch_termkey","command":"rm -rf /","path":"/tmp/fake"}"#,
+        )
+        .expect("unknown launch fields should not alter the fixed request");
+        assert!(matches!(
+            request_with_ignored_fields,
+            NativeRequest::LaunchTermkey
+        ));
+    }
+
+    #[test]
+    fn terminal_launch_resolves_only_install_relative_termkey_candidates() {
+        let candidates = termkey_binary_candidates(std::path::Path::new(
+            "/opt/termkey/libexec/termkey-native-host",
+        ));
+        assert_eq!(
+            candidates.first(),
+            Some(&std::path::PathBuf::from("/opt/termkey/libexec/termkey"))
+        );
+        assert!(candidates.contains(&std::path::PathBuf::from("/opt/termkey/bin/termkey")));
+        assert!(candidates.iter().all(|candidate| candidate.is_absolute()));
     }
 
     #[test]

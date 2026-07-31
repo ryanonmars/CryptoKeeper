@@ -60,6 +60,14 @@ type FillAttemptResult = {
   filledPassword: boolean;
 };
 
+type InlineAutofillMatch = {
+  id: string;
+  grantId: string;
+  name: string;
+  username: string | null;
+  hasSecondaryPassword: boolean;
+};
+
 type LoginTargets = {
   passwordInput?: HTMLInputElement;
   usernameInput?: HTMLInputElement;
@@ -75,6 +83,7 @@ type GeneratedPasswordTargets = {
 
 const FILL_RETRY_DELAYS_MS = [0, 150, 350, 700] as const;
 const PROMPT_IFRAME_ID = "termkey-pending-login-prompt";
+const INLINE_AUTOFILL_HOST_ID = "termkey-inline-autofill";
 const DOCUMENT_TOKEN = Array.from(
   crypto.getRandomValues(new Uint8Array(32)),
   (byte) => byte.toString(16).padStart(2, "0")
@@ -94,6 +103,12 @@ let recentTermKeyFill:
   | undefined;
 let pageContextNotificationQueued = false;
 let mountedPromptCandidateId: string | undefined;
+let inlineAutofillTarget: HTMLInputElement | undefined;
+let inlineAutofillHost: HTMLDivElement | undefined;
+let inlineAutofillButton: HTMLButtonElement | undefined;
+let inlineAutofillMenu: HTMLDivElement | undefined;
+let inlineAutofillRequestVersion = 0;
+let inlineAutofillCloseTimer: number | undefined;
 
 if (runtimeChrome?.runtime && contentGlobal.__termkeyContentScriptLoaded) {
   return;
@@ -1129,6 +1144,514 @@ function inspectPageContext() {
   };
 }
 
+function sendInlineAutofillMessage(
+  message: Record<string, unknown>,
+  callback: (response: unknown) => void
+) {
+  if (!runtimeChrome?.runtime?.sendMessage) {
+    callback({
+      ok: false,
+      error: "TermKey extension messaging is unavailable.",
+    });
+    return;
+  }
+  runtimeChrome.runtime.sendMessage(message, callback);
+}
+
+function inlineAutofillLogo() {
+  const logo = document.createElement("img");
+  logo.src = runtimeChrome?.runtime?.getURL(
+    "public/icons/termkey-icon-32.png"
+  ) ?? "";
+  logo.alt = "";
+  logo.draggable = false;
+  return logo;
+}
+
+function ensureInlineAutofillUi() {
+  if (
+    inlineAutofillHost &&
+    inlineAutofillButton &&
+    inlineAutofillMenu
+  ) {
+    return;
+  }
+
+  const host = document.createElement("div");
+  host.id = INLINE_AUTOFILL_HOST_ID;
+  host.dataset.state = "idle";
+  host.style.cssText =
+    "all:initial;position:fixed;inset:0;z-index:2147483646;pointer-events:none;";
+  const shadow = host.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = `
+    :host { all: initial; }
+    * { box-sizing: border-box; }
+    .trigger {
+      position: fixed;
+      display: none;
+      width: 26px;
+      height: 26px;
+      padding: 3px;
+      border: 0;
+      border-radius: 7px;
+      color: #65d7ff;
+      background: #102438;
+      box-shadow: 0 0 0 1px rgba(101, 215, 255, .52), 0 5px 14px rgba(0, 0, 0, .28);
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    .trigger:hover, .trigger:focus-visible, .trigger[data-open="true"] {
+      color: #93e5ff;
+      background: #17334d;
+      box-shadow: 0 0 0 2px rgba(101, 215, 255, .72), 0 7px 18px rgba(0, 0, 0, .34);
+      outline: none;
+    }
+    .trigger img { display: block; width: 20px; height: 20px; object-fit: contain; }
+    .menu {
+      position: fixed;
+      display: none;
+      overflow: hidden;
+      min-width: 280px;
+      max-width: min(380px, calc(100vw - 20px));
+      border: 1px solid #33435a;
+      border-radius: 12px;
+      color: #eef4ff;
+      background: #111a28;
+      box-shadow: 0 18px 48px rgba(0, 0, 0, .48);
+      font: 500 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: auto;
+    }
+    .brand {
+      padding: 10px 13px 8px;
+      border-bottom: 1px solid #26354a;
+      color: #65d7ff;
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      padding: 12px 13px;
+      border: 0;
+      border-bottom: 1px solid #26354a;
+      color: inherit;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+    }
+    .row:last-child { border-bottom: 0; }
+    .row:hover, .row:focus-visible { background: #19263a; outline: none; }
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      color: #65d7ff;
+      background: #102b40;
+    }
+    .mark img { width: 24px; height: 24px; object-fit: contain; }
+    .copy { min-width: 0; }
+    .name, .detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .name { color: #f7f9ff; font-size: 15px; font-weight: 700; }
+    .detail { margin-top: 2px; color: #aebbd0; font-size: 13px; }
+    .action { color: #65d7ff; font-size: 13px; font-weight: 750; }
+    .status { padding: 15px 14px; color: #b8c5d8; }
+    @media (prefers-reduced-motion: no-preference) {
+      .menu { animation: termkey-menu-in 120ms ease-out; transform-origin: top right; }
+      @keyframes termkey-menu-in {
+        from { opacity: 0; transform: translateY(-4px) scale(.985); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+      }
+    }
+  `;
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "trigger";
+  trigger.title = "Fill with TermKey";
+  trigger.setAttribute("aria-label", "Show TermKey saved logins");
+  trigger.append(inlineAutofillLogo());
+  const menu = document.createElement("div");
+  menu.className = "menu";
+  menu.setAttribute("role", "dialog");
+  menu.setAttribute("aria-label", "TermKey saved logins");
+
+  trigger.addEventListener("pointerdown", (event) => event.preventDefault());
+  trigger.addEventListener("click", () => {
+    if (menu.style.display === "block") {
+      closeInlineAutofillMenu();
+    } else {
+      openInlineAutofillMenu();
+    }
+  });
+  menu.addEventListener("pointerdown", (event) => event.preventDefault());
+
+  shadow.append(style, trigger, menu);
+  (document.documentElement ?? document.body).append(host);
+  inlineAutofillHost = host;
+  inlineAutofillButton = trigger;
+  inlineAutofillMenu = menu;
+}
+
+function positionInlineAutofillUi() {
+  if (
+    !inlineAutofillTarget ||
+    !inlineAutofillHost ||
+    !inlineAutofillButton ||
+    !inlineAutofillMenu
+  ) {
+    return;
+  }
+  const rect = inlineAutofillTarget.getBoundingClientRect();
+  const visible =
+    rect.width >= 70 &&
+    rect.height >= 18 &&
+    rect.bottom > 0 &&
+    rect.top < window.innerHeight;
+  if (!visible) {
+    inlineAutofillButton.style.display = "none";
+    inlineAutofillMenu.style.display = "none";
+    inlineAutofillHost.dataset.state = "hidden";
+    return;
+  }
+
+  const triggerSize = 26;
+  inlineAutofillButton.style.display = "block";
+  inlineAutofillButton.style.left = `${Math.max(
+    4,
+    Math.min(window.innerWidth - triggerSize - 4, rect.right - triggerSize - 5)
+  )}px`;
+  inlineAutofillButton.style.top = `${Math.max(
+    4,
+    rect.top + (rect.height - triggerSize) / 2
+  )}px`;
+  const menuWidth = Math.max(280, Math.min(380, rect.width));
+  const availableMenuWidth = Math.max(180, window.innerWidth - 20);
+  const renderedMenuWidth = Math.min(menuWidth, availableMenuWidth);
+  inlineAutofillMenu.style.width = `${renderedMenuWidth}px`;
+  inlineAutofillMenu.style.left = `${Math.max(
+    10,
+    Math.min(window.innerWidth - renderedMenuWidth - 10, rect.left)
+  )}px`;
+  const menuHeight = inlineAutofillMenu.getBoundingClientRect().height;
+  const belowTop = rect.bottom + 7;
+  const aboveTop = rect.top - menuHeight - 7;
+  inlineAutofillMenu.style.top = `${
+    menuHeight > 0 &&
+    belowTop + menuHeight > window.innerHeight - 10 &&
+    aboveTop >= 10
+      ? aboveTop
+      : Math.max(10, Math.min(window.innerHeight - 12, belowTop))
+  }px`;
+  inlineAutofillHost.dataset.state =
+    inlineAutofillMenu.style.display === "block" ? "open" : "ready";
+}
+
+function closeInlineAutofillMenu() {
+  inlineAutofillRequestVersion += 1;
+  if (inlineAutofillCloseTimer !== undefined) {
+    window.clearTimeout(inlineAutofillCloseTimer);
+    inlineAutofillCloseTimer = undefined;
+  }
+  if (inlineAutofillMenu) {
+    inlineAutofillMenu.style.display = "none";
+  }
+  inlineAutofillButton?.setAttribute("data-open", "false");
+  if (inlineAutofillHost && inlineAutofillTarget) {
+    inlineAutofillHost.dataset.state = "ready";
+  }
+}
+
+function hideInlineAutofillUi() {
+  inlineAutofillTarget = undefined;
+  inlineAutofillRequestVersion += 1;
+  if (inlineAutofillCloseTimer !== undefined) {
+    window.clearTimeout(inlineAutofillCloseTimer);
+    inlineAutofillCloseTimer = undefined;
+  }
+  inlineAutofillButton?.setAttribute("data-open", "false");
+  if (inlineAutofillButton) inlineAutofillButton.style.display = "none";
+  if (inlineAutofillMenu) inlineAutofillMenu.style.display = "none";
+  if (inlineAutofillHost) inlineAutofillHost.dataset.state = "hidden";
+}
+
+function renderInlineAutofillStatus(message: string) {
+  if (!inlineAutofillMenu) return;
+  inlineAutofillMenu.replaceChildren();
+  const brand = document.createElement("div");
+  brand.className = "brand";
+  brand.textContent = "TermKey";
+  const status = document.createElement("div");
+  status.className = "status";
+  status.textContent = message;
+  inlineAutofillMenu.append(brand, status);
+}
+
+function createInlineAutofillRow(
+  name: string,
+  detail: string,
+  action: string,
+  onSelect: () => void
+) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "row";
+  const mark = document.createElement("span");
+  mark.className = "mark";
+  mark.append(inlineAutofillLogo());
+  const copy = document.createElement("span");
+  copy.className = "copy";
+  const title = document.createElement("span");
+  title.className = "name";
+  title.textContent = name;
+  const subtitle = document.createElement("span");
+  subtitle.className = "detail";
+  subtitle.textContent = detail;
+  copy.append(title, subtitle);
+  const actionLabel = document.createElement("span");
+  actionLabel.className = "action";
+  actionLabel.textContent = action;
+  row.append(mark, copy, actionLabel);
+  row.addEventListener("click", onSelect);
+  return row;
+}
+
+function openTermKeyPopup(match?: InlineAutofillMatch) {
+  renderInlineAutofillStatus("Opening TermKey…");
+  sendInlineAutofillMessage(
+    {
+      type: "termkey.content.inlineAutofill.openPopup",
+      documentToken: DOCUMENT_TOKEN,
+      ...(match
+        ? {
+            grantId: match.grantId,
+            entryId: match.id,
+            name: match.name,
+            username: match.username,
+            hasSecondaryPassword: match.hasSecondaryPassword,
+          }
+        : {}),
+    },
+    (response) => {
+      if (
+        typeof response === "object" &&
+        response !== null &&
+        "ok" in response &&
+        response.ok === true
+      ) {
+        closeInlineAutofillMenu();
+        return;
+      }
+      renderInlineAutofillStatus(
+        typeof response === "object" &&
+          response !== null &&
+          "error" in response &&
+          typeof response.error === "string"
+          ? response.error
+          : "Open the TermKey extension to continue."
+      );
+    }
+  );
+}
+
+function fillInlineAutofillMatch(match: InlineAutofillMatch) {
+  if (match.hasSecondaryPassword) {
+    openTermKeyPopup(match);
+    return;
+  }
+  renderInlineAutofillStatus(`Filling ${match.name}…`);
+  sendInlineAutofillMessage(
+    {
+      type: "termkey.content.inlineAutofill.fill",
+      documentToken: DOCUMENT_TOKEN,
+      grantId: match.grantId,
+      entryId: match.id,
+    },
+    (response) => {
+      if (
+        typeof response === "object" &&
+        response !== null &&
+        "ok" in response &&
+        response.ok === true
+      ) {
+        hideInlineAutofillUi();
+        return;
+      }
+      if (
+        typeof response === "object" &&
+        response !== null &&
+        "refreshMatches" in response &&
+        response.refreshMatches === true
+      ) {
+        openInlineAutofillMenu();
+        return;
+      }
+      renderInlineAutofillStatus(
+        typeof response === "object" &&
+          response !== null &&
+          "error" in response &&
+          typeof response.error === "string"
+          ? response.error
+          : "TermKey could not fill this login."
+      );
+    }
+  );
+}
+
+function renderInlineAutofillResponse(response: unknown) {
+  if (
+    !inlineAutofillMenu ||
+    typeof response !== "object" ||
+    response === null ||
+    !("ok" in response) ||
+    response.ok !== true ||
+    !("response" in response) ||
+    typeof response.response !== "object" ||
+    response.response === null ||
+    !("type" in response.response) ||
+    response.response.type !== "inline_autofill"
+  ) {
+    const error =
+      typeof response === "object" &&
+      response !== null &&
+      "error" in response &&
+      typeof response.error === "string"
+        ? response.error
+        : "TermKey could not check this login.";
+    renderInlineAutofillStatus(error);
+    return;
+  }
+
+  const payload = response.response as {
+    state?: string;
+    siteHostname?: string;
+    matches?: unknown[];
+  };
+  if (inlineAutofillHost) {
+    inlineAutofillHost.dataset.mode =
+      typeof payload.state === "string" ? payload.state : "error";
+  }
+  inlineAutofillMenu.replaceChildren();
+  const brand = document.createElement("div");
+  brand.className = "brand";
+  brand.textContent = "TermKey";
+  inlineAutofillMenu.append(brand);
+
+  if (payload.state === "locked") {
+    inlineAutofillMenu.append(
+      createInlineAutofillRow(
+        "Unlock TermKey",
+        "Open the extension to unlock and fill",
+        "Unlock",
+        openTermKeyPopup
+      )
+    );
+    return;
+  }
+  if (payload.state === "missing_vault") {
+    const status = document.createElement("div");
+    status.className = "status";
+    status.textContent = "Create a TermKey vault before using autofill.";
+    inlineAutofillMenu.append(status);
+    return;
+  }
+  const matches = Array.isArray(payload.matches)
+    ? payload.matches.filter((match): match is InlineAutofillMatch => {
+        if (typeof match !== "object" || match === null) return false;
+        const candidate = match as Partial<InlineAutofillMatch>;
+        return (
+          typeof candidate.id === "string" &&
+          typeof candidate.grantId === "string" &&
+          /^[a-f0-9]{64}$/.test(candidate.grantId) &&
+          typeof candidate.name === "string" &&
+          (typeof candidate.username === "string" ||
+            candidate.username === null) &&
+          typeof candidate.hasSecondaryPassword === "boolean"
+        );
+      })
+    : [];
+  if (matches.length === 0) {
+    const status = document.createElement("div");
+    status.className = "status";
+    status.textContent = `No saved login for ${
+      typeof payload.siteHostname === "string"
+        ? payload.siteHostname
+        : "this site"
+    }.`;
+    inlineAutofillMenu.append(status);
+    return;
+  }
+  for (const match of matches) {
+    inlineAutofillMenu.append(
+      createInlineAutofillRow(
+        match.name,
+        match.username ?? "Password login",
+        match.hasSecondaryPassword ? "Open" : "Fill",
+        () => fillInlineAutofillMatch(match)
+      )
+    );
+  }
+}
+
+function openInlineAutofillMenu() {
+  if (
+    !inlineAutofillTarget ||
+    !inlineAutofillButton ||
+    !inlineAutofillMenu
+  ) {
+    return;
+  }
+  const requestVersion = ++inlineAutofillRequestVersion;
+  if (inlineAutofillCloseTimer !== undefined) {
+    window.clearTimeout(inlineAutofillCloseTimer);
+  }
+  inlineAutofillCloseTimer = window.setTimeout(
+    closeInlineAutofillMenu,
+    25_000
+  );
+  inlineAutofillMenu.style.display = "block";
+  inlineAutofillButton.setAttribute("data-open", "true");
+  renderInlineAutofillStatus("Checking saved logins…");
+  positionInlineAutofillUi();
+  sendInlineAutofillMessage(
+    {
+      type: "termkey.content.inlineAutofill.request",
+      documentToken: DOCUMENT_TOKEN,
+    },
+    (response) => {
+      if (requestVersion !== inlineAutofillRequestVersion) return;
+      renderInlineAutofillResponse(response);
+      positionInlineAutofillUi();
+    }
+  );
+}
+
+function showInlineAutofillFor(target: HTMLInputElement) {
+  const inputs = collectInputElements();
+  const inferred = inferPageIntent(inputs);
+  const loginTargets = findBestLoginTargets(inputs);
+  if (
+    inferred.intent !== "login" ||
+    (target !== loginTargets.usernameInput &&
+      target !== loginTargets.passwordInput) ||
+    (loginTargets.usernameInput?.value.trim() !== "" &&
+      Boolean(loginTargets.passwordInput?.value))
+  ) {
+    hideInlineAutofillUi();
+    return;
+  }
+  inlineAutofillTarget = target;
+  ensureInlineAutofillUi();
+  positionInlineAutofillUi();
+  openInlineAutofillMenu();
+}
+
 function hasVisibleLoginFailure() {
   return Array.from(
     document.querySelectorAll<HTMLElement>("[role='alert'], .error, .alert")
@@ -1335,13 +1858,61 @@ document.addEventListener(
   true
 );
 
+document.addEventListener(
+  "focusin",
+  (event) => {
+    if (event.target instanceof HTMLInputElement) {
+      showInlineAutofillFor(event.target);
+    }
+  },
+  true
+);
+
+document.addEventListener(
+  "input",
+  () => {
+    if (!inlineAutofillTarget) return;
+    const context = inspectPageContext();
+    if (!context.hasEmptyLoginField) {
+      hideInlineAutofillUi();
+    }
+  },
+  true
+);
+
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (
+      inlineAutofillHost &&
+      !event.composedPath().includes(inlineAutofillHost) &&
+      event.target !== inlineAutofillTarget
+    ) {
+      closeInlineAutofillMenu();
+    }
+  },
+  true
+);
+
 if (runtimeChrome?.runtime) {
   wrapHistoryMethod("pushState");
   wrapHistoryMethod("replaceState");
   window.addEventListener("popstate", schedulePageContextChanged);
   window.addEventListener("hashchange", schedulePageContextChanged);
-  window.addEventListener("pagehide", removeMountedPrompt, { once: true });
-  new MutationObserver(schedulePageContextChanged).observe(document, {
+  window.addEventListener("resize", positionInlineAutofillUi);
+  window.addEventListener("scroll", positionInlineAutofillUi, true);
+  window.addEventListener(
+    "pagehide",
+    () => {
+      removeMountedPrompt();
+      inlineAutofillHost?.remove();
+    },
+    { once: true }
+  );
+  new MutationObserver(() => {
+    schedulePageContextChanged();
+    positionInlineAutofillUi();
+  }).observe(document, {
     childList: true,
     subtree: true,
   });
