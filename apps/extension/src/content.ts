@@ -2,6 +2,7 @@
 type FillCredentialsMessage = {
   type: "termkey-fill-credentials";
   documentToken: string;
+  autofillReceipt: string;
   username?: string;
   password: string;
 };
@@ -26,6 +27,7 @@ type SubmittedLoginCapture =
       ok: true;
       username: string | null;
       password: string;
+      autofillReceipt?: string;
     }
   | {
       ok: false;
@@ -83,6 +85,13 @@ const contentGlobal = globalThis as typeof globalThis & {
 };
 let submittedLoginSnapshot: SubmittedLoginCapture | undefined;
 let submittedLoginNotification: Promise<unknown> | undefined;
+let recentTermKeyFill:
+  | {
+      receipt: string;
+      username: string | null;
+      password: string;
+    }
+  | undefined;
 let pageContextNotificationQueued = false;
 let mountedPromptCandidateId: string | undefined;
 
@@ -958,6 +967,17 @@ async function fillCredentials(message: FillCredentialsMessage) {
     };
   }
 
+  if (
+    filledPassword &&
+    /^[a-f0-9]{64}$/.test(message.autofillReceipt)
+  ) {
+    recentTermKeyFill = {
+      receipt: message.autofillReceipt,
+      username: message.username?.trim() || null,
+      password: message.password,
+    };
+  }
+
   return {
     ok: true,
     filledFields,
@@ -981,11 +1001,23 @@ function captureSubmittedLoginFromInputs(inputs: HTMLInputElement[]): SubmittedL
     };
   }
 
-  return {
+  const capture = {
     ok: true,
     username: usernameInput?.value.trim() || null,
     password: passwordInput.value,
-  };
+  } as const;
+  if (
+    recentTermKeyFill &&
+    recentTermKeyFill.username === capture.username &&
+    recentTermKeyFill.password === capture.password
+  ) {
+    return {
+      ...capture,
+      autofillReceipt: recentTermKeyFill.receipt,
+    };
+  }
+  recentTermKeyFill = undefined;
+  return capture;
 }
 
 function captureSubmittedLogin(submittedForm: HTMLFormElement): SubmittedLoginCapture {
@@ -1009,6 +1041,9 @@ function notifySubmittedLogin(snapshot: SubmittedLoginCapture | undefined) {
         documentToken: DOCUMENT_TOKEN,
         username: snapshot.username,
         password: snapshot.password,
+        ...(snapshot.autofillReceipt
+          ? { autofillReceipt: snapshot.autofillReceipt }
+          : {}),
       }
     : {
         type: "termkey.content.loginSubmitted" as const,

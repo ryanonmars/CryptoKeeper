@@ -3459,6 +3459,7 @@ describe("background security boundaries", () => {
         documentToken: "a".repeat(64),
         username: "person@example.test",
         password: "secret",
+        autofillReceipt: "c".repeat(64),
       },
       7
     );

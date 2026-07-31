@@ -97,6 +97,7 @@ function fillCredentials(username: string | null, password: string) {
       {
         type: "termkey-fill-credentials",
         documentToken,
+        autofillReceipt: "f".repeat(64),
         username: username ?? undefined,
         password,
       },
@@ -633,6 +634,54 @@ it("notifies the background with submitted credentials", () => {
     documentToken,
     username: "sam",
     password: "secret",
+  });
+});
+
+it("marks an unchanged TermKey-filled login submission", async () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username">
+      <input type="password" autocomplete="current-password">
+    </form>
+  `;
+  await fillCredentials("sam", "secret");
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam",
+    password: "secret",
+    autofillReceipt: "f".repeat(64),
+  });
+});
+
+it("does not mark a TermKey-filled login after the password changes", async () => {
+  document.body.innerHTML = `
+    <form>
+      <input autocomplete="username">
+      <input type="password" autocomplete="current-password">
+    </form>
+  `;
+  await fillCredentials("sam", "secret");
+  input("input[type=password]").value = "changed-secret";
+  const form = document.querySelector("form");
+  if (!form) {
+    throw new Error("Missing submitted login fixture.");
+  }
+
+  form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+  expect(sendMessage).toHaveBeenCalledWith({
+    type: "termkey.content.loginSubmitted",
+    documentToken,
+    username: "sam",
+    password: "changed-secret",
   });
 });
 
