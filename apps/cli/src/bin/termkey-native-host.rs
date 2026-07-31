@@ -1144,9 +1144,9 @@ mod tests {
     use super::{
         encode_wire_response, entry_fingerprint, find_unique_entry_by_fingerprint, handle_request,
         handle_wire_request, load_status_for_state, protocol_info_json, read_message,
-        termkey_binary_candidates, write_message, write_wire_message, AutofillEntryResponse,
-        HostState, NativeRequest, NativeResponse, NativeWireResponse, SensitiveString,
-        MAX_ISSUED_MATCHES, MAX_NATIVE_RESPONSE_BYTES, NATIVE_CAPABILITIES,
+        termkey_binary_candidates, termkey_binary_name, write_message, write_wire_message,
+        AutofillEntryResponse, HostState, NativeRequest, NativeResponse, NativeWireResponse,
+        SensitiveString, MAX_ISSUED_MATCHES, MAX_NATIVE_RESPONSE_BYTES, NATIVE_CAPABILITIES,
         NATIVE_PROTOCOL_VERSION,
     };
     use chrono::Utc;
@@ -1409,14 +1409,16 @@ mod tests {
 
     #[test]
     fn terminal_launch_resolves_only_install_relative_termkey_candidates() {
-        let candidates = termkey_binary_candidates(std::path::Path::new(
-            "/opt/termkey/libexec/termkey-native-host",
-        ));
+        let install_root = std::env::current_dir()
+            .expect("current directory should be available")
+            .join("test-termkey-install");
+        let native_host = install_root.join("libexec").join("termkey-native-host");
+        let candidates = termkey_binary_candidates(&native_host);
         assert_eq!(
             candidates.first(),
-            Some(&std::path::PathBuf::from("/opt/termkey/libexec/termkey"))
+            Some(&install_root.join("libexec").join(termkey_binary_name()))
         );
-        assert!(candidates.contains(&std::path::PathBuf::from("/opt/termkey/bin/termkey")));
+        assert!(candidates.contains(&install_root.join("bin").join(termkey_binary_name())));
         assert!(candidates.iter().all(|candidate| candidate.is_absolute()));
     }
 
