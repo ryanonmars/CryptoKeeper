@@ -571,7 +571,7 @@ it("reports a filled eligible login form as not fillable", () => {
   });
 });
 
-it("opens inline TermKey matches when an empty login field receives focus", async () => {
+it("shows only the compact TermKey icon when an empty login field receives focus", async () => {
   sendMessage.mockImplementation(
     (message: { type?: string }, callback?: (response: unknown) => void) => {
       if (message.type === "termkey.content.inlineAutofill.request") {
@@ -605,28 +605,26 @@ it("opens inline TermKey matches when an empty login field receives focus", asyn
   input("input[type=password]").focus();
   await Promise.resolve();
 
-  expect(sendMessage).toHaveBeenCalledWith(
-    {
-      type: "termkey.content.inlineAutofill.request",
-      documentToken,
-    },
-    expect.any(Function)
-  );
   await vi.waitFor(() => {
     expect(
       Array.from(
         document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
-      ).some((host) => host.dataset.mode === "ready")
+      ).some((host) => host.dataset.state === "ready")
     ).toBe(true);
   });
-  expect(
-    Array.from(
-      document.querySelectorAll<HTMLElement>("#termkey-inline-autofill")
-    ).some((host) => host.dataset.state === "open")
-  ).toBe(true);
+  expect(sendMessage).not.toHaveBeenCalledWith(
+    expect.objectContaining({ type: "termkey.content.inlineAutofill.request" }),
+    expect.any(Function)
+  );
 });
 
-it("offers inline unlock without requesting saved matches from the page", async () => {
+it("opens inline TermKey matches only after the icon is clicked", async () => {
+  const nativeAttachShadow = HTMLElement.prototype.attachShadow;
+  vi.spyOn(HTMLElement.prototype, "attachShadow").mockImplementation(
+    function (this: HTMLElement, init: ShadowRootInit) {
+      return nativeAttachShadow.call(this, { ...init, mode: "open" });
+    }
+  );
   sendMessage.mockImplementation(
     (message: { type?: string }, callback?: (response: unknown) => void) => {
       if (message.type === "termkey.content.inlineAutofill.request") {
@@ -650,6 +648,11 @@ it("offers inline unlock without requesting saved matches from the page", async 
 
   input("input[type=password]").focus();
   await Promise.resolve();
+
+  const host = document.querySelector<HTMLElement>("#termkey-inline-autofill");
+  const trigger = host?.shadowRoot?.querySelector<HTMLButtonElement>(".trigger");
+  if (!trigger) throw new Error("Missing inline TermKey trigger.");
+  trigger.click();
 
   await vi.waitFor(() => {
     expect(

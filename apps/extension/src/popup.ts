@@ -306,20 +306,37 @@ document.body.innerHTML = `
     .password-input {
       width: 100%;
       padding: 11px 12px;
-      border: 1px solid rgba(148, 163, 184, 0.18);
+      border: 1px solid rgba(125, 211, 252, 0.38);
       border-radius: 12px;
-      background: rgba(2, 6, 23, 0.72);
+      background:
+        linear-gradient(180deg, rgba(13, 28, 47, 0.96), rgba(5, 13, 27, 0.96));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.05),
+        0 1px 2px rgba(0, 0, 0, 0.24);
       color: #f8fafc;
       outline: none;
+      transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
     }
 
     .password-input::placeholder {
-      color: #64748b;
+      color: #93a4b8;
+      opacity: 1;
+    }
+
+    .password-input:hover {
+      border-color: rgba(125, 211, 252, 0.56);
+      background:
+        linear-gradient(180deg, rgba(17, 35, 57, 0.98), rgba(7, 17, 33, 0.98));
     }
 
     .password-input:focus {
-      border-color: rgba(34, 197, 94, 0.6);
-      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.14);
+      border-color: rgba(74, 222, 128, 0.88);
+      background:
+        linear-gradient(180deg, rgba(18, 40, 57, 0.98), rgba(7, 20, 31, 0.98));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 0 0 3px rgba(34, 197, 94, 0.2),
+        0 5px 14px rgba(2, 6, 23, 0.3);
     }
 
     .checkbox-row {

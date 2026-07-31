@@ -1719,7 +1719,6 @@ function showInlineAutofillFor(target: HTMLInputElement) {
   inlineAutofillTarget = target;
   ensureInlineAutofillUi();
   positionInlineAutofillUi();
-  openInlineAutofillMenu();
 }
 
 function hasVisibleLoginFailure() {
