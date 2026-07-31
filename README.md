@@ -75,33 +75,21 @@ sudo mv termkey /usr/local/bin/
 
 ### Windows
 
-Download and run the installer: [TermKey-Setup.exe](https://github.com/ryanonmars/termkey/releases/latest/download/TermKey-Setup.exe)
+Download: [Windows x86_64 ZIP](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-windows-x86_64.zip)
 
-No admin required. It installs to `%LOCALAPPDATA%\termkey`, adds `termkey` to your user `PATH`, and includes an uninstaller.
-
-PowerShell bootstrap:
+1. Right-click the downloaded ZIP, choose **Properties**, and select **Unblock** if Windows offers it.
+2. Extract it to a permanent folder, such as `%LOCALAPPDATA%\TermKey`. Do not move or delete this folder after setting up the browser integration.
+3. Open a terminal in that folder and run:
 
 ```powershell
-iwr https://raw.githubusercontent.com/ryanonmars/termkey/master/apps/cli/scripts/install.ps1 | iex
+.\termkey.exe browser install
 ```
 
-Manual ZIP: [Windows x86_64](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-windows-x86_64.zip)
+4. Run `.\termkey.exe` to start TermKey and complete first-time setup.
 
-**Windows Security blockers:** Windows may block the installer or app on first launch. The two most likely blockers are **Microsoft Defender SmartScreen** and, on some Windows 11 systems, **Smart App Control**.
+The browser-install command registers the bundled native host and prints the exact folder to select in Chrome’s **Load unpacked** screen. It is not necessary to add TermKey to `PATH`.
 
-If you see the usual `"Windows protected your PC"` prompt from SmartScreen:
-
-1. Click **More info**
-2. Click **Run anyway**
-
-If Windows keeps blocking the downloaded file:
-
-1. Right-click `TermKey-Setup.exe` or the extracted `termkey.exe`
-2. Click **Properties**
-3. Check **Unblock** near the bottom of the window
-4. Click **Apply**, then launch it again
-
-If there is no **Run anyway** option and Windows says the app was blocked for your protection, **Smart App Control** may be the blocker instead. Check **Windows Security → App & browser control → Smart App Control**. If it is enabled, you may need your Windows administrator or security policy owner to allow the app before it can run.
+**Windows Security:** If Windows blocks the extracted app on first launch, right-click `termkey.exe` and `termkey-native-host.exe`, choose **Properties**, select **Unblock** when available, then run the browser-install command again. If a managed security policy blocks either executable, the browser extension cannot communicate with TermKey until that policy is changed.
 
 ---
 

@@ -102,11 +102,11 @@ test('fails closed when an expected release artifact is missing', async () => {
 
   const result = runChecksumScript(artifacts, output, [
     'termkey-linux-x86_64.zip',
-    'TermKey-Setup.exe',
+    'termkey-windows-x86_64.zip',
   ]);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /missing expected artifacts.*TermKey-Setup\.exe/i);
+  assert.match(result.stderr, /missing expected artifacts.*termkey-windows-x86_64\.zip/i);
 });
 
 test('fails closed when an unexpected release artifact is present', async () => {
@@ -167,7 +167,6 @@ test('release workflow requires the exact artifact manifest', async () => {
     'termkey-macos-aarch64-installer.pkg',
     'termkey-macos-aarch64.dmg',
     'termkey-windows-x86_64.zip',
-    'TermKey-Setup.exe',
   ];
 
   for (const artifact of expectedArtifacts) {
@@ -180,6 +179,6 @@ test('release workflow requires the exact artifact manifest', async () => {
   assert.match(releaseWorkflow, /fail_on_unmatched_files: true/);
   assert.match(
     releaseWorkflow,
-    /node scripts\/release-checksums\.mjs artifacts artifacts\/SHA256SUMS[\s\S]*termkey-linux-x86_64\.zip[\s\S]*TermKey-Setup\.exe/,
+    /node scripts\/release-checksums\.mjs artifacts artifacts\/SHA256SUMS[\s\S]*termkey-linux-x86_64\.zip[\s\S]*termkey-windows-x86_64\.zip/,
   );
 });

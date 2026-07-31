@@ -5,7 +5,6 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 source_svg="$repo_root/assets/branding/termkey-icon.svg"
-windows_icon="$repo_root/packaging/windows/termkey.ico"
 mac_icon="$repo_root/packaging/macos/termkey.icns"
 
 for tool in rsvg-convert magick; do
@@ -27,15 +26,13 @@ logo_png="$tmp_dir/termkey-logo.png"
 fitted_png="$tmp_dir/termkey-fitted.png"
 mark_png="$tmp_dir/termkey-mark.png"
 
-mkdir -p "$(dirname "$windows_icon")" "$(dirname "$mac_icon")"
+mkdir -p "$(dirname "$mac_icon")"
 
 # Fit the full SVG inside a square icon canvas with padding so installer icons
 # show the entire artwork instead of clipping it.
 rsvg-convert -w 1024 "$source_svg" -o "$logo_png"
 magick "$logo_png" -background none -gravity center -resize 920x920 "$fitted_png"
 magick "$fitted_png" -background none -gravity center -extent 1024x1024 "$mark_png"
-
-magick "$mark_png" -define icon:auto-resize=16,24,32,48,64,128,256 "$windows_icon"
 
 declare -a icon_sizes=(16 32 64 128 256 512 1024)
 declare -a icon_types=(icp4 icp5 icp6 ic07 ic08 ic09 ic10)

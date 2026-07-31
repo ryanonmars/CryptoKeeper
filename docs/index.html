@@ -740,26 +740,20 @@ sudo mv termkey /usr/local/bin/</code>
     <!-- Windows -->
     <div class="install-panel" id="panel-windows">
       <div class="install-card">
-        <p class="install-intro">Download and run the installer. No admin required; it installs to <code>%LOCALAPPDATA%\termkey</code>, adds <code>termkey</code> to your user PATH, and includes an uninstaller.</p>
+        <p class="install-intro">Download the ZIP, unblock it in Properties if Windows offers that option, then extract it to a permanent folder such as <code>%LOCALAPPDATA%\TermKey</code>.</p>
         <div class="dl-grid">
-          <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/TermKey-Setup.exe">
-            ↓ TermKey Setup <span class="arch">.exe</span>
-          </a>
           <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-windows-x86_64.zip">
-            ↓ Windows x86_64 <span class="arch">manual .zip</span>
+            ↓ Windows x86_64 <span class="arch">.zip</span>
           </a>
         </div>
-        <p class="install-intro">Terminal install (PowerShell bootstrap):</p>
         <div class="code-block">
           <button class="copy-btn" onclick="copyCode(this)">copy</button>
-          <code class="copy-source" hidden>iwr https://raw.githubusercontent.com/ryanonmars/termkey/master/apps/cli/scripts/install.ps1 | iex</code>
-          <span class="p">PS&gt; </span>iwr https://raw.githubusercontent.com/ryanonmars/termkey/master/apps/cli/scripts/install.ps1 ^| iex
+          <code class="copy-source" hidden>.\termkey.exe browser install</code>
+          <span class="p">PS&gt; </span>.\termkey.exe browser install
         </div>
         <div class="install-note">
-          <strong>Path:</strong> The installer writes into <code>%LOCALAPPDATA%\termkey</code>.
-          The ZIP still contains <code>termkey.exe</code> if you prefer a manual install.<br><br>
-          <strong>SmartScreen:</strong> Click "More info" → "Run anyway" on first launch,
-          or right-click the .exe → Properties → check <strong>Unblock</strong>.
+          Run this command from the extracted folder. It registers the bundled browser host and prints the extension folder to select with Chrome’s <strong>Load unpacked</strong> button.<br><br>
+          Keep the extracted folder in place after setup: Chrome uses its bundled <code>termkey-native-host.exe</code>.
         </div>
       </div>
     </div>
