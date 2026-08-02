@@ -30,6 +30,8 @@ Local-only, encrypted vault for private keys, seed phrases, and passwords. Run `
 **Homebrew** (recommended):
 
 ```bash
+brew tap ryanonmars/termkey
+brew trust --formula ryanonmars/termkey/termkey
 brew install ryanonmars/termkey/termkey
 termkey update
 ```
