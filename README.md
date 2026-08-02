@@ -61,6 +61,8 @@ sudo mv termkey /opt/homebrew/bin/
 **Homebrew on Linux:** [brew.sh](https://brew.sh) then:
 
 ```bash
+brew tap ryanonmars/termkey
+brew trust --formula ryanonmars/termkey/termkey
 brew install ryanonmars/termkey/termkey
 termkey update
 ```
