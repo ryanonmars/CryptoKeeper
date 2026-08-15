@@ -147,25 +147,8 @@ fn describe_existing_path(path: &Path) -> String {
 }
 
 fn managed_extension_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = current_user_home_dir() {
-            return home.join("Applications").join("TermKey Browser Extension");
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        if let Some(home) = current_user_home_dir() {
-            return home.join("TermKey Browser Extension");
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(home) = current_user_home_dir() {
-            return home.join("TermKey Browser Extension");
-        }
+    if let Some(home) = current_user_home_dir() {
+        return home.join("Applications").join("TermKey Browser Extension");
     }
 
     crate::vault::storage::vault_dir()
@@ -303,11 +286,7 @@ fn executable_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
 }
 
 fn native_host_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "termkey-native-host.exe"
-    } else {
-        "termkey-native-host"
-    }
+    "termkey-native-host"
 }
 
 fn repo_root_from_exe(exe_dir: &Path) -> Option<PathBuf> {
@@ -330,50 +309,38 @@ fn install_prefix_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn macos_resources_dir(current_exe: &Path) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let parent = current_exe.parent()?;
+    let parent = current_exe.parent()?;
 
-        if parent.file_name()?.to_str()? == "MacOS" {
-            let contents_dir = parent.parent()?;
-            if contents_dir.file_name()?.to_str()? != "Contents" {
-                return None;
-            }
-
-            return Some(contents_dir.join("Resources"));
+    if parent.file_name()?.to_str()? == "MacOS" {
+        let contents_dir = parent.parent()?;
+        if contents_dir.file_name()?.to_str()? != "Contents" {
+            return None;
         }
 
-        if parent.file_name()?.to_str()? == "bin" {
-            let resources_dir = parent.parent()?;
-            if resources_dir.file_name()?.to_str()? != "Resources" {
-                return None;
-            }
+        return Some(contents_dir.join("Resources"));
+    }
 
-            let contents_dir = resources_dir.parent()?;
-            if contents_dir.file_name()?.to_str()? != "Contents" {
-                return None;
-            }
-
-            return Some(resources_dir.to_path_buf());
+    if parent.file_name()?.to_str()? == "bin" {
+        let resources_dir = parent.parent()?;
+        if resources_dir.file_name()?.to_str()? != "Resources" {
+            return None;
         }
 
-        None
+        let contents_dir = resources_dir.parent()?;
+        if contents_dir.file_name()?.to_str()? != "Contents" {
+            return None;
+        }
+
+        return Some(resources_dir.to_path_buf());
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = current_exe;
-        None
-    }
+    None
 }
 
 fn macos_installed_app_resources_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = PathBuf::from("/Applications/TermKey.app/Contents/Resources");
-        if path.exists() {
-            return Some(path);
-        }
+    let path = PathBuf::from("/Applications/TermKey.app/Contents/Resources");
+    if path.exists() {
+        return Some(path);
     }
 
     None
@@ -424,7 +391,6 @@ fn install_native_host_manifest(native_host_binary: &Path) -> Result<PathBuf> {
     let rendered = serde_json::to_string_pretty(&manifest)?;
     fs::write(&manifest_path, rendered)?;
     set_native_host_manifest_permissions(&manifest_path)?;
-    register_windows_native_host_manifest(&manifest_path)?;
 
     Ok(manifest_path)
 }
@@ -434,56 +400,17 @@ fn native_host_manifest_path() -> Result<PathBuf> {
         TermKeyError::ConfigError("Could not determine the current user home directory.".into())
     })?;
 
-    #[cfg(target_os = "macos")]
-    {
-        return Ok(home
-            .join("Library")
-            .join("Application Support")
-            .join("Google")
-            .join("Chrome")
-            .join("NativeMessagingHosts")
-            .join(format!("{CHROME_NATIVE_HOST_NAME}.json")));
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        return Ok(home
-            .join(".config")
-            .join("google-chrome")
-            .join("NativeMessagingHosts")
-            .join(format!("{CHROME_NATIVE_HOST_NAME}.json")));
-    }
-
-    #[cfg(windows)]
-    {
-        let local_app_data = local_app_data_dir().ok_or_else(|| {
-            TermKeyError::ConfigError(
-                "Could not determine LOCALAPPDATA for Chrome native host registration.".into(),
-            )
-        })?;
-
-        return Ok(local_app_data
-            .join("TermKey")
-            .join("ChromeNativeMessagingHosts")
-            .join(format!("{CHROME_NATIVE_HOST_NAME}.json")));
-    }
-
-    #[allow(unreachable_code)]
-    Err(TermKeyError::ConfigError(
-        "Browser integration is not supported on this platform.".into(),
-    ))
+    Ok(home
+        .join("Library")
+        .join("Application Support")
+        .join("Google")
+        .join("Chrome")
+        .join("NativeMessagingHosts")
+        .join(format!("{CHROME_NATIVE_HOST_NAME}.json")))
 }
 
 fn current_user_home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok()
-        .map(PathBuf::from)
-}
-
-#[cfg(windows)]
-fn local_app_data_dir() -> Option<PathBuf> {
-    std::env::var("LOCALAPPDATA").ok().map(PathBuf::from)
+    std::env::var("HOME").ok().map(PathBuf::from)
 }
 
 fn native_host_manifest_status(
@@ -578,49 +505,10 @@ fn parse_protocol_info(bytes: &[u8]) -> String {
     )
 }
 
-#[cfg(unix)]
 fn set_native_host_manifest_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_native_host_manifest_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn register_windows_native_host_manifest(manifest_path: &Path) -> Result<()> {
-    let status = Command::new("reg")
-        .args([
-            "add",
-            &format!(
-                r"HKCU\Software\Google\Chrome\NativeMessagingHosts\{}",
-                CHROME_NATIVE_HOST_NAME
-            ),
-            "/ve",
-            "/t",
-            "REG_SZ",
-            "/d",
-            manifest_path.to_string_lossy().as_ref(),
-            "/f",
-        ])
-        .status()
-        .map_err(TermKeyError::Io)?;
-
-    if !status.success() {
-        return Err(TermKeyError::ConfigError(
-            "Failed to register the Chrome native host in the Windows registry.".into(),
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn register_windows_native_host_manifest(_manifest_path: &Path) -> Result<()> {
     Ok(())
 }
 

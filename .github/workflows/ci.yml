@@ -2,6 +2,7 @@ name: CI
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
 
 on:
   push:
@@ -17,7 +18,7 @@ permissions:
 jobs:
   validate:
     name: Validate and audit
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -51,32 +52,3 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo audit --file Cargo.lock
-
-  rust-platforms:
-    name: Rust checks (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: Linux x86_64
-          - os: macos-15-intel
-            platform: macOS Intel
-          - os: macos-15
-            platform: macOS ARM
-          - os: windows-latest
-            platform: Windows x86_64
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-
-      - name: Check Rust workspace
-        run: cargo check --workspace --all-targets --all-features --locked
-
-      - name: Test Rust workspace
-        run: cargo test --workspace --all-targets --all-features --locked

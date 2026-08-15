@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -374,11 +373,7 @@ fn require_unlocked_session(
 }
 
 fn termkey_binary_name() -> &'static str {
-    if cfg!(windows) {
-        "termkey.exe"
-    } else {
-        "termkey"
-    }
+    "termkey"
 }
 
 fn termkey_binary_candidates(native_host: &Path) -> Vec<PathBuf> {
@@ -406,7 +401,6 @@ fn locate_termkey_binary() -> io::Result<PathBuf> {
     ))
 }
 
-#[cfg(target_os = "macos")]
 fn launch_termkey_terminal() -> io::Result<()> {
     let termkey_binary = locate_termkey_binary()?;
     let status = Command::new("/usr/bin/osascript")
@@ -436,15 +430,6 @@ fn launch_termkey_terminal() -> io::Result<()> {
             "macOS Terminal rejected the TermKey launch request.",
         ))
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn launch_termkey_terminal() -> io::Result<()> {
-    let _ = locate_termkey_binary()?;
-    Err(io::Error::new(
-        ErrorKind::Unsupported,
-        "Opening TermKey in a terminal is currently supported only on macOS.",
-    ))
 }
 
 fn launch_termkey() -> NativeResponse {
