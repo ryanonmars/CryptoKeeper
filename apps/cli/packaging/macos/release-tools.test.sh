@@ -5,6 +5,7 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 notarize_script="$script_dir/notarize-artifact.sh"
 verify_script="$script_dir/verify-artifacts.sh"
+create_dmg_script="$script_dir/create-dmg.sh"
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
 
@@ -88,14 +89,60 @@ printf "spctl %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
 [[ "$1" == "-a" && "$2" == "-vv" && "$3" == "-t" ]] || exit 64
 if [[ "$4" == "install" ]]; then
   [[ $# -eq 5 && "$5" == "$TERMKEY_TEST_PKG_PATH" ]] || exit 64
+  assessment_path=$5
 elif [[ "$4" == "open" ]]; then
   [[ $# -eq 7 && "$5" == "--context" && "$6" == "context:primary-signature" && "$7" == "$TERMKEY_TEST_DMG_PATH" ]] || exit 64
+  assessment_path=$7
 else
   exit 64
 fi
 [[ "${TERMKEY_TEST_FAIL_SPCTL:-}" != "$4" ]] || exit 70
-printf "%s\\n" "accepted" >&2
+printf "%s: accepted\\n" "${TERMKEY_TEST_SPCTL_ACCEPTED_PATH:-$assessment_path}" >&2
 printf "%s\\n" "source=Notarized Developer ID" >&2'
+
+write_shim hdiutil '#!/usr/bin/env bash
+set -euo pipefail
+printf "hdiutil %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+case "$1" in
+  create)
+    if [[ "${TERMKEY_TEST_HDIUTIL_FAIL:-}" == "create" ]]; then
+      exit 71
+    fi
+    output_path=${!#}
+    : > "$output_path"
+    ;;
+  attach)
+    [[ "${TERMKEY_TEST_HDIUTIL_FAIL:-}" != "attach" ]] || exit 72
+    printf "%s\\n" "/dev/disk99 Apple_HFS"
+    ;;
+  detach)
+    if [[ "${2-}" != "-force" && "${TERMKEY_TEST_HDIUTIL_FAIL:-}" == "detach" ]]; then
+      exit 73
+    fi
+    ;;
+  convert)
+    if [[ "${TERMKEY_TEST_HDIUTIL_FAIL:-}" == "convert" ]]; then
+      exit 74
+    fi
+    while (( $# > 0 )); do
+      if [[ "$1" == "-o" ]]; then
+        : > "$2"
+        exit 0
+      fi
+      shift
+    done
+    exit 64
+    ;;
+  *) exit 64 ;;
+esac'
+
+write_shim SetFile '#!/usr/bin/env bash
+set -euo pipefail
+printf "SetFile %s\\n" "$*" >> "$TERMKEY_TEST_LOG"'
+
+write_shim sleep '#!/usr/bin/env bash
+set -euo pipefail
+printf "sleep %s\\n" "$*" >> "$TERMKEY_TEST_LOG"'
 
 write_shim ditto '#!/usr/bin/env bash
 set -euo pipefail
@@ -363,10 +410,67 @@ if TERMKEY_TEST_FAIL_SPCTL=install bash "$verify_script" \
   exit 1
 fi
 
+if TERMKEY_TEST_SPCTL_ACCEPTED_PATH="$artifacts_dir/decoy.pkg" bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'Gatekeeper acceptance for a different artifact unexpectedly passed verification' >&2
+  exit 1
+fi
+
 if TERMKEY_TEST_FAIL_CODESIGN_VERIFY="$artifacts_dir/TermKey.dmg" bash "$verify_script" \
   "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
   >/dev/null 2>&1; then
   echo 'codesign verification failure unexpectedly passed verification' >&2
+  exit 1
+fi
+
+dmg_test_failures=0
+
+: > "$TERMKEY_TEST_LOG"
+create_failure_output="$test_root/dmg-create-failure"
+mkdir -p "$create_failure_output"
+if TERMKEY_TEST_HDIUTIL_FAIL=create bash "$create_dmg_script" \
+  "$artifacts_dir/TermKey.pkg" termkey-create-failure 'TermKey Test' "$create_failure_output"; then
+  echo 'exhausted hdiutil create failures unexpectedly succeeded' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+if [[ $(rg -F --count-matches -- 'hdiutil create ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+  echo 'hdiutil create was not attempted exactly three times' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+if rg -F --quiet -- 'hdiutil convert ' "$TERMKEY_TEST_LOG"; then
+  echo 'DMG conversion ran after exhausted hdiutil create failures' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+
+: > "$TERMKEY_TEST_LOG"
+convert_failure_output="$test_root/dmg-convert-failure"
+mkdir -p "$convert_failure_output"
+if TERMKEY_TEST_HDIUTIL_FAIL=convert bash "$create_dmg_script" \
+  "$artifacts_dir/TermKey.pkg" termkey-convert-failure 'TermKey Test' "$convert_failure_output"; then
+  echo 'exhausted hdiutil convert failures unexpectedly succeeded' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+if [[ $(rg -F --count-matches -- 'hdiutil convert ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+  echo 'hdiutil convert was not attempted exactly three times' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+
+: > "$TERMKEY_TEST_LOG"
+detach_failure_output="$test_root/dmg-detach-failure"
+mkdir -p "$detach_failure_output"
+TERMKEY_TEST_HDIUTIL_FAIL=detach bash "$create_dmg_script" \
+  "$artifacts_dir/TermKey.pkg" termkey-detach-failure 'TermKey Test' "$detach_failure_output"
+if [[ $(rg -F --count-matches -- 'hdiutil detach /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+  echo 'hdiutil detach was not attempted exactly three times before forcing' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+if [[ $(rg -F --count-matches -- 'hdiutil detach -force /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 1 ]]; then
+  echo 'hdiutil detach did not force-detach after exhausted normal attempts' >&2
+  dmg_test_failures=$((dmg_test_failures + 1))
+fi
+
+if (( dmg_test_failures > 0 )); then
   exit 1
 fi
 

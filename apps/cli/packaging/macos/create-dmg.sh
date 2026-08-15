@@ -41,12 +41,14 @@ run_with_retries() {
   shift
 
   local try=1
+  local exit_code
   while true; do
     if "$@"; then
       return 0
+    else
+      exit_code=$?
     fi
 
-    local exit_code=$?
     if (( try >= attempts )); then
       return "$exit_code"
     fi

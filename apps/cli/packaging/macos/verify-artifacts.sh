@@ -36,6 +36,18 @@ require_output_line() {
   fi
 }
 
+require_exact_output_line() {
+  local output=$1
+  local expected=$2
+  local description=$3
+
+  if ! printf '%s\n' "$output" | grep -Fqx -- "$expected"; then
+    echo "$description did not contain the exact required line: $expected" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+}
+
 verify_macho_target() {
   local executable_path=$1
   local actual_architecture
@@ -94,12 +106,12 @@ pkg_signature=$(pkgutil --check-signature "$pkg_path" 2>&1)
 require_output_line "$pkg_signature" "^[[:space:]]*[0-9]+\\. Developer ID Installer: .* \\($team_id\\)$" 'package signature'
 xcrun stapler validate "$pkg_path"
 pkg_assessment=$(spctl -a -vv -t install "$pkg_path" 2>&1)
-require_output_line "$pkg_assessment" '^accepted$' 'package Gatekeeper assessment'
+require_exact_output_line "$pkg_assessment" "$pkg_path: accepted" 'package Gatekeeper assessment'
 
 verify_macho_signature "$dmg_path" no
 xcrun stapler validate "$dmg_path"
 dmg_assessment=$(spctl -a -vv -t open --context context:primary-signature "$dmg_path" 2>&1)
-require_output_line "$dmg_assessment" '^accepted$' 'disk image Gatekeeper assessment'
+require_exact_output_line "$dmg_assessment" "$dmg_path: accepted" 'disk image Gatekeeper assessment'
 
 zip_entries=$(unzip -Z1 "$zip_path")
 zip_roots=''
