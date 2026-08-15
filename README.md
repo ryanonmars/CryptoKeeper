@@ -25,87 +25,31 @@ Local-only, encrypted vault for private keys, seed phrases, and passwords. Run `
 
 ## Install
 
-### macOS
+### Apple Silicon macOS 11 or later
 
-**Homebrew** (recommended):
+TermKey Phase 1 supports Apple Silicon Macs running macOS 11 or later.
+
+**Signed and notarized DMG:** [Download TermKey for Apple Silicon](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg). Open the DMG and follow its installation instructions.
+
+**Homebrew:**
 
 ```bash
-brew tap ryanonmars/termkey
-brew trust --formula ryanonmars/termkey/termkey
 brew install ryanonmars/termkey/termkey
-termkey update
 ```
 
-`termkey update` will check the latest release and, for Homebrew installs, run the required Homebrew upgrade steps for you.
-
-**Installer DMG:** [Apple Silicon (ARM64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg) · [Intel (x86_64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-x86_64.dmg)
-
-**Direct PKG installer:** [Apple Silicon (ARM64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64-installer.pkg) · [Intel (x86_64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-x86_64-installer.pkg)
-
-**Direct ZIP download:** [Apple Silicon (ARM64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.zip) · [Intel (x86_64)](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-x86_64.zip)
-
-The macOS installer adds `TermKey.app` and `Uninstall TermKey.app` to `/Applications` and also installs the `termkey` CLI to `/usr/local/bin`. To remove the installer-based version later, open `Uninstall TermKey.app` from Applications. It also removes the Chrome integration files installed by `termkey browser install`. Your vault in `~/.termkey` is left untouched.
-
-```bash
-unzip termkey-macos-*.zip
-chmod +x termkey
-sudo mv termkey /usr/local/bin/
-# or on Apple Silicon with Homebrew:
-sudo mv termkey /opt/homebrew/bin/
-```
-
-**Gatekeeper:** If macOS blocks the app, go to **System Settings → Privacy & Security**, scroll to the **Security** section, click **Open Anyway**, then confirm with **Open**. If needed, remove the quarantine flag from the extracted binary with `xattr -d com.apple.quarantine ./termkey`.
-
-### Linux
-
-**Homebrew on Linux:** [brew.sh](https://brew.sh) then:
-
-```bash
-brew tap ryanonmars/termkey
-brew trust --formula ryanonmars/termkey/termkey
-brew install ryanonmars/termkey/termkey
-termkey update
-```
-
-`termkey update` will check the latest release and, for Homebrew installs, run the required Homebrew upgrade steps for you.
-
-**Direct download:** [Linux x86_64](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-linux-x86_64.zip)
-
-```bash
-unzip termkey-linux-x86_64.zip
-chmod +x termkey
-sudo mv termkey /usr/local/bin/
-```
-
-### Windows
-
-Download: [Windows x86_64 ZIP](https://github.com/ryanonmars/termkey/releases/latest/download/termkey-windows-x86_64.zip)
-
-1. Right-click the downloaded ZIP, choose **Properties**, and select **Unblock** if Windows offers it.
-2. Extract it to a permanent folder, such as `%LOCALAPPDATA%\TermKey`. Do not move or delete this folder after setting up the browser integration.
-3. Open a terminal in that folder and run:
-
-```powershell
-.\termkey.exe browser install
-```
-
-4. Run `.\termkey.exe` to start TermKey and complete first-time setup.
-
-The browser-install command registers the bundled native host and prints the exact folder to select in Chrome’s **Load unpacked** screen. It is not necessary to add TermKey to `PATH`.
-
-**Windows Security:** If Windows blocks the extracted app on first launch, right-click `termkey.exe` and `termkey-native-host.exe`, choose **Properties**, select **Unblock** when available, then run the browser-install command again. If a managed security policy blocks either executable, the browser extension cannot communicate with TermKey until that policy is changed.
+Run `termkey` to open the vault. `termkey update` checks the latest TermKey release; for a Homebrew install it runs the required Homebrew upgrade flow.
 
 ---
 
-## Chrome Extension Setup
+## Chrome Extension Setup (Phase 1)
 
-TermKey can ship its Chrome integration alongside the app download, but Chrome still requires a manual **Load unpacked** step for non-store extensions.
+The Chrome Web Store listing is not available yet. Phase 1 uses a temporary unpacked-extension installation:
 
-1. Run `termkey browser install`
-2. Open `chrome://extensions`
-3. Turn on **Developer mode**
-4. Click **Load unpacked**
-5. Select the folder printed by the command
+1. Run `termkey browser install`.
+2. Open `chrome://extensions`.
+3. Turn on **Developer mode**.
+4. Click **Load unpacked**.
+5. Select the exact folder printed by `termkey browser install`.
 
 Useful commands:
 
@@ -115,15 +59,9 @@ termkey browser status
 termkey browser repair
 ```
 
-`termkey browser install` copies the bundled extension into a stable user folder, installs the Chrome native-host manifest, and prints the exact folder to load in Chrome.
+`termkey browser install` copies the bundled extension to `~/Applications/TermKey Browser Extension`, installs the local Chrome native-host manifest, and prints the folder to load. `termkey browser status` reports the integration state, and `termkey browser repair` restores the native-host registration and staged extension when needed.
 
-Default extension folder by platform:
-
-- macOS: `~/Applications/TermKey Browser Extension`
-- Linux: `~/TermKey Browser Extension`
-- Windows: `%USERPROFILE%\TermKey Browser Extension`
-
-`termkey browser install` prints the exact path on the current machine, so users do not need to discover it manually.
+Read the [Privacy Policy](https://github.com/ryanonmars/termkey/blob/master/PRIVACY.md) before enabling autofill or save prompts.
 
 ---
 

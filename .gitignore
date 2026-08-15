@@ -12,4 +12,5 @@ node_modules/
 *.swo
 *.md
 !README.md
+!PRIVACY.md
 .worktrees/
