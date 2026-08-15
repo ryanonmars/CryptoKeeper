@@ -19,18 +19,18 @@ for artifact_path in "$pkg_path" "$dmg_path" "$zip_path"; do
   fi
 done
 
-if [[ -z "$team_id" ]]; then
-  echo "team id is required" >&2
+if [[ ! "$team_id" =~ ^[A-Z0-9]{10}$ ]]; then
+  echo "team id must be exactly 10 uppercase alphanumeric characters" >&2
   exit 1
 fi
 
-require_output_contains() {
+require_output_line() {
   local output=$1
-  local expected=$2
+  local pattern=$2
   local description=$3
 
-  if [[ "$output" != *"$expected"* ]]; then
-    echo "$description did not contain: $expected" >&2
+  if ! printf '%s\n' "$output" | grep -Eq -- "$pattern"; then
+    echo "$description did not contain a required line: $pattern" >&2
     printf '%s\n' "$output" >&2
     exit 1
   fi
@@ -76,36 +76,61 @@ verify_macho_target() {
 
 verify_macho_signature() {
   local executable_path=$1
+  local require_runtime=$2
   local signature_details
 
   codesign --verify --strict --verbose=2 "$executable_path"
   signature_details=$(codesign -dv --verbose=4 "$executable_path" 2>&1)
-  require_output_contains "$signature_details" 'Authority=Developer ID Application:' "signature for $executable_path"
-  require_output_contains "$signature_details" "TeamIdentifier=$team_id" "signature for $executable_path"
-  require_output_contains "$signature_details" 'Runtime Version=' "signature for $executable_path"
+  require_output_line "$signature_details" "^Authority=Developer ID Application: .* \\($team_id\\)$" "signature for $executable_path"
+  require_output_line "$signature_details" "^TeamIdentifier=$team_id$" "signature for $executable_path"
+  require_output_line "$signature_details" '^Timestamp=.+$' "signature for $executable_path"
+
+  if [[ "$require_runtime" == "yes" ]]; then
+    require_output_line "$signature_details" '^Runtime Version=.+$' "signature for $executable_path"
+  fi
 }
 
 pkg_signature=$(pkgutil --check-signature "$pkg_path" 2>&1)
-require_output_contains "$pkg_signature" 'Developer ID Installer' 'package signature'
-require_output_contains "$pkg_signature" "$team_id" 'package signature'
+require_output_line "$pkg_signature" "^[[:space:]]*[0-9]+\\. Developer ID Installer: .* \\($team_id\\)$" 'package signature'
+require_output_line "$pkg_signature" '^[[:space:]]*Timestamp:[[:space:]]+.+$' 'package signature'
 xcrun stapler validate "$pkg_path"
 pkg_assessment=$(spctl -a -vv -t install "$pkg_path" 2>&1)
-require_output_contains "$pkg_assessment" accepted 'package Gatekeeper assessment'
+require_output_line "$pkg_assessment" '^accepted$' 'package Gatekeeper assessment'
 
-codesign --verify --strict --verbose=2 "$dmg_path"
+verify_macho_signature "$dmg_path" no
 xcrun stapler validate "$dmg_path"
 dmg_assessment=$(spctl -a -vv -t open --context context:primary-signature "$dmg_path" 2>&1)
-require_output_contains "$dmg_assessment" accepted 'disk image Gatekeeper assessment'
+require_output_line "$dmg_assessment" '^accepted$' 'disk image Gatekeeper assessment'
 
 zip_entries=$(unzip -Z1 "$zip_path")
-zip_roots=$(printf '%s\n' "$zip_entries" | awk '
-  NF {
-    entry = $0
-    sub(/^\.\//, "", entry)
-    sub(/\/.*/, "", entry)
-    if (entry != "") print entry
-  }
-' | LC_ALL=C sort -u)
+zip_roots=''
+while IFS= read -r entry || [[ -n "$entry" ]]; do
+  if [[ -z "$entry" || "$entry" == /* || "$entry" == *\\* || "$entry" == *'//' ]]; then
+    echo "noncanonical ZIP entry: $entry" >&2
+    exit 1
+  fi
+
+  canonical_entry=$entry
+  if [[ "$canonical_entry" == */ ]]; then
+    canonical_entry=${canonical_entry%/}
+  fi
+  if [[ -z "$canonical_entry" ]]; then
+    echo "noncanonical ZIP entry: $entry" >&2
+    exit 1
+  fi
+
+  IFS=/ read -r -a path_components <<< "$canonical_entry"
+  for component in "${path_components[@]}"; do
+    if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then
+      echo "noncanonical ZIP entry: $entry" >&2
+      exit 1
+    fi
+  done
+  unset IFS
+
+  zip_roots+="${path_components[0]}"$'\n'
+done <<< "$zip_entries"
+zip_roots=$(printf '%s' "$zip_roots" | LC_ALL=C sort -u)
 expected_zip_roots=$'browser-extension\ntermkey\ntermkey-native-host'
 if [[ "$zip_roots" != "$expected_zip_roots" ]]; then
   echo "unexpected ZIP root entries:" >&2
@@ -126,5 +151,5 @@ fi
 
 for executable_path in "$termkey_binary" "$native_host_binary"; do
   verify_macho_target "$executable_path"
-  verify_macho_signature "$executable_path"
+  verify_macho_signature "$executable_path" yes
 done

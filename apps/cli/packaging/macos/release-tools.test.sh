@@ -24,26 +24,45 @@ write_shim xcrun '#!/usr/bin/env bash
 set -euo pipefail
 printf "xcrun %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
 if [[ "$1" == "notarytool" && "$2" == "submit" ]]; then
+  [[ $# -eq 12 && "$4" == "--key" && "$6" == "--key-id" && "$8" == "--issuer" && "${10}" == "--wait" && "${11}" == "--output-format" && "${12}" == "json" ]] || { echo "unexpected notary submit invocation: $*" >&2; exit 64; }
   case "${TERMKEY_TEST_NOTARY_STATUS:?}" in
     accepted) printf "%s\\n" "{\"id\":\"submission-123\",\"status\":\"Accepted\"}" ;;
     invalid-status) printf "%s\\n" "{\"id\":\"submission-123\",\"status\":\"Invalid\"}" ;;
     *) echo "unknown simulated notary status" >&2; exit 64 ;;
   esac
 elif [[ "$1" == "notarytool" && "$2" == "log" ]]; then
+  [[ $# -eq 9 && "$3" == "submission-123" && "$4" == "--key" && "$6" == "--key-id" && "$8" == "--issuer" ]] || exit 64
   printf "%s\\n" "notary rejection details"
 elif [[ "$1" == "stapler" && ( "$2" == "staple" || "$2" == "validate" ) ]]; then
+  [[ $# -eq 3 && ( "$3" == "$TERMKEY_TEST_PKG_PATH" || "$3" == "$TERMKEY_TEST_DMG_PATH" ) ]] || exit 64
+  if [[ "${TERMKEY_TEST_FAIL_STAPLER:-}" == "$3" ]]; then
+    exit 70
+  fi
   printf "%s\\n" "The staple and validate action worked!"
+else
+  exit 64
 fi'
 
 write_shim codesign '#!/usr/bin/env bash
 set -euo pipefail
 printf "codesign %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+case "$1,${2-},${3-},${4-}" in
+  --verify,--strict,--verbose=2,*)
+    [[ $# -eq 4 && ( "$4" == "$TERMKEY_TEST_DMG_PATH" || "$4" == */termkey || "$4" == */termkey-native-host ) ]] || exit 64
+    [[ "${TERMKEY_TEST_FAIL_CODESIGN_VERIFY:-}" != "$4" ]] || exit 70
+    ;;
+  -dv,--verbose=4,*,*)
+    [[ $# -eq 3 && ( "$3" == "$TERMKEY_TEST_DMG_PATH" || "$3" == */termkey || "$3" == */termkey-native-host ) ]] || exit 64
+    ;;
+  *) exit 64 ;;
+esac
 if [[ "$1" == "-dv" ]]; then
   cat >&2 <<OUTPUT
 Executable=/tmp/termkey
 Identifier=com.ryanonmars.termkey
 Authority=Developer ID Application: TermKey (${TERMKEY_TEST_CODESIGN_TEAM:-TEAM123456})
 TeamIdentifier=${TERMKEY_TEST_CODESIGN_TEAM:-TEAM123456}
+Timestamp=${TERMKEY_TEST_CODESIGN_TIMESTAMP-2026-08-14T12:00:00Z}
 OUTPUT
   if [[ "${TERMKEY_TEST_RUNTIME:-present}" == "present" ]]; then
     printf "%s\\n" "Runtime Version=14.0.0" >&2
@@ -53,39 +72,55 @@ fi'
 write_shim pkgutil '#!/usr/bin/env bash
 set -euo pipefail
 printf "pkgutil %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+[[ $# -eq 2 && "$1" == "--check-signature" && "$2" == "$TERMKEY_TEST_PKG_PATH" ]] || exit 64
+[[ "${TERMKEY_TEST_FAIL_PKGUTIL:-}" != "1" ]] || exit 70
 cat <<OUTPUT
 Package "TermKey":
-   Status: signed by a certificate trusted by macOS
+   Status: signed by a certificate trusted by macOS ${TERMKEY_TEST_PACKAGE_DECOY_TEAM-}
    Signed with a valid Developer ID Installer certificate.
    Certificate Chain:
     1. Developer ID Installer: TermKey (${TERMKEY_TEST_PACKAGE_TEAM:-TEAM123456})
+   Timestamp: ${TERMKEY_TEST_PACKAGE_TIMESTAMP-2026-08-14T12:00:00Z}
 OUTPUT'
 
 write_shim spctl '#!/usr/bin/env bash
 set -euo pipefail
 printf "spctl %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+[[ "$1" == "-a" && "$2" == "-vv" && "$3" == "-t" ]] || exit 64
+if [[ "$4" == "install" ]]; then
+  [[ $# -eq 5 && "$5" == "$TERMKEY_TEST_PKG_PATH" ]] || exit 64
+elif [[ "$4" == "open" ]]; then
+  [[ $# -eq 7 && "$5" == "--context" && "$6" == "context:primary-signature" && "$7" == "$TERMKEY_TEST_DMG_PATH" ]] || exit 64
+else
+  exit 64
+fi
+[[ "${TERMKEY_TEST_FAIL_SPCTL:-}" != "$4" ]] || exit 70
 printf "%s\\n" "accepted" >&2
 printf "%s\\n" "source=Notarized Developer ID" >&2'
 
 write_shim ditto '#!/usr/bin/env bash
 set -euo pipefail
 printf "ditto %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
-if [[ "$1" == "-x" && "$2" == "-k" ]]; then
+if [[ "$1" == "-x" && "$2" == "-k" && "$3" == "$TERMKEY_TEST_ZIP_PATH" && $# -eq 4 ]]; then
   destination=${4:?}
   mkdir -p "$destination/browser-extension"
   : > "$destination/termkey"
   : > "$destination/termkey-native-host"
   : > "$destination/browser-extension/manifest.json"
+else
+  exit 64
 fi'
 
 write_shim lipo '#!/usr/bin/env bash
 set -euo pipefail
 printf "lipo %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+[[ $# -eq 2 && "$1" == "-archs" && ( "$2" == */termkey || "$2" == */termkey-native-host ) ]] || exit 64
 printf "%s\\n" "${TERMKEY_TEST_ARCH:-arm64}"'
 
 write_shim otool '#!/usr/bin/env bash
 set -euo pipefail
 printf "otool %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+[[ $# -eq 2 && "$1" == "-l" && ( "$2" == */termkey || "$2" == */termkey-native-host ) ]] || exit 64
 cat <<OUTPUT
 Load command 8
       cmd LC_BUILD_VERSION
@@ -96,6 +131,7 @@ OUTPUT'
 write_shim unzip '#!/usr/bin/env bash
 set -euo pipefail
 printf "unzip %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
+[[ $# -eq 2 && "$1" == "-Z1" && "$2" == "$TERMKEY_TEST_ZIP_PATH" ]] || exit 64
 printf "%s\\n" "${TERMKEY_TEST_ZIP_ENTRIES:?}"'
 
 export PATH="$bin_dir:$PATH"
@@ -113,6 +149,30 @@ assert_log_not_contains() {
   local unexpected=$1
   if rg -F --quiet -- "$unexpected" "$TERMKEY_TEST_LOG"; then
     echo "command log unexpectedly contained: $unexpected" >&2
+    cat "$TERMKEY_TEST_LOG" >&2
+    exit 1
+  fi
+}
+
+assert_log_count() {
+  local expected=$1
+  local count=$2
+  local actual
+  actual=$(rg -F --count-matches -- "$expected" "$TERMKEY_TEST_LOG" || true)
+  if [[ "$actual" != "$count" ]]; then
+    echo "expected $count occurrences of: $expected (found $actual)" >&2
+    cat "$TERMKEY_TEST_LOG" >&2
+    exit 1
+  fi
+}
+
+assert_log_regex_count() {
+  local pattern=$1
+  local count=$2
+  local actual
+  actual=$(rg --count -- "$pattern" "$TERMKEY_TEST_LOG" || true)
+  if [[ "$actual" != "$count" ]]; then
+    echo "expected $count matching commands: $pattern (found $actual)" >&2
     cat "$TERMKEY_TEST_LOG" >&2
     exit 1
   fi
@@ -144,6 +204,9 @@ run_case() {
 : > "$artifacts_dir/TermKey.dmg"
 : > "$artifacts_dir/TermKey.zip"
 : > "$test_root/AuthKey.p8"
+export TERMKEY_TEST_PKG_PATH="$artifacts_dir/TermKey.pkg"
+export TERMKEY_TEST_DMG_PATH="$artifacts_dir/TermKey.dmg"
+export TERMKEY_TEST_ZIP_PATH="$artifacts_dir/TermKey.zip"
 export APPLE_NOTARY_KEY_BASE64=encoded-notary-key
 export TERMKEY_TEST_ZIP_ENTRIES=$'termkey\ntermkey-native-host\nbrowser-extension/\nbrowser-extension/manifest.json'
 
@@ -190,15 +253,23 @@ bash "$verify_script" \
   "$artifacts_dir/TermKey.dmg" \
   "$artifacts_dir/TermKey.zip" \
   TEAM123456
-assert_log_contains 'pkgutil --check-signature'
-assert_log_contains 'xcrun stapler validate'
-assert_log_contains 'spctl -a -vv -t install'
-assert_log_contains 'codesign --verify --strict --verbose=2'
-assert_log_contains 'spctl -a -vv -t open --context context:primary-signature'
-assert_log_contains 'ditto -x -k'
-assert_log_contains 'unzip -Z1'
-assert_log_contains 'lipo -archs'
-assert_log_contains 'otool -l'
+assert_log_count "pkgutil --check-signature $artifacts_dir/TermKey.pkg" 1
+assert_log_count "xcrun stapler validate $artifacts_dir/TermKey.pkg" 1
+assert_log_count "xcrun stapler validate $artifacts_dir/TermKey.dmg" 1
+assert_log_count "spctl -a -vv -t install $artifacts_dir/TermKey.pkg" 1
+assert_log_count "codesign --verify --strict --verbose=2 $artifacts_dir/TermKey.dmg" 1
+assert_log_count "codesign -dv --verbose=4 $artifacts_dir/TermKey.dmg" 1
+assert_log_count "spctl -a -vv -t open --context context:primary-signature $artifacts_dir/TermKey.dmg" 1
+assert_log_count "ditto -x -k $artifacts_dir/TermKey.zip" 1
+assert_log_count "unzip -Z1 $artifacts_dir/TermKey.zip" 1
+assert_log_regex_count '^codesign --verify --strict --verbose=2 .*/termkey$' 1
+assert_log_regex_count '^codesign --verify --strict --verbose=2 .*/termkey-native-host$' 1
+assert_log_regex_count '^codesign -dv --verbose=4 .*/termkey$' 1
+assert_log_regex_count '^codesign -dv --verbose=4 .*/termkey-native-host$' 1
+assert_log_regex_count '^lipo -archs .*/termkey$' 1
+assert_log_regex_count '^lipo -archs .*/termkey-native-host$' 1
+assert_log_regex_count '^otool -l .*/termkey$' 1
+assert_log_regex_count '^otool -l .*/termkey-native-host$' 1
 
 if TERMKEY_TEST_ARCH=x86_64 bash "$verify_script" \
   "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
@@ -228,7 +299,7 @@ if TERMKEY_TEST_RUNTIME=missing bash "$verify_script" \
   exit 1
 fi
 
-if TERMKEY_TEST_PACKAGE_TEAM=OTHERTEAM bash "$verify_script" \
+if TERMKEY_TEST_PACKAGE_TEAM=OTHERTEAM TERMKEY_TEST_PACKAGE_DECOY_TEAM=TEAM123456 bash "$verify_script" \
   "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
   >/dev/null 2>&1; then
   echo 'wrong installer-signing team unexpectedly passed verification' >&2
@@ -239,6 +310,71 @@ if TERMKEY_TEST_ZIP_ENTRIES=$'termkey\ntermkey-native-host\nunexpected-root/' ba
   "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
   >/dev/null 2>&1; then
   echo 'unexpected ZIP root unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if TERMKEY_TEST_CODESIGN_TIMESTAMP='' bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'DMG without a signing timestamp unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if TERMKEY_TEST_PACKAGE_TIMESTAMP='' bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'PKG without a signing timestamp unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" INVALID \
+  >/dev/null 2>&1; then
+  echo 'malformed Team ID unexpectedly passed verification' >&2
+  exit 1
+fi
+
+for malformed_entries in \
+  $'/termkey\ntermkey-native-host\nbrowser-extension/' \
+  $'termkey/../escape\ntermkey-native-host\nbrowser-extension/' \
+  $'termkey//extra\ntermkey-native-host\nbrowser-extension/' \
+  $'termkey\\backslash\ntermkey-native-host\nbrowser-extension/' \
+  $'./termkey\ntermkey-native-host\nbrowser-extension/'; do
+  : > "$TERMKEY_TEST_LOG"
+  if TERMKEY_TEST_ZIP_ENTRIES="$malformed_entries" bash "$verify_script" \
+    "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+    >/dev/null 2>&1; then
+    echo 'noncanonical ZIP entry unexpectedly passed verification' >&2
+    exit 1
+  fi
+  assert_log_not_contains 'ditto -x -k'
+done
+
+if TERMKEY_TEST_FAIL_PKGUTIL=1 bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'pkgutil failure unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if TERMKEY_TEST_FAIL_STAPLER="$artifacts_dir/TermKey.pkg" bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'stapler failure unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if TERMKEY_TEST_FAIL_SPCTL=install bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'Gatekeeper failure unexpectedly passed verification' >&2
+  exit 1
+fi
+
+if TERMKEY_TEST_FAIL_CODESIGN_VERIFY="$artifacts_dir/TermKey.dmg" bash "$verify_script" \
+  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
+  >/dev/null 2>&1; then
+  echo 'codesign verification failure unexpectedly passed verification' >&2
   exit 1
 fi
 
