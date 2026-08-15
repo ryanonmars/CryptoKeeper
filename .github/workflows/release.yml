@@ -478,6 +478,14 @@ jobs:
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -489,40 +497,18 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
         run: |
-          SHA_MACOS_ARM=$(sha256sum artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
+          SHA_MACOS_ARM=$(shasum -a 256 artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
+          VER=${VERSION#v}
+          formula_path="$RUNNER_TEMP/termkey.rb"
+
+          node scripts/render-homebrew-formula.mjs "$VER" "$SHA_MACOS_ARM" "$formula_path"
 
           git clone https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ryanonmars/homebrew-termkey.git tap
+          mkdir -p tap/Formula
+
+          find tap/Formula -maxdepth 1 -type f -name '*.rb' ! -name 'termkey.rb' -exec grep -l 'github.com/ryanonmars/termkey' {} + | xargs -r rm -f
+          cp "$formula_path" tap/Formula/termkey.rb
           cd tap
-
-          VER=${VERSION#v}
-
-          find Formula -maxdepth 1 -type f -name '*.rb' ! -name 'termkey.rb' -exec grep -l 'github.com/ryanonmars/termkey' {} + | xargs -r rm -f
-
-          cat > Formula/termkey.rb << EOF
-          # typed: false
-          # frozen_string_literal: true
-
-          class Termkey < Formula
-            desc "CLI encrypted storage for private keys and seed phrases"
-            homepage "https://github.com/ryanonmars/termkey"
-            url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-macos-aarch64.zip"
-            version "${VER}"
-            sha256 "${SHA_MACOS_ARM}"
-            license "MIT"
-            depends_on :macos
-            depends_on arch: :arm64
-
-            def install
-              bin.install "termkey"
-              libexec.install "termkey-native-host"
-              pkgshare.install "browser-extension"
-            end
-
-            test do
-              assert_match "Encrypted storage for", shell_output("#{bin}/termkey --help")
-            end
-          end
-          EOF
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -536,6 +522,14 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -547,34 +541,20 @@ jobs:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          SHA_MACOS_ARM=$(sha256sum artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
+          SHA_MACOS_ARM=$(shasum -a 256 artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
+          formula_path="$RUNNER_TEMP/termkey.rb"
 
           git ls-remote https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ryanonmars/homebrew-termkey.git HEAD
 
-          VER="0.0.0-dry-run"
+          node scripts/render-homebrew-formula.mjs 0.0.0 "$SHA_MACOS_ARM" "$formula_path"
 
-          cat << EOF >> "$GITHUB_STEP_SUMMARY"
-          ## Dry Run Formula Preview
-
-          - Ref: ${REF_NAME}
-          - macOS ARM SHA256: \`${SHA_MACOS_ARM}\`
-
-          \`\`\`ruby
-          class Termkey < Formula
-            desc "CLI encrypted storage for private keys and seed phrases"
-            homepage "https://github.com/ryanonmars/termkey"
-            url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-macos-aarch64.zip"
-            version "${VER}"
-            sha256 "${SHA_MACOS_ARM}"
-            license "MIT"
-            depends_on :macos
-            depends_on arch: :arm64
-
-            def install
-              bin.install "termkey"
-              libexec.install "termkey-native-host"
-              pkgshare.install "browser-extension"
-            end
-          end
-          \`\`\`
-          EOF
+          {
+            echo "## Dry Run Formula Preview"
+            echo
+            echo "- Ref: ${REF_NAME}"
+            echo "- macOS ARM SHA256: \`${SHA_MACOS_ARM}\`"
+            echo
+            echo "\`\`\`ruby"
+            cat "$formula_path"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
