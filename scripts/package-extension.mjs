@@ -28,21 +28,15 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDirectory, "..");
 const normalizedDate = new Date("2000-01-01T00:00:00.000Z");
 const executableExtensions = new Set([".js", ".mjs", ".cjs"]);
-const runtimeExtensions = new Set([
-  ".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".json", ".svg",
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".avif",
-  ".woff", ".woff2", ".ttf", ".otf",
-]);
-const textExtensions = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".json", ".svg"]);
+const runtimeExtensions = new Set([".html", ".js", ".mjs", ".cjs", ".css", ".json", ".png"]);
+const textExtensions = new Set([".html", ".js", ".mjs", ".cjs", ".css", ".json"]);
 const sensitiveSegment = /(?:^|[-_.])(credential|credentials|secret|secrets|token|auth|private|private-key|id_rsa|id_ecdsa|id_ed25519)(?:$|[-_.])/i;
 const supportedManifestFields = new Set([
-  "manifest_version", "name", "version", "version_name", "description", "short_name", "key", "default_locale",
+  "manifest_version", "name", "version", "version_name", "description", "short_name", "key",
   "author", "homepage_url", "minimum_chrome_version", "update_url", "offline_enabled", "incognito",
   "permissions", "optional_permissions", "host_permissions", "optional_host_permissions", "content_scripts",
   "web_accessible_resources", "background", "icons", "action", "options_page", "options_ui", "devtools_page",
-  "side_panel", "chrome_url_overrides", "sandbox", "declarative_net_request", "storage", "commands",
-  "content_security_policy", "cross_origin_embedder_policy", "cross_origin_opener_policy", "externally_connectable",
-  "oauth2", "webview", "protocol_handlers", "file_handlers", "chrome_settings_overrides", "tts_engine",
+  "side_panel", "chrome_url_overrides", "sandbox", "declarative_net_request", "storage",
 ]);
 
 function fail(message) {
@@ -105,11 +99,53 @@ function hasPrefix(bytes, values) {
   return values.every((value, index) => bytes[index] === value);
 }
 
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function validatePng(bytes, purpose) {
+  if (!hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) fail(`${purpose} does not match its allowed .png runtime format`);
+  let offset = 8;
+  let hasIhdr = false;
+  let hasIdat = false;
+  while (offset < bytes.length) {
+    if (offset + 12 > bytes.length) fail(`${purpose} has a truncated PNG chunk`);
+    const length = bytes.readUInt32BE(offset);
+    const typeStart = offset + 4;
+    const dataStart = offset + 8;
+    const end = dataStart + length;
+    if (!Number.isSafeInteger(end) || end + 4 > bytes.length) fail(`${purpose} has an oversized PNG chunk`);
+    const type = bytes.subarray(typeStart, dataStart).toString("ascii");
+    if (!/^[A-Za-z]{4}$/.test(type)) fail(`${purpose} has an invalid PNG chunk type`);
+    if (bytes.readUInt32BE(end) !== crc32(bytes.subarray(typeStart, end))) fail(`${purpose} has an invalid PNG chunk CRC`);
+    if (!hasIhdr) {
+      if (type !== "IHDR" || length !== 13) fail(`${purpose} must begin with one PNG IHDR chunk`);
+      if (bytes.readUInt32BE(dataStart) === 0 || bytes.readUInt32BE(dataStart + 4) === 0) fail(`${purpose} has an invalid PNG IHDR size`);
+      hasIhdr = true;
+    }
+    if (type === "IDAT") hasIdat = true;
+    offset = end + 4;
+    if (type === "IEND") {
+      if (length !== 0 || !hasIdat || offset !== bytes.length) fail(`${purpose} has an incomplete PNG payload`);
+      return;
+    }
+  }
+  fail(`${purpose} is missing PNG IEND`);
+}
+
 function validateRuntimeContents(relativePath, bytes, purpose) {
   const extension = posix.extname(relativePath).toLowerCase();
   if (textExtensions.has(extension)) {
     const text = textContents(bytes, purpose);
     if (extension === ".json") {
+      if (!/(declarative net request rule resource|managed storage schema|Extension manifest\.json)/.test(purpose)) {
+        fail(`${purpose} cannot include arbitrary JSON: ${relativePath}`);
+      }
       try {
         JSON.parse(text);
       } catch {
@@ -118,20 +154,8 @@ function validateRuntimeContents(relativePath, bytes, purpose) {
     }
     return;
   }
-  const signatures = {
-    ".png": () => hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    ".jpg": () => hasPrefix(bytes, [0xff, 0xd8, 0xff]),
-    ".jpeg": () => hasPrefix(bytes, [0xff, 0xd8, 0xff]),
-    ".gif": () => bytes.subarray(0, 6).equals(Buffer.from("GIF87a")) || bytes.subarray(0, 6).equals(Buffer.from("GIF89a")),
-    ".webp": () => bytes.subarray(0, 4).equals(Buffer.from("RIFF")) && bytes.subarray(8, 12).equals(Buffer.from("WEBP")),
-    ".ico": () => hasPrefix(bytes, [0, 0, 1, 0]),
-    ".avif": () => bytes.subarray(4, 8).equals(Buffer.from("ftyp")),
-    ".woff": () => bytes.subarray(0, 4).equals(Buffer.from("wOFF")),
-    ".woff2": () => bytes.subarray(0, 4).equals(Buffer.from("wOF2")),
-    ".ttf": () => hasPrefix(bytes, [0, 1, 0, 0]),
-    ".otf": () => bytes.subarray(0, 4).equals(Buffer.from("OTTO")),
-  };
-  if (!signatures[extension]?.()) fail(`${purpose} does not match its allowed ${extension} runtime format`);
+  if (extension === ".png") return validatePng(bytes, purpose);
+  fail(`${purpose} is not a permitted Store runtime file: ${relativePath}`);
 }
 
 function fileIdentity(stat) {
@@ -165,33 +189,29 @@ function localPath(referencedPath, purpose) {
   return relativePath;
 }
 
-function snapshotFile(extensionRoot, relativePath, purpose) {
+function snapshotFile(extensionRoot, relativePath, purpose, hooks = {}) {
   const path = resolve(extensionRoot, relativePath);
   if (!path.startsWith(`${extensionRoot}${sep}`)) fail(`${purpose} is outside the extension: ${relativePath}`);
+  const canonicalRoot = realpathSync(extensionRoot);
   let canonicalPath;
   try {
     canonicalPath = realpathSync(path);
   } catch {
     fail(`${purpose} is missing: ${relativePath}`);
   }
-  if (!canonicalPath.startsWith(`${extensionRoot}${sep}`)) fail(`${purpose} is outside the canonical extension root: ${relativePath}`);
-  let current = extensionRoot;
-  for (const segment of relativePath.split("/")) {
-    current = resolve(current, segment);
-    if (!existsSync(current)) fail(`${purpose} is missing: ${relativePath}`);
-    const stat = lstatSync(current);
-    if (stat.isSymbolicLink()) fail(`${purpose} must not be a symlink: ${relativePath}`);
-  }
-  let descriptor;
+  if (!canonicalPath.startsWith(`${canonicalRoot}${sep}`)) fail(`${purpose} is outside the canonical extension root: ${relativePath}`);
+  const descriptors = [];
   try {
     const observed = lstatSync(canonicalPath);
     if (observed.isSymbolicLink() || !observed.isFile()) fail(`${purpose} must be a regular non-symlink file: ${relativePath}`);
-    descriptor = openSync(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const before = fstatSync(descriptor);
-    if (!sameFile(observed, before)) fail(`${purpose} changed before it could be opened: ${relativePath}`);
-    const bytes = readFileSync(descriptor);
-    const after = fstatSync(descriptor);
-    if (fileIdentity(before) !== fileIdentity(after)) fail(`${purpose} changed while being read: ${relativePath}`);
+    const rootDescriptor = openSync(canonicalRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    descriptors.push(rootDescriptor);
+    if (!fstatSync(rootDescriptor).isDirectory()) fail(`${purpose} extension root is not a directory`);
+    hooks.onRootOpened?.({ relativePath });
+    const snapshot = readAnchoredSnapshot(rootDescriptor, relativePath, purpose);
+    if (!sameFile(observed, snapshot.before)) fail(`${purpose} changed before it could be opened: ${relativePath}`);
+    if (fileIdentity(snapshot.before) !== fileIdentity(snapshot.after)) fail(`${purpose} changed while being read: ${relativePath}`);
+    const { bytes } = snapshot;
     if (isNativeBinary(bytes)) fail(`${purpose} must not be a native binary: ${relativePath}`);
     validateRuntimeContents(relativePath, bytes, purpose);
     return { relativePath, bytes };
@@ -199,8 +219,75 @@ function snapshotFile(extensionRoot, relativePath, purpose) {
     if (error?.code === "ELOOP") fail(`${purpose} must not be a symlink: ${relativePath}`);
     throw error;
   } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
+    for (const descriptor of descriptors.reverse()) closeSync(descriptor);
   }
+}
+
+// Node does not expose openat(2), and macOS does not support descending through
+// /dev/fd/<directory-fd>/child (it reports ENOENT).  The installed Python 3
+// standard library does expose the same kernel primitive via os.open(dir_fd=).
+// Descriptor 3 is the already-open canonical root; every component is opened
+// relative to it with O_NOFOLLOW, so an ancestor replacement cannot redirect us.
+function readAnchoredSnapshot(rootDescriptor, relativePath, purpose) {
+  const program = String.raw`
+import json, os, stat, sys
+
+root_fd = 3
+opened = []
+try:
+    parent = root_fd
+    parts = sys.argv[1].split("/")
+    for part in parts[:-1]:
+        descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        opened.append(descriptor)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise RuntimeError("ancestor is not a directory")
+        parent = descriptor
+    descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
+    opened.append(descriptor)
+    before = os.fstat(descriptor)
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError("final path is not a regular file")
+    chunks = []
+    while True:
+        chunk = os.read(descriptor, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    after = os.fstat(descriptor)
+    metadata = {"before": [before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns / 1_000_000, before.st_ctime_ns / 1_000_000], "after": [after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns / 1_000_000, after.st_ctime_ns / 1_000_000]}
+    sys.stderr.write("SNAPSHOT:" + json.dumps(metadata, separators=(",", ":")))
+    sys.stdout.buffer.write(b"".join(chunks))
+except Exception as error:
+    sys.stderr.write("SNAPSHOT_ERROR:" + str(error))
+    sys.exit(1)
+finally:
+    for descriptor in reversed(opened):
+        os.close(descriptor)
+`;
+  const result = spawnSync("python3", ["-c", program, relativePath], {
+    stdio: ["ignore", "pipe", "pipe", rootDescriptor],
+  });
+  const stderr = result.stderr.toString("utf8");
+  if (result.status !== 0) {
+    const detail = stderr.replace(/^SNAPSHOT_ERROR:/, "");
+    if (/Not a directory|Too many levels of symbolic links/i.test(detail)) {
+      fail(`${purpose} encountered a symlink or non-directory ancestor: ${relativePath}`);
+    }
+    fail(`${purpose} could not be opened safely: ${detail}`);
+  }
+  const metadata = stderr.match(/^SNAPSHOT:(.+)$/)?.[1];
+  if (!metadata) fail(`${purpose} safe snapshot did not return file metadata`);
+  let parsed;
+  try {
+    parsed = JSON.parse(metadata);
+  } catch {
+    fail(`${purpose} safe snapshot returned invalid file metadata`);
+  }
+  const statFrom = (values) => ({
+    dev: values[0], ino: values[1], size: values[2], mtimeMs: values[3], ctimeMs: values[4], isFile: () => true,
+  });
+  return { bytes: result.stdout, before: statFrom(parsed.before), after: statFrom(parsed.after) };
 }
 
 function runtimePatternFiles(extensionRoot, pattern, purpose) {
@@ -266,16 +353,101 @@ function validateStringArray(value, purpose) {
 function validateManifestSchema(manifest) {
   object(manifest, "manifest");
   validateKeys(manifest, supportedManifestFields, "manifest");
+  if (typeof manifest.manifest_version !== "number" || typeof manifest.name !== "string" || typeof manifest.version !== "string") {
+    fail("manifest must contain numeric manifest_version and string name/version");
+  }
+  for (const field of ["version_name", "description", "short_name", "key", "author", "homepage_url", "minimum_chrome_version", "update_url"]) {
+    if (manifest[field] !== undefined && typeof manifest[field] !== "string") fail(`manifest ${field} must be a string`);
+  }
+  for (const field of ["offline_enabled"]) {
+    if (manifest[field] !== undefined && typeof manifest[field] !== "boolean") fail(`manifest ${field} must be a boolean`);
+  }
+  if (manifest.incognito !== undefined && typeof manifest.incognito !== "string") fail("manifest incognito must be a string");
   for (const field of ["permissions", "optional_permissions", "host_permissions", "optional_host_permissions"]) {
     if (manifest[field] !== undefined) validateStringArray(manifest[field], field);
   }
-  if (manifest.background !== undefined) validateKeys(object(manifest.background, "background"), new Set(["service_worker", "type"]), "background");
-  if (manifest.action !== undefined) validateKeys(object(manifest.action, "action"), new Set(["default_icon", "default_popup", "default_title", "default_badge_text", "default_badge_color", "default_popup_height", "default_popup_width"]), "action");
-  if (manifest.options_ui !== undefined) validateKeys(object(manifest.options_ui, "options UI"), new Set(["page", "open_in_tab"]), "options UI");
-  if (manifest.side_panel !== undefined) validateKeys(object(manifest.side_panel, "side panel"), new Set(["default_path"]), "side panel");
-  if (manifest.sandbox !== undefined) validateKeys(object(manifest.sandbox, "sandbox"), new Set(["pages", "content_security_policy"]), "sandbox");
-  if (manifest.storage !== undefined) validateKeys(object(manifest.storage, "storage"), new Set(["managed_schema"]), "storage");
-  if (manifest.declarative_net_request !== undefined) validateKeys(object(manifest.declarative_net_request, "declarative net request"), new Set(["rule_resources"]), "declarative net request");
+  if (manifest.background !== undefined) {
+    const background = object(manifest.background, "background");
+    validateKeys(background, new Set(["service_worker", "type"]), "background");
+    if (background.service_worker !== undefined && typeof background.service_worker !== "string") fail("background service worker must be a path");
+    if (background.type !== undefined && background.type !== "module") fail("background type must be module");
+  }
+  if (manifest.content_scripts !== undefined) {
+    for (const [index, contentScript] of array(manifest.content_scripts, "content scripts").entries()) {
+      const script = object(contentScript, `content script ${index}`);
+      validateKeys(script, new Set(["matches", "exclude_matches", "include_globs", "exclude_globs", "css", "js", "run_at", "all_frames", "match_about_blank", "match_origin_as_fallback", "world"]), `content script`);
+      for (const field of ["matches", "exclude_matches", "include_globs", "exclude_globs", "css", "js"]) if (script[field] !== undefined) validateStringArray(script[field], `content script ${index} ${field}`);
+      for (const field of ["all_frames", "match_about_blank", "match_origin_as_fallback"]) if (script[field] !== undefined && typeof script[field] !== "boolean") fail(`content script ${index} ${field} must be a boolean`);
+      for (const field of ["run_at", "world"]) if (script[field] !== undefined && typeof script[field] !== "string") fail(`content script ${index} ${field} must be a string`);
+    }
+  }
+  if (manifest.icons !== undefined) {
+    const icons = object(manifest.icons, "icons");
+    for (const [size, path] of Object.entries(icons)) {
+      if (!/^\d+$/.test(size) || typeof path !== "string") fail("icons must map numeric sizes to paths");
+    }
+  }
+  if (manifest.action !== undefined) {
+    const action = object(manifest.action, "action");
+    validateKeys(action, new Set(["default_icon", "default_popup", "default_title", "default_badge_text", "default_badge_color", "default_popup_height", "default_popup_width"]), "action");
+    if (action.default_popup !== undefined && typeof action.default_popup !== "string") fail("action popup must be a path");
+    if (action.default_icon !== undefined && typeof action.default_icon !== "string" && (!action.default_icon || typeof action.default_icon !== "object" || Array.isArray(action.default_icon))) fail("action default icon must be a path or icon map");
+    for (const field of ["default_title", "default_badge_text"]) if (action[field] !== undefined && typeof action[field] !== "string") fail(`action ${field} must be a string`);
+    if (action.default_badge_color !== undefined && typeof action.default_badge_color !== "string" && !Array.isArray(action.default_badge_color)) fail("action default badge color must be a string or array");
+    for (const field of ["default_popup_height", "default_popup_width"]) if (action[field] !== undefined && typeof action[field] !== "number") fail(`action ${field} must be a number`);
+  }
+  if (manifest.options_page !== undefined && typeof manifest.options_page !== "string") fail("options page must be a path");
+  if (manifest.devtools_page !== undefined && typeof manifest.devtools_page !== "string") fail("DevTools page must be a path");
+  if (manifest.options_ui !== undefined) {
+    const options = object(manifest.options_ui, "options UI");
+    validateKeys(options, new Set(["page", "open_in_tab"]), "options UI");
+    if (options.page !== undefined && typeof options.page !== "string") fail("options UI page must be a path");
+    if (options.open_in_tab !== undefined && typeof options.open_in_tab !== "boolean") fail("options UI open_in_tab must be a boolean");
+  }
+  if (manifest.side_panel !== undefined) {
+    const sidePanel = object(manifest.side_panel, "side panel");
+    validateKeys(sidePanel, new Set(["default_path"]), "side panel");
+    if (sidePanel.default_path !== undefined && typeof sidePanel.default_path !== "string") fail("side panel default path must be a path");
+  }
+  if (manifest.chrome_url_overrides !== undefined) {
+    const overrides = object(manifest.chrome_url_overrides, "chrome URL overrides");
+    validateKeys(overrides, new Set(["newtab", "bookmarks", "history"]), "chrome URL overrides");
+    for (const path of Object.values(overrides)) if (typeof path !== "string") fail("chrome URL overrides must contain paths");
+  }
+  if (manifest.sandbox !== undefined) {
+    const sandbox = object(manifest.sandbox, "sandbox");
+    validateKeys(sandbox, new Set(["pages", "content_security_policy"]), "sandbox");
+    if (sandbox.pages !== undefined) validateStringArray(sandbox.pages, "sandbox pages");
+    if (sandbox.content_security_policy !== undefined && typeof sandbox.content_security_policy !== "string") fail("sandbox content security policy must be a string");
+  }
+  if (manifest.web_accessible_resources !== undefined) {
+    for (const [index, resource] of array(manifest.web_accessible_resources, "web accessible resources").entries()) {
+      const entry = object(resource, `web accessible resource ${index}`);
+      validateKeys(entry, new Set(["resources", "matches", "extension_ids", "use_dynamic_url", "match_origin_as_fallback"]), "web accessible resource");
+      validateStringArray(entry.resources, `web accessible resource ${index} resources`);
+      if (entry.matches !== undefined) validateStringArray(entry.matches, `web accessible resource ${index} matches`);
+      if (entry.extension_ids !== undefined) validateStringArray(entry.extension_ids, `web accessible resource ${index} extension ids`);
+      for (const field of ["use_dynamic_url", "match_origin_as_fallback"]) if (entry[field] !== undefined && typeof entry[field] !== "boolean") fail(`web accessible resource ${index} ${field} must be a boolean`);
+    }
+  }
+  if (manifest.storage !== undefined) {
+    const storage = object(manifest.storage, "storage");
+    validateKeys(storage, new Set(["managed_schema"]), "storage");
+    if (storage.managed_schema !== undefined && typeof storage.managed_schema !== "string") fail("managed storage schema must be a path");
+  }
+  if (manifest.declarative_net_request !== undefined) {
+    const dnr = object(manifest.declarative_net_request, "declarative net request");
+    validateKeys(dnr, new Set(["rule_resources"]), "declarative net request");
+    if (dnr.rule_resources !== undefined) {
+      for (const [index, resource] of array(dnr.rule_resources, "declarative net request rule resources").entries()) {
+        const entry = object(resource, `declarative net request rule resource ${index}`);
+        validateKeys(entry, new Set(["id", "enabled", "path"]), "declarative net request rule resource");
+        if (typeof entry.id !== "string") fail(`declarative net request rule resource ${index} id must be a string`);
+        if (typeof entry.enabled !== "boolean") fail(`declarative net request rule resource ${index} enabled must be a boolean`);
+        if (typeof entry.path !== "string") fail(`declarative net request rule resource ${index} path must be a string`);
+      }
+    }
+  }
 }
 
 function manifestPaths(extensionRoot, manifest, add) {
@@ -365,17 +537,36 @@ function htmlReferences(snapshot) {
 
 function javascriptReferences(snapshot) {
   const references = [];
-  const source = ts.createSourceFile(snapshot.relativePath, snapshot.bytes.toString("utf8"), ts.ScriptTarget.Latest, true);
+  const sourceText = snapshot.bytes.toString("utf8");
+  const compilerOptions = { allowJs: true, noLib: true, target: ts.ScriptTarget.Latest };
+  const host = ts.createCompilerHost(compilerOptions);
+  const source = ts.createSourceFile(snapshot.relativePath, sourceText, ts.ScriptTarget.Latest, true);
+  const defaultGetSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) => (
+    fileName === snapshot.relativePath ? source : defaultGetSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile)
+  );
+  host.fileExists = (fileName) => fileName === snapshot.relativePath;
+  host.readFile = (fileName) => fileName === snapshot.relativePath ? sourceText : undefined;
+  const checker = ts.createProgram([snapshot.relativePath], compilerOptions, host).getTypeChecker();
+  const constants = new Map();
   const staticValue = (node, purpose) => {
-    if (!node || !ts.isStringLiteralLike(node)) fail(`${purpose} must use a string literal in ${snapshot.relativePath}`);
-    return node.text;
+    const value = constantString(node, constants);
+    if (value === undefined) fail(`${purpose} must use a constant string in ${snapshot.relativePath}`);
+    return value;
   };
+  const isLocalIdentifier = (node) => ts.isIdentifier(node) && checker.getSymbolAtLocation(node)?.declarations?.some((declaration) => declaration.getSourceFile() === source);
+  const isGlobalObject = (node) => ts.isIdentifier(node) && ["globalThis", "self", "window"].includes(node.text) && !isLocalIdentifier(node);
+  const isGlobalImportScripts = (node) =>
+    (ts.isIdentifier(node) && node.text === "importScripts" && isReferenceIdentifier(node) && !isLocalIdentifier(node)) ||
+    (ts.isPropertyAccessExpression(node) && isGlobalObject(node.expression) && node.name.text === "importScripts") ||
+    (ts.isElementAccessExpression(node) && isGlobalObject(node.expression) && constantString(node.argumentExpression, constants) === "importScripts");
   const visit = (node) => {
-    const importScriptsReference =
-      (ts.isIdentifier(node) && node.text === "importScripts") ||
-      (ts.isPropertyAccessExpression(node) && node.name.text === "importScripts") ||
-      (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) && node.argumentExpression.text === "importScripts");
-    if (importScriptsReference) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      const value = constantString(node.initializer, constants);
+      if (value !== undefined) constants.set(node.name.text, value);
+      if (node.initializer && isGlobalImportScripts(node.initializer)) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
+    }
+    if (isGlobalImportScripts(node)) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) references.push({ value: staticValue(node.moduleSpecifier, "module specifier"), purpose: "JavaScript import" });
     if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) references.push({ value: staticValue(node.arguments[0], "dynamic import"), purpose: "dynamic import" });
@@ -386,21 +577,143 @@ function javascriptReferences(snapshot) {
   return references;
 }
 
+function constantString(node, constants) {
+  if (!node) return undefined;
+  if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+  if (ts.isIdentifier(node)) return constants.get(node.text);
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = constantString(node.left, constants);
+    const right = constantString(node.right, constants);
+    return left === undefined || right === undefined ? undefined : `${left}${right}`;
+  }
+  return undefined;
+}
+
+function isReferenceIdentifier(node) {
+  const parent = node.parent;
+  return !(
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isPropertyAssignment(parent) && parent.name === node) ||
+    (ts.isMethodDeclaration(parent) && parent.name === node) ||
+    (ts.isVariableDeclaration(parent) && parent.name === node)
+  );
+}
+
 function cssReferences(snapshot) {
   const text = textContents(snapshot.bytes, `stylesheet ${snapshot.relativePath}`);
   const references = new Set();
-  for (const match of text.matchAll(/@import\s+(?:url\(\s*)?["']?([^"'()\s;]+)["']?\s*\)?/gi)) references.add(match[1]);
-  for (const match of text.matchAll(/url\(\s*["']?([^"'()\s]+)["']?\s*\)/gi)) references.add(match[1]);
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith("/*", index)) {
+      const end = text.indexOf("*/", index + 2);
+      if (end < 0) fail(`stylesheet ${snapshot.relativePath} has an unterminated comment`);
+      index = end + 2;
+      continue;
+    }
+    if (text[index] === "'" || text[index] === '"') {
+      index = consumeCssString(text, index).next;
+      continue;
+    }
+    if (text.startsWith("@import", index) && !/[\w-]/.test(text[index + 7] ?? "")) {
+      index = skipCssSpaceAndComments(text, index + 7);
+      if (text.slice(index, index + 3).toLowerCase() === "url" && text[index + 3] === "(") {
+        const url = consumeCssUrl(text, index + 3);
+        references.add(url.value);
+        index = url.next;
+      } else if (text[index] === "'" || text[index] === '"') {
+        const value = consumeCssString(text, index);
+        references.add(value.value);
+        index = value.next;
+      } else fail(`stylesheet ${snapshot.relativePath} has a malformed @import`);
+      continue;
+    }
+    if (text.slice(index, index + 3).toLowerCase() === "url" && text[index + 3] === "(") {
+      const url = consumeCssUrl(text, index + 3);
+      references.add(url.value);
+      index = url.next;
+      continue;
+    }
+    index += 1;
+  }
   return [...references];
 }
 
-function collectRuntimeFiles(extensionRoot, manifestSnapshot) {
+function skipCssSpaceAndComments(text, start) {
+  let index = start;
+  while (index < text.length) {
+    if (/\s/.test(text[index])) index += 1;
+    else if (text.startsWith("/*", index)) {
+      const end = text.indexOf("*/", index + 2);
+      if (end < 0) fail("stylesheet has an unterminated comment");
+      index = end + 2;
+    } else break;
+  }
+  return index;
+}
+
+function consumeCssString(text, start) {
+  const quote = text[start];
+  let value = "";
+  let index = start + 1;
+  while (index < text.length) {
+    if (text[index] === quote) return { value, next: index + 1 };
+    if (text[index] === "\\") {
+      const escaped = consumeCssEscape(text, index);
+      value += escaped.value;
+      index = escaped.next;
+    } else {
+      value += text[index];
+      index += 1;
+    }
+  }
+  fail("stylesheet has an unterminated string");
+}
+
+function consumeCssEscape(text, start) {
+  let index = start + 1;
+  if (index >= text.length) fail("stylesheet has an incomplete escape");
+  const hex = text.slice(index).match(/^[0-9a-f]{1,6}/i)?.[0];
+  if (hex) {
+    index += hex.length;
+    if (/\s/.test(text[index] ?? "")) index += 1;
+    return { value: String.fromCodePoint(Number.parseInt(hex, 16)), next: index };
+  }
+  return { value: text[index], next: index + 1 };
+}
+
+function consumeCssUrl(text, openParen) {
+  let index = skipCssSpaceAndComments(text, openParen + 1);
+  let value;
+  if (text[index] === "'" || text[index] === '"') {
+    const quoted = consumeCssString(text, index);
+    value = quoted.value;
+    index = skipCssSpaceAndComments(text, quoted.next);
+  } else {
+    value = "";
+    while (index < text.length && text[index] !== ")") {
+      if (/\s/.test(text[index])) fail("stylesheet URL must quote whitespace");
+      if (text[index] === "\\") {
+        const escaped = consumeCssEscape(text, index);
+        value += escaped.value;
+        index = escaped.next;
+      } else {
+        value += text[index];
+        index += 1;
+      }
+    }
+  }
+  if (text[index] !== ")") fail("stylesheet has an unterminated url()");
+  if (!value) fail("stylesheet has an empty url()");
+  return { value, next: index + 1 };
+}
+
+function collectRuntimeFiles(extensionRoot, manifestSnapshot, hooks) {
   const snapshots = new Map([["manifest.json", manifestSnapshot]]);
   const pending = [];
   const add = (value, purpose) => {
     const relativePath = localPath(value, purpose);
     if (!snapshots.has(relativePath)) {
-      const snapshot = snapshotFile(extensionRoot, relativePath, purpose);
+      const snapshot = snapshotFile(extensionRoot, relativePath, purpose, hooks);
       snapshots.set(relativePath, snapshot);
       pending.push(snapshot);
     }
@@ -452,19 +765,19 @@ function createArchive(staging, paths) {
   return stagedArchive;
 }
 
-export function packageExtension(extensionDirectory, outputArchive) {
+export function packageExtension(extensionDirectory, outputArchive, hooks = {}) {
   if (!extensionDirectory || !outputArchive) fail("Usage: node scripts/package-extension.mjs <extension_dir> <output_zip>");
   const output = resolve(outputArchive);
   if (existsSync(output)) fail(`Refusing to overwrite existing output archive: ${output}`);
   const extensionRoot = realpathSync(resolve(extensionDirectory));
   if (!lstatSync(extensionRoot).isDirectory()) fail(`Extension directory is not a directory: ${extensionDirectory}`);
-  const manifestSnapshot = snapshotFile(extensionRoot, "manifest.json", "Extension manifest.json");
+  const manifestSnapshot = snapshotFile(extensionRoot, "manifest.json", "Extension manifest.json", hooks);
   const manifest = JSON.parse(manifestSnapshot.bytes.toString("utf8"));
   validateManifestSchema(manifest);
   if (manifest.manifest_version !== 3) fail("Extension manifest must be Manifest V3");
   const expectedVersion = cargoChromeVersion();
   if (chromeVersion(manifest.version, "manifest version") !== expectedVersion) fail(`Extension manifest version ${manifest.version} does not match Cargo version ${expectedVersion}`);
-  const snapshots = collectRuntimeFiles(extensionRoot, manifestSnapshot);
+  const snapshots = collectRuntimeFiles(extensionRoot, manifestSnapshot, hooks);
   const outputDirectory = dirname(output);
   mkdirSync(outputDirectory, { recursive: true });
   let staging;

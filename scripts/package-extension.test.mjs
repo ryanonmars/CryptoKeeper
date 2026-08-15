@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -15,9 +16,11 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { packageExtension } from "./package-extension.mjs";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
 const packagerPath = resolve(scriptsDirectory, "package-extension.mjs");
+const validPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=", "base64");
 
 function writeFixtureFile(root, relativePath, contents = "") {
   const path = resolve(root, relativePath);
@@ -64,7 +67,7 @@ function createFixture(t) {
   writeFixtureFile(
     extension,
     "public/icon128.png",
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    validPng,
   );
 
   return { root, extension };
@@ -224,7 +227,7 @@ test("resolves web-accessible-resource patterns to concrete runtime files", (t) 
   writeFixtureFile(
     extension,
     "public/images/logo.png",
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    validPng,
   );
   const output = resolve(root, "archive.zip");
 
@@ -483,16 +486,112 @@ test("recursively resolves local CSS imports, images, and fonts", (t) => {
     "dist/styles.css",
     '@import url("nested.css"); .hero { background: url("../public/image.png?cache=1"); }',
   );
-  writeFixtureFile(extension, "dist/nested.css", '@font-face { src: url("../public/font.woff2"); }');
-  writeFixtureFile(extension, "public/image.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-  writeFixtureFile(extension, "public/font.woff2", Buffer.from("wOF2"));
+  writeFixtureFile(extension, "dist/nested.css", ".nested {}\n");
+  writeFixtureFile(extension, "public/image.png", validPng);
   const output = resolve(root, "css.zip");
 
   const result = runPackager(extension, output);
 
   assert.equal(result.status, 0, failure(result));
   const entries = run("unzip", ["-Z1", output]).stdout.split("\n");
-  for (const path of ["dist/styles.css", "dist/nested.css", "public/image.png", "public/font.woff2"]) {
+  for (const path of ["dist/styles.css", "dist/nested.css", "public/image.png"]) {
     assert.equal(entries.includes(path), true, path);
   }
+});
+
+test("allows unrelated importScripts properties but rejects constant global references", (t) => {
+  const { root, extension } = createFixture(t);
+  writeFixtureFile(extension, "dist/background.js", 'const importScripts = () => {}; importScripts("./local.js"); const helper = { importScripts() {} }; helper.importScripts("./local.js");');
+  writeFixtureFile(extension, "dist/local.js", "export {};\n");
+
+  const allowed = runPackager(extension, resolve(root, "allowed.zip"));
+
+  assert.equal(allowed.status, 0, failure(allowed));
+  for (const source of [
+    "const key = 'import' + 'Scripts'; self[key]('https://example.test/remote.js');",
+    "const load = globalThis.importScripts; load('https://example.test/remote.js');",
+  ]) {
+    writeFixtureFile(extension, "dist/background.js", source);
+    const rejected = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+    assert.notEqual(rejected.status, 0);
+    assert.match(failure(rejected), /importScripts/i);
+  }
+});
+
+test("rejects unrecognized nested manifest fields and Phase 1 localization", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.content_scripts[0].future_script_path = "dist/future.js";
+  writeManifest(extension, manifest);
+
+  const nested = runPackager(extension, resolve(root, "nested.zip"));
+
+  assert.notEqual(nested.status, 0);
+  assert.match(failure(nested), /unrecognized content script field/i);
+  delete manifest.content_scripts[0].future_script_path;
+  manifest.default_locale = "en";
+  writeManifest(extension, manifest);
+  const locale = runPackager(extension, resolve(root, "locale.zip"));
+  assert.notEqual(locale.status, 0);
+  assert.match(failure(locale), /unrecognized manifest field/i);
+});
+
+test("rejects arbitrary JSON and malformed Phase 1 PNG payloads", (t) => {
+  const cases = [
+    ["public/data.json", "{}\n"],
+    ["public/header.png", validPng.subarray(0, 8)],
+    ["public/appended.png", Buffer.concat([validPng, Buffer.from("MZ")])],
+  ];
+  for (const [path, contents] of cases) {
+    const { root, extension } = createFixture(t);
+    const manifest = readManifest(extension);
+    manifest.web_accessible_resources = [{ resources: [path], matches: ["https://example.test/*"] }];
+    writeManifest(extension, manifest);
+    writeFixtureFile(extension, path, contents);
+    const result = runPackager(extension, resolve(root, `${path.replaceAll("/", "-")}.zip`));
+    assert.notEqual(result.status, 0, path);
+    assert.match(failure(result), /JSON|png|runtime format|permitted/i, path);
+  }
+});
+
+test("anchors snapshots when an ancestor is replaced after the root descriptor opens", (t) => {
+  const { root, extension } = createFixture(t);
+  const outside = resolve(root, "outside");
+  const original = resolve(root, "original-dist");
+  mkdirSync(outside, { recursive: true });
+  writeFixtureFile(outside, "background.js", "export {};\n");
+
+  assert.throws(
+    () => packageExtension(extension, resolve(root, "anchored.zip"), {
+      onRootOpened({ relativePath }) {
+        if (relativePath !== "dist/background.js") return;
+        renameSync(resolve(extension, "dist"), original);
+        symlinkSync(outside, resolve(extension, "dist"));
+      },
+    }),
+    /outside|symlink|changed/i,
+  );
+});
+
+test("tokenizes CSS URLs with comments, strings, spaces, parentheses, and escapes", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.content_scripts[0].css = ["dist/styles.css"];
+  writeManifest(extension, manifest);
+  writeFixtureFile(
+    extension,
+    "dist/styles.css",
+    '/* @import "ignored.css"; url("ignored.png") */ .copy { content: "url(ignored.png)"; } @import url("nested (one).css"); .hero { background: url("../public/image\\ space.png"); }',
+  );
+  writeFixtureFile(extension, "dist/nested (one).css", ".nested {}\n");
+  writeFixtureFile(extension, "public/image space.png", validPng);
+  const output = resolve(root, "css-tokenized.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.equal(result.status, 0, failure(result));
+  const entries = run("unzip", ["-Z1", output]).stdout.split("\n");
+  assert.equal(entries.includes("dist/nested (one).css"), true);
+  assert.equal(entries.includes("public/image space.png"), true);
+  assert.equal(entries.includes("dist/ignored.css"), false);
 });
