@@ -400,13 +400,16 @@ fn native_host_manifest_path() -> Result<PathBuf> {
         TermKeyError::ConfigError("Could not determine the current user home directory.".into())
     })?;
 
-    Ok(home
-        .join("Library")
+    Ok(native_host_manifest_path_for_home(&home))
+}
+
+fn native_host_manifest_path_for_home(home: &Path) -> PathBuf {
+    home.join("Library")
         .join("Application Support")
         .join("Google")
         .join("Chrome")
         .join("NativeMessagingHosts")
-        .join(format!("{CHROME_NATIVE_HOST_NAME}.json")))
+        .join(format!("{CHROME_NATIVE_HOST_NAME}.json"))
 }
 
 fn current_user_home_dir() -> Option<PathBuf> {
@@ -572,6 +575,21 @@ mod tests {
         assert!(report.removed_native_host_manifest);
         assert!(!extension_dir.exists());
         assert!(!manifest_path.exists());
+    }
+
+    #[test]
+    fn native_host_manifest_uses_the_macos_chrome_location() {
+        let home = Path::new("/Users/termkey-test");
+
+        assert_eq!(
+            native_host_manifest_path_for_home(home),
+            home.join("Library")
+                .join("Application Support")
+                .join("Google")
+                .join("Chrome")
+                .join("NativeMessagingHosts")
+                .join("com.ryanonmars.termkey.json"),
+        );
     }
 
     #[test]
