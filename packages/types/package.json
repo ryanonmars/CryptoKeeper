@@ -1,6 +1,6 @@
 {
   "name": "@termkey/types",
-  "version": "0.2.37",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

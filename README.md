@@ -179,7 +179,7 @@ termkey delete <name-or-index>
 termkey copy <name-or-index>
 termkey search <query>
 termkey export <directory>
-termkey import <path/to/backup.ck>
+termkey import <path/to/backup.termkey>
 termkey passwd
 termkey recover
 termkey config --show
@@ -192,7 +192,8 @@ termkey browser repair
 
 Notes:
 
-- `termkey export <directory>` writes an encrypted `backup.ck` file into that directory.
+- `termkey export <directory>` prompts for an editable backup name (default: `backup`) and writes an encrypted `<name>.termkey` file into that directory.
+- Imports remain compatible with existing `.ck` backup files.
 - `termkey recover` uses your configured 24-word recovery phrase.
 - `termkey update` checks the latest GitHub release. On Homebrew installs it runs the Homebrew update flow; on installer/manual/source installs it prints the correct release download page.
 - `termkey derive` saves a public address for supported Ethereum, Bitcoin, and Solana key or seed entries.

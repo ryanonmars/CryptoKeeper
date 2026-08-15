@@ -18,10 +18,14 @@ pub struct InputScreen {
 
 impl InputScreen {
     pub fn new(title: &str, prompt: &str, is_password: bool) -> Self {
+        Self::new_with_value(title, prompt, is_password, "")
+    }
+
+    pub fn new_with_value(title: &str, prompt: &str, is_password: bool, value: &str) -> Self {
         Self {
             title: title.to_string(),
             prompt: prompt.to_string(),
-            value: Zeroizing::new(String::new()),
+            value: Zeroizing::new(value.to_string()),
             is_password,
         }
     }
@@ -119,6 +123,27 @@ mod tests {
             panic!("password was not submitted");
         };
         let _: Zeroizing<String> = value;
+        assert!(screen.value.is_empty());
+    }
+
+    #[test]
+    fn prefilled_input_allows_the_default_to_be_replaced() {
+        let mut screen =
+            InputScreen::new_with_value("Export Vault", "Backup name:", false, "backup");
+        for _ in 0.."backup".len() {
+            screen.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        for character in "family-wallet".chars() {
+            screen.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+        }
+
+        let Some(InputResult::Submit(value)) =
+            screen.handle_key(KeyCode::Enter, KeyModifiers::NONE)
+        else {
+            panic!("prefilled value was not submitted");
+        };
+
+        assert_eq!(value.as_str(), "family-wallet");
         assert!(screen.value.is_empty());
     }
 }

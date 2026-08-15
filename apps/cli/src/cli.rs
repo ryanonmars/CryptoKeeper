@@ -64,9 +64,9 @@ pub enum Commands {
         query: String,
     },
 
-    /// Export vault as an encrypted backup (creates backup.ck in the specified directory)
+    /// Export vault as an encrypted .termkey backup
     Export {
-        /// Directory path where backup.ck will be created
+        /// Directory where the named backup will be created
         directory: String,
     },
 

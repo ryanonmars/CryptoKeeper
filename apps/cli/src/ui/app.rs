@@ -69,6 +69,7 @@ pub struct App {
     should_quit: bool,
     clipboard_clear_time: Option<Instant>,
     pending_export_password: Option<String>,
+    pending_export_name: Option<String>,
     pending_new_password: Option<Zeroizing<String>>,
     /// Entry index pending secondary password verification for view
     pending_view_entry_idx: Option<usize>,
@@ -111,6 +112,7 @@ pub enum AppView {
 #[derive(Clone)]
 pub enum InputPurpose {
     ExportPath,
+    ExportName,
     ExportPassword,
     ConfirmExportPassword,
     ImportPath,
@@ -141,6 +143,7 @@ impl App {
             should_quit: false,
             clipboard_clear_time: None,
             pending_export_password: None,
+            pending_export_name: None,
             pending_new_password: None,
             pending_view_entry_idx: None,
             pending_copy_entry_idx: None,
@@ -1390,13 +1393,31 @@ impl App {
         match result {
             InputResult::Cancel => {
                 self.pending_export_password = None;
+                self.pending_export_name = None;
                 self.pending_new_password = None;
                 self.return_to_dashboard();
             }
             InputResult::Submit(value) => match purpose {
                 InputPurpose::ExportPath => {
-                    let input = InputScreen::new("Export Vault", "Enter backup password:", true);
+                    let input = InputScreen::new_with_value(
+                        "Export Vault",
+                        "Backup name:",
+                        false,
+                        "backup",
+                    );
                     self.pending_export_password = Some(value.to_string());
+                    self.view = AppView::Input(input, InputPurpose::ExportName);
+                }
+                InputPurpose::ExportName => {
+                    let backup_name = match crate::commands::export::backup_file_name(&value) {
+                        Ok(name) => name,
+                        Err(error) => {
+                            self.show_message("Export Error".to_string(), error.to_string(), true);
+                            return Ok(());
+                        }
+                    };
+                    let input = InputScreen::new("Export Vault", "Enter backup password:", true);
+                    self.pending_export_name = Some(backup_name);
                     self.view = AppView::Input(input, InputPurpose::ExportPassword);
                 }
                 InputPurpose::ExportPassword => {
@@ -1406,7 +1427,10 @@ impl App {
                 }
                 InputPurpose::ConfirmExportPassword => {
                     if let Some(path) = self.pending_export_password.take() {
-                        if let Some(export_pass) = self.pending_new_password.take() {
+                        if let (Some(backup_name), Some(export_pass)) = (
+                            self.pending_export_name.take(),
+                            self.pending_new_password.take(),
+                        ) {
                             if *export_pass != *value {
                                 self.show_message(
                                     "Export Error".to_string(),
@@ -1414,7 +1438,7 @@ impl App {
                                     true,
                                 );
                             } else if let Some(session) = &self.session {
-                                let backup_path = std::path::Path::new(&path).join("backup.ck");
+                                let backup_path = std::path::Path::new(&path).join(backup_name);
                                 match crate::vault::storage::write_backup(
                                     &session.vault,
                                     export_pass.as_bytes(),
@@ -1422,8 +1446,8 @@ impl App {
                                 ) {
                                     Ok(_) => {
                                         self.show_success(format!(
-                                            "Vault exported to {}/backup.ck",
-                                            path
+                                            "Vault exported to {}",
+                                            backup_path.display()
                                         ));
                                     }
                                     Err(e) => {
@@ -1553,12 +1577,13 @@ pub enum ConfirmAction {
 mod tests {
     use super::{
         add_entry_to_vault, classify_secondary_reveal_error, delete_entry_from_vault,
-        replace_entry_in_vault, App, AppView, ConfirmAction, SecondaryRevealError,
+        replace_entry_in_vault, App, AppView, ConfirmAction, InputPurpose, SecondaryRevealError,
     };
     use crate::commands::test_support::protected_entry;
     use crate::config::model::Config;
     use crate::error::TermKeyError;
     use crate::ui::screens::confirm::ConfirmScreen;
+    use crate::ui::screens::input::InputResult;
     use crate::ui::widgets::dashboard::Dashboard;
     use crate::update::UpdateStatus;
     use crate::vault::format::decode_v3;
@@ -1622,6 +1647,7 @@ mod tests {
             should_quit: false,
             clipboard_clear_time: None,
             pending_export_password: None,
+            pending_export_name: None,
             pending_new_password: None,
             pending_view_entry_idx: None,
             pending_copy_entry_idx: None,
@@ -1650,6 +1676,28 @@ mod tests {
     }
 
     #[test]
+    fn tui_export_prompts_with_an_editable_default_backup_name() {
+        let (_dir, _path, mut app) = app_with_protected_entry();
+
+        app.handle_input_result(
+            InputResult::Submit(Zeroizing::new("/tmp".to_string())),
+            InputPurpose::ExportPath,
+        )
+        .unwrap();
+        assert!(matches!(
+            app.view,
+            AppView::Input(_, InputPurpose::ExportName)
+        ));
+
+        app.handle_key(KeyCode::Enter, KeyModifiers::NONE).unwrap();
+        assert!(matches!(
+            app.view,
+            AppView::Input(_, InputPurpose::ExportPassword)
+        ));
+        assert_eq!(app.pending_export_name.as_deref(), Some("backup.termkey"));
+    }
+
+    #[test]
     fn tui_login_surfaces_post_migration_recovery_notice() {
         let _guard = env_lock().lock().unwrap();
         let dir = TempDir::new().unwrap();
@@ -1663,6 +1711,7 @@ mod tests {
             should_quit: false,
             clipboard_clear_time: None,
             pending_export_password: None,
+            pending_export_name: None,
             pending_new_password: None,
             pending_view_entry_idx: None,
             pending_copy_entry_idx: None,
