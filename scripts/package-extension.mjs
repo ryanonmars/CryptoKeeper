@@ -950,6 +950,16 @@ function createArchive(staging, paths) {
   return stagedArchive;
 }
 
+function storeManifestSnapshot(manifestSnapshot, manifest) {
+  if (manifest.key === undefined) return manifestSnapshot;
+  const storeManifest = { ...manifest };
+  delete storeManifest.key;
+  return {
+    relativePath: manifestSnapshot.relativePath,
+    bytes: Buffer.from(`${JSON.stringify(storeManifest, null, 2)}\n`, "utf8"),
+  };
+}
+
 export function packageExtension(extensionDirectory, outputArchive, hooks = {}) {
   if (!extensionDirectory || !outputArchive) fail("Usage: node scripts/package-extension.mjs <extension_dir> <output_zip>");
   const output = resolve(outputArchive);
@@ -962,7 +972,7 @@ export function packageExtension(extensionDirectory, outputArchive, hooks = {}) 
   if (manifest.manifest_version !== 3) fail("Extension manifest must be Manifest V3");
   const expectedVersion = cargoChromeVersion();
   if (chromeVersion(manifest.version, "manifest version") !== expectedVersion) fail(`Extension manifest version ${manifest.version} does not match Cargo version ${expectedVersion}`);
-  const snapshots = collectRuntimeFiles(extensionRoot, manifestSnapshot, hooks);
+  const snapshots = collectRuntimeFiles(extensionRoot, storeManifestSnapshot(manifestSnapshot, manifest), hooks);
   const outputDirectory = dirname(output);
   mkdirSync(outputDirectory, { recursive: true });
   let staging;

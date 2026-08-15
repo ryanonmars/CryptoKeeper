@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TermKey Extension",
-  "version": "1.0.1",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy1qOrlKGdFSYsCuJHPs3CsoCdoywp0Z3+6LtuhQiUqDJIZ6XI2NKLgJ5U4yDq9S6fmQNRdRPHN3p7QD5OPZhV0DOMQVOSDg0o0/n8wMkpfRNgO4ypa5se8J2TrR+6Jk0pEU4WqZGQ6FhnAVNfP4QFsSDnBpOmnIelS2xCL6WxFJT8sUw6zve4bvhSlgPv3Ir8LHlQfwcm2g9hWvqWmcEKHXJKN8SmjBd62GfmyKqV413ky27Qq1QAEO55Y1E2lWv9IEYMTBmWfzx3+LH0swSiQyFxSnFy8NaUx0oveJ743EU5AalSuFccTt3oTNbKzcBNI8Eji0g1N25YYbdizAdmQIDAQAB",
+  "version": "1.0.2",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAucBgnmzr2+lcO+8JIo4mBZX+HD5V6JLq0gVuX3jbQ5fSYaUED1CCBPn5hf92ry3VIHS67zCMNwU7O7jFiFYS2GAXBs7KhrKHoj7Xl9/3ua2bcT9Fumac0vtz/Qc0uoXGSs/a/Ep9yv9plflAvmRcSFg56hme71mTb2Xp+HkgDtzExF6CNt5vHlAGOQNP6zzKbARVx9UjI5nI/Wmp1CETrAXW0ilS+ZEaGz0R7p3ZnHk7PQW9LdiJdwInzSYRqWk7n+DIl+fDaN+PZnwblxFYb51AOSKFg3/A3yqJw3tXvJS5xZtI61sWEanPtyDTq37jURE+XYxIvLWo9LEvdMpnwwIDAQAB",
   "description": "Autofill and credential manager",
   "permissions": ["storage", "activeTab", "scripting", "nativeMessaging"],
   "host_permissions": ["http://*/*", "https://*/*"],

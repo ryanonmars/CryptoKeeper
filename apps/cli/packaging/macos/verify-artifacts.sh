@@ -142,7 +142,7 @@ while IFS= read -r entry || [[ -n "$entry" ]]; do
   zip_roots+="${path_components[0]}"$'\n'
 done <<< "$zip_entries"
 zip_roots=$(printf '%s' "$zip_roots" | LC_ALL=C sort -u)
-expected_zip_roots=$'browser-extension\ntermkey\ntermkey-native-host'
+expected_zip_roots=$'termkey\ntermkey-native-host'
 if [[ "$zip_roots" != "$expected_zip_roots" ]]; then
   echo "unexpected ZIP root entries:" >&2
   printf '%s\n' "$zip_roots" >&2
@@ -155,7 +155,7 @@ ditto -x -k "$zip_path" "$zip_extract_dir"
 
 termkey_binary="$zip_extract_dir/termkey"
 native_host_binary="$zip_extract_dir/termkey-native-host"
-if [[ ! -f "$termkey_binary" || ! -f "$native_host_binary" || ! -d "$zip_extract_dir/browser-extension" ]]; then
+if [[ ! -f "$termkey_binary" || ! -f "$native_host_binary" ]]; then
   echo "ZIP extraction did not contain the expected release payload" >&2
   exit 1
 fi

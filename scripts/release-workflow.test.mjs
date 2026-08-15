@@ -3,11 +3,30 @@ import { chmod, mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 const scriptPath = new URL('./release-workflow.test.mjs', import.meta.url);
 const repositoryRoot = path.resolve(path.dirname(scriptPath.pathname), '..');
 const workflowPath = path.join(repositoryRoot, '.github/workflows/release.yml');
+const packageJsonPath = path.join(repositoryRoot, 'package.json');
+const packageScriptPath = path.join(
+  repositoryRoot,
+  'apps/cli/packaging/macos/create-pkg.sh',
+);
+const extensionManifestPath = path.join(repositoryRoot, 'apps/extension/manifest.json');
+const publicExtensionManifestPath = path.join(
+  repositoryRoot,
+  'apps/extension/public/manifest.json',
+);
+const nativeManifestTemplatePath = path.join(
+  repositoryRoot,
+  'apps/cli/native-messaging/com.ryanonmars.termkey.template.json',
+);
+const browserCommandPath = path.join(
+  repositoryRoot,
+  'apps/cli/src/commands/browser.rs',
+);
 const actionReleasePin = 'softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65';
 const appleSecrets = [
   'APPLE_APPLICATION_SIGNING_IDENTITY',
@@ -233,6 +252,60 @@ test('job, artifact, and summary labels identify all three release modes', async
   assert.match(workflow.jobs['update-tap'].name, /tag-production/);
   assert.match(renderTemplate(workflow.jobs['validate-tap'].name, fixtures.unsigned), /unsigned-dry-run/);
   assert.match(renderTemplate(workflow.jobs['validate-tap'].name, fixtures.trusted), /trusted-validation/);
+});
+
+test('production packages exclude the unpacked extension while Store ZIP generation remains validated', async () => {
+  const validate = findStep('validate', 'Validate');
+  const createZip = findStep('build', 'Create ZIP from release payload');
+  const buildCommands = workflow.jobs.build.steps
+    .map((step) => step.run ?? '')
+    .join('\n');
+  const packageScript = await readFile(packageScriptPath, 'utf8');
+  const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'));
+
+  assert.equal(validate.run, 'npm run validate:phase1');
+  assert.match(packageJson.scripts['validate:phase1'], /npm run package:extension/);
+  assert.match(createZip.run, /release_dir\/termkey" "\$staging_dir\/termkey"/);
+  assert.match(
+    createZip.run,
+    /release_dir\/termkey-native-host" "\$staging_dir\/termkey-native-host"/,
+  );
+  assert.doesNotMatch(buildCommands, /browser-extension|TERMKEY_EXTENSION_DIR|apps\/extension/);
+  assert.doesNotMatch(packageScript, /browser-extension|TERMKEY_EXTENSION_DIR|apps\/extension/);
+});
+
+test('the Store key, extension ID, native origin, and Store URL stay consistent', async () => {
+  const manifest = JSON.parse(await readFile(extensionManifestPath, 'utf8'));
+  const publicManifest = JSON.parse(
+    await readFile(publicExtensionManifestPath, 'utf8'),
+  );
+  const nativeTemplate = JSON.parse(
+    await readFile(nativeManifestTemplatePath, 'utf8'),
+  );
+  const browserCommand = await readFile(browserCommandPath, 'utf8');
+  const digest = createHash('sha256')
+    .update(Buffer.from(manifest.key, 'base64'))
+    .digest()
+    .subarray(0, 16);
+  const extensionId = [...digest]
+    .map((byte) =>
+      String.fromCharCode(97 + (byte >> 4), 97 + (byte & 0x0f)),
+    )
+    .join('');
+
+  assert.equal(extensionId, 'dancadidkgcdlfdlfpbmmiokkeedpini');
+  assert.equal(publicManifest.key, manifest.key);
+  assert.deepEqual(nativeTemplate.allowed_origins, [
+    `chrome-extension://${extensionId}/`,
+  ]);
+  assert.match(
+    browserCommand,
+    new RegExp(`CHROME_EXTENSION_ID: &str = "${extensionId}"`),
+  );
+  assert.match(
+    browserCommand,
+    new RegExp(`https://chromewebstore\\.google\\.com/detail/${extensionId}`),
+  );
 });
 
 test('only v-tag pushes can create a release or update the tap', () => {

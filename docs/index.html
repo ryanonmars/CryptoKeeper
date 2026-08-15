@@ -650,66 +650,28 @@
     <div class="sec-label">installation</div>
     <h2 class="sec-title">get termkey</h2>
 
-    <div class="os-tabs">
-      <button class="os-tab active" onclick="switchOS('macos',this)">macOS</button>
-      <button class="os-tab"        onclick="switchOS('linux',this)">Linux</button>
-      <button class="os-tab"        onclick="switchOS('windows',this)">Windows</button>
-    </div>
-
-    <!-- macOS -->
     <div class="install-panel active" id="panel-macos">
       <div class="sub-tabs">
-        <button class="sub-tab active" onclick="switchSub('macos','brew',this)">Homebrew</button>
-        <button class="sub-tab"        onclick="switchSub('macos','dl',this)">Direct Download</button>
+        <button class="sub-tab active" onclick="switchSub('macos','dl',this)">Signed DMG</button>
+        <button class="sub-tab"        onclick="switchSub('macos','brew',this)">Homebrew</button>
+        <button class="sub-tab"        onclick="switchSub('macos','chrome',this)">Chrome Extension</button>
       </div>
-      <div class="sub-panel active" id="subpanel-macos-brew">
+      <div class="sub-panel active" id="subpanel-macos-dl">
         <div class="install-card">
-          <p class="install-intro">Install via Homebrew — updates with <code>brew upgrade</code>.</p>
-          <div class="code-block">
-            <button class="copy-btn" onclick="copyCode(this)">copy</button>
-            <code class="copy-source" hidden>brew install ryanonmars/termkey/termkey</code>
-            <span class="p">$ </span>brew install ryanonmars/termkey/termkey
-          </div>
-        </div>
-      </div>
-      <div class="sub-panel" id="subpanel-macos-dl">
-        <div class="install-card">
-          <p class="install-intro">Choose your architecture:</p>
+          <p class="install-intro">TermKey supports Apple Silicon Macs running macOS 11 or later.</p>
           <div class="dl-grid">
-            <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.zip">
-              ↓ macOS Apple Silicon <span class="arch">ARM64</span>
+            <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg">
+              ↓ Signed &amp; notarized DMG <span class="arch">Apple Silicon</span>
             </a>
-            <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-x86_64.zip">
-              ↓ macOS Intel <span class="arch">x86_64</span>
-            </a>
-          </div>
-          <div class="code-block">
-            <button class="copy-btn" onclick="copyCode(this)">copy</button>
-            <code class="copy-source" hidden>unzip termkey-macos-*.zip
-chmod +x termkey
-sudo mv termkey /usr/local/bin/</code>
-            <span class="p">$ </span>unzip termkey-macos-*.zip<br>
-            <span class="p">$ </span>chmod +x termkey<br>
-            <span class="p">$ </span>sudo mv termkey /usr/local/bin/
           </div>
           <div class="install-note">
-            <strong>Gatekeeper:</strong> If macOS blocks the app, go to <strong>System Settings → Privacy &amp; Security</strong>,
-            scroll to the bottom to the <strong>Security</strong> section — the blocked app appears there. Click <strong>Open Anyway</strong>, then confirm with <strong>Open</strong>.
-            Optionally, from the folder where the binary is, run <code>xattr -d com.apple.quarantine ./termkey</code> to remove the quarantine flag; if you see &quot;No such xattr&quot;, the file isn’t quarantined and you can skip that step.
+            Open the DMG and run the included installer. Production releases are signed with Developer ID and notarized by Apple.
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- Linux -->
-    <div class="install-panel" id="panel-linux">
-      <div class="sub-tabs">
-        <button class="sub-tab active" onclick="switchSub('linux','brew',this)">Homebrew (Linuxbrew)</button>
-        <button class="sub-tab"        onclick="switchSub('linux','dl',this)">Direct Download</button>
-      </div>
-      <div class="sub-panel active" id="subpanel-linux-brew">
+      <div class="sub-panel" id="subpanel-macos-brew">
         <div class="install-card">
-          <p class="install-intro">Requires <a href="https://brew.sh" target="_blank" rel="noopener">Homebrew for Linux</a>.</p>
+          <p class="install-intro">Install from the TermKey tap and update with <code>brew upgrade termkey</code>.</p>
           <div class="code-block">
             <button class="copy-btn" onclick="copyCode(this)">copy</button>
             <code class="copy-source" hidden>brew install ryanonmars/termkey/termkey</code>
@@ -717,47 +679,22 @@ sudo mv termkey /usr/local/bin/</code>
           </div>
         </div>
       </div>
-      <div class="sub-panel" id="subpanel-linux-dl">
+      <div class="sub-panel" id="subpanel-macos-chrome">
         <div class="install-card">
+          <p class="install-intro">Install the Store extension, then register the local native-messaging host.</p>
           <div class="dl-grid">
-            <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-linux-x86_64.zip">
-              ↓ Linux x86_64 <span class="arch">.zip</span>
+            <a class="dl-btn" href="https://chromewebstore.google.com/detail/dancadidkgcdlfdlfpbmmiokkeedpini" target="_blank" rel="noopener">
+              TermKey Extension <span class="arch">Chrome Web Store</span>
             </a>
           </div>
           <div class="code-block">
             <button class="copy-btn" onclick="copyCode(this)">copy</button>
-            <code class="copy-source" hidden>unzip termkey-linux-x86_64.zip
-chmod +x termkey
-sudo mv termkey /usr/local/bin/</code>
-            <span class="p">$ </span>unzip termkey-linux-x86_64.zip<br>
-            <span class="p">$ </span>chmod +x termkey<br>
-            <span class="p">$ </span>sudo mv termkey /usr/local/bin/
+            <code class="copy-source" hidden>termkey browser install</code>
+            <span class="p">$ </span>termkey browser install
           </div>
         </div>
       </div>
     </div>
-
-    <!-- Windows -->
-    <div class="install-panel" id="panel-windows">
-      <div class="install-card">
-        <p class="install-intro">Download the ZIP, unblock it in Properties if Windows offers that option, then extract it to a permanent folder such as <code>%LOCALAPPDATA%\TermKey</code>.</p>
-        <div class="dl-grid">
-          <a class="dl-btn" href="https://github.com/ryanonmars/termkey/releases/latest/download/termkey-windows-x86_64.zip">
-            ↓ Windows x86_64 <span class="arch">.zip</span>
-          </a>
-        </div>
-        <div class="code-block">
-          <button class="copy-btn" onclick="copyCode(this)">copy</button>
-          <code class="copy-source" hidden>.\termkey.exe browser install</code>
-          <span class="p">PS&gt; </span>.\termkey.exe browser install
-        </div>
-        <div class="install-note">
-          Run this command from the extracted folder. It registers the bundled browser host and prints the extension folder to select with Chrome’s <strong>Load unpacked</strong> button.<br><br>
-          Keep the extracted folder in place after setup: Chrome uses its bundled <code>termkey-native-host.exe</code>.
-        </div>
-      </div>
-    </div>
-
   </div>
 </section>
 

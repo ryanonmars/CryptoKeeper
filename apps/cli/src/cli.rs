@@ -119,15 +119,15 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum BrowserCommands {
-    /// Install or refresh the bundled Chrome integration files
+    /// Install the native host and open the Chrome Web Store listing
     Install,
 
     /// Show the current browser integration status
     Status,
 
-    /// Reinstall the browser integration files
+    /// Repair the native host and open the Chrome Web Store listing
     Repair,
 
-    /// Remove the managed browser integration files
+    /// Remove the native messaging manifest
     Uninstall,
 }

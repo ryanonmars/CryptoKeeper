@@ -25,6 +25,163 @@ it("does not expose a manual save action", async () => {
   expect(document.querySelector("#save-login")).toBeNull();
 });
 
+function nativeRecoveryChrome(
+  statusResponses: Array<unknown>,
+  create = vi.fn()
+) {
+  let statusIndex = 0;
+  const sendMessage = vi.fn(
+    (message: { type: string }, callback: (response: unknown) => void) => {
+      if (message.type === "termkey.nativeHost.status") {
+        callback(
+          statusResponses[statusIndex++] ?? statusResponses.at(-1)
+        );
+      } else if (message.type === "termkey.content.inspectPageContext") {
+        callback({
+          ok: true,
+          response: {
+            type: "page_context",
+            context: {
+              intent: "unknown",
+              visibleUsername: null,
+              hasPasswordField: false,
+              hasEmptyLoginField: false,
+              hasConfirmationPasswordField: false,
+              canGeneratePassword: false,
+            },
+          },
+        });
+      } else if (message.type === "termkey.nativeHost.findSiteMatches") {
+        callback({
+          ok: true,
+          response: {
+            type: "site_matches",
+            siteUrl: "https://example.test",
+            siteOrigin: "https://example.test",
+            siteHostname: "example.test",
+            matches: [],
+          },
+        });
+      } else if (message.type === "termkey.pendingLogin.get") {
+        callback({
+          ok: true,
+          response: { type: "pending_login", candidate: null },
+        });
+      }
+    }
+  );
+  vi.stubGlobal("chrome", {
+    runtime: { lastError: undefined, sendMessage },
+    tabs: {
+      create,
+      query: (
+        _query: unknown,
+        callback: (tabs: Array<{ url?: string }>) => void
+      ) => callback([{ url: "https://example.test/account" }]),
+    },
+  });
+  return { create, sendMessage };
+}
+
+it("offers downloads, Homebrew instructions, and retry when the native host is missing", async () => {
+  const create = vi.fn();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  nativeRecoveryChrome(
+    [{ ok: false, error: "Specified native messaging host not found." }],
+    create
+  );
+
+  await import("./popup");
+
+  expect(document.querySelector("#native-recovery")?.hasAttribute("hidden")).toBe(
+    false
+  );
+  expect(document.querySelector("#native-recovery-title")?.textContent).toBe(
+    "TermKey is not installed or connected"
+  );
+
+  document.querySelector<HTMLButtonElement>("#download-termkey")?.click();
+  document.querySelector<HTMLButtonElement>("#install-homebrew")?.click();
+  await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+
+  expect(create).toHaveBeenCalledWith({
+    url: "https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg",
+  });
+  expect(writeText).toHaveBeenCalledWith(
+    "brew install ryanonmars/termkey/termkey"
+  );
+  expect(create).toHaveBeenCalledWith({
+    url: "https://github.com/ryanonmars/termkey#apple-silicon-macos-11-or-later",
+  });
+});
+
+it("identifies stale native integration separately", async () => {
+  nativeRecoveryChrome([
+    {
+      ok: false,
+      error:
+        "TermKey browser integration is out of date. Run `termkey browser repair`.",
+    },
+  ]);
+
+  await import("./popup");
+
+  expect(document.querySelector("#native-recovery-title")?.textContent).toBe(
+    "TermKey needs an integration update"
+  );
+  expect(document.querySelector("#native-recovery-description")?.textContent).toContain(
+    "stale or incompatible"
+  );
+});
+
+it("reports a general native messaging failure without calling it missing", async () => {
+  nativeRecoveryChrome([
+    { ok: false, error: "Native host timed out after 10 seconds." },
+  ]);
+
+  await import("./popup");
+
+  expect(document.querySelector("#native-recovery-title")?.textContent).toBe(
+    "TermKey could not connect"
+  );
+});
+
+it("retries native discovery and hides recovery after a successful handshake", async () => {
+  const { sendMessage } = nativeRecoveryChrome([
+    { ok: false, error: "Specified native messaging host not found." },
+    {
+      ok: true,
+      response: {
+        type: "status",
+        app: "termkey",
+        version: "1.0.1",
+        vaultPath: "/vault",
+        vaultExists: true,
+        firstRunComplete: true,
+        recoveryConfigured: true,
+        locked: true,
+      },
+    },
+  ]);
+
+  await import("./popup");
+  document.querySelector<HTMLButtonElement>("#retry-native-host")?.click();
+
+  expect(
+    sendMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type: string }).type === "termkey.nativeHost.status"
+    )
+  ).toHaveLength(2);
+  expect(document.querySelector<HTMLElement>("#native-recovery")?.hidden).toBe(
+    true
+  );
+  expect(document.querySelector("#native-host-status")?.textContent).toBe(
+    "Unlock TermKey to use saved logins."
+  );
+});
+
 type PendingLoginPopupOptions = {
   canGeneratePassword?: boolean;
   hasEmptyLoginField?: boolean;

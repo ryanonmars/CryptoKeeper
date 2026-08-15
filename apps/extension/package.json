@@ -1,11 +1,11 @@
 {
   "name": "@termkey/extension",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@termkey/core": "1.0.1",
-    "@termkey/types": "1.0.1"
+    "@termkey/core": "1.0.2",
+    "@termkey/types": "1.0.2"
   },
   "scripts": {
     "build": "node ../../node_modules/typescript/bin/tsc --project ../../packages/core/tsconfig.json && node ../../node_modules/typescript/bin/tsc --project ../../packages/types/tsconfig.json && node ../../node_modules/typescript/bin/tsc --project tsconfig.json && node ./scripts/postbuild.mjs"

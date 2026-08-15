@@ -43,7 +43,7 @@ test('renders a deterministic Apple-Silicon-only formula', async () => {
   assert.match(formula, /depends_on arch: :arm64/);
   assert.match(formula, /bin\.install "termkey"/);
   assert.match(formula, /libexec\.install "termkey-native-host"/);
-  assert.match(formula, /pkgshare\.install "browser-extension"/);
+  assert.doesNotMatch(formula, /browser-extension|pkgshare/);
   assert.match(formula, /assert_match "Encrypted storage for", shell_output\("#\{bin\}\/termkey --help"\)/);
   assert.doesNotMatch(formula, /linux|x86_64|on_intel|on_linux/i);
   assert.match(formula, /\n$/);

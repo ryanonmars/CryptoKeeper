@@ -410,6 +410,62 @@ document.body.innerHTML = `
       display: flex;
     }
 
+    .recovery-panel {
+      display: grid;
+      gap: 10px;
+    }
+
+    .recovery-panel[hidden] {
+      display: none;
+    }
+
+    .recovery-title {
+      margin: 0;
+      color: #f8fafc;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .recovery-description {
+      margin: 0;
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    .recovery-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .recovery-button {
+      padding: 9px 10px;
+      border: 1px solid rgba(125, 211, 252, 0.28);
+      border-radius: 11px;
+      background: rgba(15, 23, 42, 0.72);
+      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    .recovery-button:hover:not(:disabled) {
+      border-color: rgba(125, 211, 252, 0.58);
+      background: rgba(15, 23, 42, 0.92);
+    }
+
+    .recovery-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .recovery-button--retry {
+      grid-column: 1 / -1;
+      border-color: rgba(34, 197, 94, 0.38);
+      color: #bbf7d0;
+    }
+
     .open-termkey-button {
       display: inline-flex;
       align-items: center;
@@ -568,6 +624,22 @@ document.body.innerHTML = `
       </button>
     </div>
 
+    <section id="native-recovery" class="panel recovery-panel" hidden>
+      <p id="native-recovery-title" class="recovery-title">Connect TermKey</p>
+      <p id="native-recovery-description" class="recovery-description"></p>
+      <div class="recovery-actions">
+        <button id="download-termkey" class="recovery-button" type="button">
+          Download TermKey
+        </button>
+        <button id="install-homebrew" class="recovery-button" type="button">
+          Install with Homebrew
+        </button>
+        <button id="retry-native-host" class="recovery-button recovery-button--retry" type="button">
+          Try Again
+        </button>
+      </div>
+    </section>
+
     <p id="recovery-notice" class="message" data-tone="error" hidden></p>
     <p id="native-host-status" class="message">Checking TermKey status...</p>
   </main>
@@ -628,6 +700,18 @@ const passwordPanelHintEl =
   document.querySelector<HTMLParagraphElement>("#password-panel-hint");
 const openTermKeyButtonEl =
   document.querySelector<HTMLButtonElement>("#open-termkey");
+const nativeRecoveryEl =
+  document.querySelector<HTMLElement>("#native-recovery");
+const nativeRecoveryTitleEl =
+  document.querySelector<HTMLParagraphElement>("#native-recovery-title");
+const nativeRecoveryDescriptionEl =
+  document.querySelector<HTMLParagraphElement>("#native-recovery-description");
+const downloadTermKeyButtonEl =
+  document.querySelector<HTMLButtonElement>("#download-termkey");
+const installHomebrewButtonEl =
+  document.querySelector<HTMLButtonElement>("#install-homebrew");
+const retryNativeHostButtonEl =
+  document.querySelector<HTMLButtonElement>("#retry-native-host");
 const secondaryPasswordGroupEl =
   document.querySelector<HTMLElement>("#secondary-password-group");
 
@@ -663,7 +747,13 @@ if (
   !passwordPanelLabelEl ||
   !passwordPanelHintEl ||
   !secondaryPasswordGroupEl ||
-  !openTermKeyButtonEl
+  !openTermKeyButtonEl ||
+  !nativeRecoveryEl ||
+  !nativeRecoveryTitleEl ||
+  !nativeRecoveryDescriptionEl ||
+  !downloadTermKeyButtonEl ||
+  !installHomebrewButtonEl ||
+  !retryNativeHostButtonEl
 ) {
   throw new Error("Popup UI failed to initialize.");
 }
@@ -703,6 +793,18 @@ const passwordPanelLabel = passwordPanelLabelEl;
 const passwordPanelHint = passwordPanelHintEl;
 const secondaryPasswordGroup = secondaryPasswordGroupEl;
 const openTermKeyButton = openTermKeyButtonEl;
+const nativeRecovery = nativeRecoveryEl;
+const nativeRecoveryTitle = nativeRecoveryTitleEl;
+const nativeRecoveryDescription = nativeRecoveryDescriptionEl;
+const downloadTermKeyButton = downloadTermKeyButtonEl;
+const installHomebrewButton = installHomebrewButtonEl;
+const retryNativeHostButton = retryNativeHostButtonEl;
+
+const TERMKEY_DMG_URL =
+  "https://github.com/ryanonmars/termkey/releases/latest/download/termkey-macos-aarch64.dmg";
+const TERMKEY_README_INSTALL_URL =
+  "https://github.com/ryanonmars/termkey#apple-silicon-macos-11-or-later";
+const TERMKEY_HOMEBREW_COMMAND = "brew install ryanonmars/termkey/termkey";
 
 let currentSiteMatches: PopupSiteMatch[] = [];
 let pendingFillMatch: PopupSiteMatch | null = null;
@@ -796,6 +898,62 @@ function setBackendStatus(connected: boolean, label: string) {
 function renderMessage(message: string, tone: MessageTone = "neutral") {
   statusMessage.dataset.tone = tone;
   statusMessage.textContent = message;
+}
+
+function hideNativeRecovery() {
+  nativeRecovery.hidden = true;
+  retryNativeHostButton.disabled = false;
+}
+
+function showNativeRecovery(error: string) {
+  const normalizedError = error.toLowerCase();
+  const hostMissing =
+    normalizedError.includes("native messaging host not found") ||
+    normalizedError.includes("specified native messaging host") ||
+    normalizedError.includes("host is not registered") ||
+    normalizedError.includes("failed to start native messaging host");
+  const incompatible =
+    normalizedError.includes("browser integration is out of date") ||
+    normalizedError.includes("browser repair") ||
+    normalizedError.includes("protocol") ||
+    normalizedError.includes("handshake") ||
+    normalizedError.includes("wrong response type");
+
+  nativeRecovery.hidden = false;
+  retryNativeHostButton.disabled = false;
+  if (hostMissing) {
+    nativeRecoveryTitle.textContent = "TermKey is not installed or connected";
+    nativeRecoveryDescription.textContent =
+      "Install TermKey, then make sure its Chrome integration is registered.";
+    return;
+  }
+  if (incompatible) {
+    nativeRecoveryTitle.textContent = "TermKey needs an integration update";
+    nativeRecoveryDescription.textContent =
+      "The installed native host is stale or incompatible. Update TermKey and run `termkey browser repair`, then try again.";
+    return;
+  }
+
+  nativeRecoveryTitle.textContent = "TermKey could not connect";
+  nativeRecoveryDescription.textContent =
+    "Chrome could not complete the native messaging connection. Check that TermKey is installed and try again.";
+}
+
+async function copyHomebrewCommand() {
+  try {
+    await navigator.clipboard.writeText(TERMKEY_HOMEBREW_COMMAND);
+    return true;
+  } catch {
+    const command = document.createElement("textarea");
+    command.value = TERMKEY_HOMEBREW_COMMAND;
+    command.style.position = "fixed";
+    command.style.opacity = "0";
+    document.body.append(command);
+    command.select();
+    const copied = document.execCommand("copy");
+    command.remove();
+    return copied;
+  }
 }
 
 function showRecoveryNotice(notice?: string) {
@@ -1836,6 +1994,8 @@ function loadPendingLogin() {
 }
 
 function refreshStatus() {
+  hideNativeRecovery();
+  retryNativeHostButton.disabled = true;
   setBackendStatus(false, "Checking backend");
   renderMessage("Checking TermKey status...");
 
@@ -1848,6 +2008,7 @@ function refreshStatus() {
       resetMatches("Backend unavailable.");
       setBackendStatus(false, "Disconnected");
       renderMessage(response.error, "error");
+      showNativeRecovery(response.error);
       return;
     }
 
@@ -1861,10 +2022,14 @@ function refreshStatus() {
         "Native host returned the wrong response type for status.",
         "error"
       );
+      showNativeRecovery(
+        "Native host returned the wrong response type for status."
+      );
       return;
     }
 
     setBackendStatus(true, "Connected");
+    hideNativeRecovery();
     vaultExists = response.response.vaultExists;
     vaultLocked = response.response.locked;
 
@@ -1890,6 +2055,11 @@ function refreshStatus() {
     renderMessage("Checking this site...");
     inspectPageContext();
     findSiteMatches();
+  }, () => {
+    showNativeRecovery(
+      chrome.runtime.lastError?.message ??
+        "The extension background did not answer the status check."
+    );
   });
 }
 
@@ -1944,6 +2114,20 @@ function launchTermKey() {
 
 generatePasswordButton.addEventListener("click", beginGeneratedPasswordFlow);
 openTermKeyButton.addEventListener("click", launchTermKey);
+downloadTermKeyButton.addEventListener("click", () => {
+  chrome.tabs.create({ url: TERMKEY_DMG_URL });
+});
+installHomebrewButton.addEventListener("click", async () => {
+  const copied = await copyHomebrewCommand();
+  renderMessage(
+    copied
+      ? "Homebrew command copied. Follow the installation guide."
+      : `Copy this command: ${TERMKEY_HOMEBREW_COMMAND}`,
+    copied ? "success" : "error"
+  );
+  chrome.tabs.create({ url: TERMKEY_README_INSTALL_URL });
+});
+retryNativeHostButton.addEventListener("click", refreshStatus);
 cancelSaveButton.addEventListener("click", cancelPendingSave);
 submitSaveButton.addEventListener("click", submitPendingSave);
 unlockVaultButton.addEventListener("click", submitPendingFill);

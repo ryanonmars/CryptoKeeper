@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "vitest --exclude 'scripts/*.test.mjs'",
+    "test": "vitest --exclude 'scripts/*.test.mjs' --exclude '.worktrees/**'",
     "test:release-tools": "node --test scripts/release-checksums.test.mjs scripts/release-workflow.test.mjs scripts/render-homebrew-formula.test.mjs scripts/validate-release-version.test.mjs && npm run test:extension-package && bash apps/cli/packaging/macos/release-tools.test.sh",
     "validate": "npm run build:extension && npm test -- --run && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings && cargo check --workspace --all-targets --no-default-features --locked && cargo test --workspace --all-targets --all-features --locked",
     "validate:phase1": "rm -f -- dist/termkey-chrome-web-store.zip && npm run validate && npm run test:release-tools && npm run package:extension",

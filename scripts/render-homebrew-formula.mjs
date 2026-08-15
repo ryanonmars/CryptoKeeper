@@ -21,7 +21,6 @@ class Termkey < Formula
   def install
     bin.install "termkey"
     libexec.install "termkey-native-host"
-    pkgshare.install "browser-extension"
   end
 
   test do

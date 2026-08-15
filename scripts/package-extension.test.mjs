@@ -40,7 +40,7 @@ function createFixture(t) {
     JSON.stringify({
       manifest_version: 3,
       name: "Fixture extension",
-      version: "1.0.1",
+      version: "1.0.2",
       background: { service_worker: "dist/background.js", type: "module" },
       content_scripts: [{ matches: ["https://example.test/*"], js: ["dist/content.js"] }],
       icons: { 128: "public/icon128.png" },
@@ -142,6 +142,23 @@ test("packages only manifest runtime files into a reproducible normalized archiv
   const metadata = run("zipinfo", ["-v", firstArchive]);
   assert.equal(metadata.status, 0, failure(metadata));
   assert.match(metadata.stdout, /file last modified on \(DOS date\/time\):\s+2000 Jan 1 00:00:00/);
+});
+
+test("omits a development manifest key from the Chrome Web Store archive", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.key = "development-only-public-key";
+  writeManifest(extension, manifest);
+  const archive = resolve(root, "archive.zip");
+
+  const result = runPackager(extension, archive);
+
+  assert.equal(result.status, 0, failure(result));
+  const extracted = resolve(root, "extracted");
+  const extraction = run("unzip", ["-q", archive, "-d", extracted]);
+  assert.equal(extraction.status, 0, failure(extraction));
+  assert.equal(JSON.parse(readFileSync(resolve(extracted, "manifest.json"), "utf8")).key, undefined);
+  assert.equal(readManifest(extension).key, "development-only-public-key");
 });
 
 test("rejects a missing manifest before creating the output", (t) => {
@@ -280,7 +297,7 @@ test("rejects a manifest symlink that escapes the extension", (t) => {
 test("rejects extension versions that do not exactly match Cargo's Chrome version", (t) => {
   const { root, extension } = createFixture(t);
   const manifest = readManifest(extension);
-  manifest.version = "1.0.2";
+  manifest.version = "1.0.3";
   writeManifest(extension, manifest);
 
   const result = runPackager(extension, resolve(root, "archive.zip"));

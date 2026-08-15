@@ -41,15 +41,13 @@ Run `termkey` to open the vault. `termkey update` checks the latest TermKey rele
 
 ---
 
-## Chrome Extension Setup (Phase 1)
+## Chrome Extension Setup
 
-The Chrome Web Store listing is not available yet. Phase 1 uses a temporary unpacked-extension installation:
+Install the [TermKey Extension from the Chrome Web Store](https://chromewebstore.google.com/detail/dancadidkgcdlfdlfpbmmiokkeedpini), then connect it to the local TermKey vault:
 
 1. Run `termkey browser install`.
-2. Open `chrome://extensions`.
-3. Turn on **Developer mode**.
-4. Click **Load unpacked**.
-5. Select the exact folder printed by `termkey browser install`.
+2. Install or enable the extension from the Store page that opens.
+3. Open the extension and choose **Try Again**.
 
 Useful commands:
 
@@ -59,7 +57,7 @@ termkey browser status
 termkey browser repair
 ```
 
-`termkey browser install` copies the bundled extension to `~/Applications/TermKey Browser Extension`, installs the local Chrome native-host manifest, and prints the folder to load. `termkey browser status` reports the integration state, and `termkey browser repair` restores the native-host registration and staged extension when needed.
+`termkey browser install` registers the local native-messaging host and opens the Chrome Web Store listing. `termkey browser status` reports the native-host path, protocol compatibility, expected Store extension ID, and Store link. `termkey browser repair` rewrites stale native-host registration without changing Chrome's extension installation state.
 
 Read the [Privacy Policy](https://github.com/ryanonmars/termkey/blob/master/PRIVACY.md) before enabling autofill or save prompts.
 

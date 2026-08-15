@@ -9,9 +9,10 @@ use crate::error::{Result, TermKeyError};
 use crate::native::site::{NATIVE_CAPABILITIES, NATIVE_PROTOCOL_VERSION};
 use crate::ui::borders::print_success;
 
-const CHROME_EXTENSION_ID: &str = "fpnkkpgaogkddgangnphpgbbfdcpfjah";
+const CHROME_EXTENSION_ID: &str = "dancadidkgcdlfdlfpbmmiokkeedpini";
+const CHROME_WEB_STORE_URL: &str =
+    "https://chromewebstore.google.com/detail/dancadidkgcdlfdlfpbmmiokkeedpini";
 const CHROME_NATIVE_HOST_NAME: &str = "com.ryanonmars.termkey";
-const EXTENSION_SOURCE_ENV: &str = "TERMKEY_BROWSER_EXTENSION_SOURCE";
 const NATIVE_HOST_BINARY_ENV: &str = "TERMKEY_NATIVE_HOST_BINARY";
 
 pub fn run(command: &BrowserCommands) -> Result<()> {
@@ -21,11 +22,13 @@ pub fn run(command: &BrowserCommands) -> Result<()> {
         BrowserCommands::Status => print_status(),
         BrowserCommands::Uninstall => {
             let report = uninstall_browser_support()?;
-            if report.removed_extension || report.removed_native_host_manifest {
-                print_success("Chrome integration removed.");
+            if report.removed_native_host_manifest {
+                print_success("TermKey native messaging manifest removed.");
             } else {
-                println!("  Chrome integration is already removed.");
+                println!("  TermKey native messaging manifest is already removed.");
             }
+            println!("  The Chrome Web Store extension remains installed and managed by Chrome.");
+            println!("  Remove it from chrome://extensions if desired.");
             Ok(())
         }
     }
@@ -33,23 +36,15 @@ pub fn run(command: &BrowserCommands) -> Result<()> {
 
 #[derive(Default)]
 pub(crate) struct BrowserUninstallReport {
-    pub removed_extension: bool,
     pub removed_native_host_manifest: bool,
 }
 
 pub(crate) fn uninstall_browser_support() -> Result<BrowserUninstallReport> {
-    remove_browser_support_at(&managed_extension_dir(), &native_host_manifest_path()?)
+    remove_browser_support_at(&native_host_manifest_path()?)
 }
 
-fn remove_browser_support_at(
-    managed_extension_dir: &Path,
-    native_host_manifest: &Path,
-) -> Result<BrowserUninstallReport> {
+fn remove_browser_support_at(native_host_manifest: &Path) -> Result<BrowserUninstallReport> {
     let mut report = BrowserUninstallReport::default();
-    if managed_extension_dir.exists() {
-        fs::remove_dir_all(managed_extension_dir)?;
-        report.removed_extension = true;
-    }
     if native_host_manifest.exists() {
         fs::remove_file(native_host_manifest)?;
         report.removed_native_host_manifest = true;
@@ -58,37 +53,40 @@ fn remove_browser_support_at(
 }
 
 fn install_browser_support(action: &str) -> Result<()> {
-    let source_dir = locate_extension_source()?;
     let native_host_binary = locate_native_host_binary()?;
-    let managed_extension_dir = managed_extension_dir();
-
-    sync_directory(&source_dir, &managed_extension_dir)?;
     let manifest_path = install_native_host_manifest(&native_host_binary)?;
+    let manifest_status = native_host_manifest_status(&manifest_path, Some(&native_host_binary))?;
+    if manifest_status != "ready" {
+        return Err(TermKeyError::ConfigError(format!(
+            "Chrome native host manifest verification failed: {manifest_status}"
+        )));
+    }
+    let protocol_status = native_host_protocol_status(&native_host_binary);
+    if !protocol_status.starts_with("ready") {
+        return Err(TermKeyError::ConfigError(format!(
+            "Chrome native host protocol verification failed: {protocol_status}"
+        )));
+    }
 
-    print_success(&format!("Chrome integration {}.", action));
+    print_success(&format!("Chrome native messaging host {}.", action));
     println!();
-    println!("  Stable Chrome extension ID: {}", CHROME_EXTENSION_ID);
-    println!(
-        "  Extension folder for Load unpacked: {}",
-        managed_extension_dir.display()
-    );
     println!("  Native host manifest: {}", manifest_path.display());
+    println!("  Native host protocol: {}", protocol_status);
+    println!("  Expected Store extension ID: {}", CHROME_EXTENSION_ID);
+    println!("  Chrome Web Store: {}", CHROME_WEB_STORE_URL);
     println!();
-    println!("  Next step in Chrome:");
-    println!("  1. Open chrome://extensions");
-    println!("  2. Turn on Developer mode");
-    println!("  3. Click Load unpacked");
-    println!("  4. Select {}", managed_extension_dir.display());
+    if let Err(error) = webbrowser::open(CHROME_WEB_STORE_URL) {
+        println!("  Could not open the Store listing automatically: {error}");
+    }
+    println!("  Install or enable TermKey Extension in Chrome, then retry the extension.");
     println!();
-    println!("  Run `termkey browser status` any time to verify the setup paths.");
+    println!("  Run `termkey browser status` to verify the native host setup.");
 
     Ok(())
 }
 
 fn print_status() -> Result<()> {
-    let bundled_extension_source = locate_extension_source().ok();
     let native_host_binary = locate_native_host_binary().ok();
-    let managed_extension_dir = managed_extension_dir();
     let manifest_path = native_host_manifest_path()?;
     let manifest_status =
         native_host_manifest_status(&manifest_path, native_host_binary.as_deref())?;
@@ -100,15 +98,8 @@ fn print_status() -> Result<()> {
     println!();
     println!("  TermKey Browser Integration");
     println!("  ───────────────────────────");
-    println!("  Chrome extension ID: {}", CHROME_EXTENSION_ID);
-    println!(
-        "  Bundled extension source: {}",
-        describe_optional_path(bundled_extension_source.as_deref())
-    );
-    println!(
-        "  Managed extension folder: {}",
-        describe_existing_path(&managed_extension_dir)
-    );
+    println!("  Expected Store extension ID: {}", CHROME_EXTENSION_ID);
+    println!("  Chrome Web Store: {}", CHROME_WEB_STORE_URL);
     println!(
         "  Native host binary: {}",
         describe_optional_path(native_host_binary.as_deref())
@@ -120,9 +111,8 @@ fn print_status() -> Result<()> {
         manifest_status
     );
     println!();
-    println!("  Chrome still requires one manual step for non-store extensions:");
-    println!("  Load unpacked from {}", managed_extension_dir.display());
-    println!("  after enabling Developer mode on chrome://extensions.");
+    println!("  Chrome owns the Store extension's install and enabled state.");
+    println!("  Open the Store link above to install or manage it.");
     println!();
     println!(
         "  Use `termkey browser repair` if any path or protocol metadata is missing or stale."
@@ -144,77 +134,6 @@ fn describe_existing_path(path: &Path) -> String {
     } else {
         format!("{} (missing)", path.display())
     }
-}
-
-fn managed_extension_dir() -> PathBuf {
-    if let Some(home) = current_user_home_dir() {
-        return home.join("Applications").join("TermKey Browser Extension");
-    }
-
-    crate::vault::storage::vault_dir()
-        .join("browser")
-        .join("chrome-extension")
-}
-
-fn locate_extension_source() -> Result<PathBuf> {
-    let current_exe = std::env::current_exe().map_err(TermKeyError::Io)?;
-    for candidate in extension_source_candidates(&current_exe) {
-        if is_extension_bundle_dir(&candidate) {
-            return Ok(candidate);
-        }
-    }
-
-    Err(TermKeyError::ConfigError(
-        "Chrome extension bundle not found. Build it with `npm run build:extension`, or use an installer that includes browser support.".into(),
-    ))
-}
-
-fn extension_source_candidates(current_exe: &Path) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    let executable_paths = executable_candidate_paths(current_exe);
-
-    if let Ok(path) = std::env::var(EXTENSION_SOURCE_ENV) {
-        candidates.push(PathBuf::from(path));
-    }
-
-    for executable_path in &executable_paths {
-        if let Some(exe_dir) = executable_path.parent() {
-            candidates.push(exe_dir.join("browser-extension").join("chrome"));
-            candidates.push(exe_dir.join("browser-extension"));
-
-            for prefix in install_prefix_candidates(exe_dir) {
-                candidates.push(
-                    prefix
-                        .join("share")
-                        .join("termkey")
-                        .join("browser-extension")
-                        .join("chrome"),
-                );
-            }
-
-            if let Some(repo_root) = repo_root_from_exe(exe_dir) {
-                candidates.push(repo_root.join("browser-extension").join("chrome"));
-                candidates.push(repo_root.join("apps").join("extension"));
-            }
-        }
-
-        if let Some(resources_dir) = macos_resources_dir(executable_path) {
-            candidates.push(resources_dir.join("browser-extension").join("chrome"));
-        }
-    }
-
-    if let Some(resources_dir) = macos_installed_app_resources_dir() {
-        candidates.push(resources_dir.join("browser-extension").join("chrome"));
-    }
-
-    candidates
-}
-
-fn is_extension_bundle_dir(path: &Path) -> bool {
-    path.join("manifest.json").is_file()
-        && path.join("popup.html").is_file()
-        && path.join("prompt.html").is_file()
-        && path.join("dist").join("background.js").is_file()
 }
 
 fn locate_native_host_binary() -> Result<PathBuf> {
@@ -344,33 +263,6 @@ fn macos_installed_app_resources_dir() -> Option<PathBuf> {
     }
 
     None
-}
-
-fn sync_directory(source: &Path, destination: &Path) -> Result<()> {
-    if destination.exists() {
-        fs::remove_dir_all(destination)?;
-    }
-
-    fs::create_dir_all(destination)?;
-    copy_directory_recursive(source, destination)?;
-    Ok(())
-}
-
-fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target_path = destination.join(entry.file_name());
-
-        if file_type.is_dir() {
-            fs::create_dir_all(&target_path)?;
-            copy_directory_recursive(&entry.path(), &target_path)?;
-        } else {
-            fs::copy(entry.path(), &target_path)?;
-        }
-    }
-
-    Ok(())
 }
 
 fn install_native_host_manifest(native_host_binary: &Path) -> Result<PathBuf> {
@@ -521,60 +413,24 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn extension_bundle_validation_requires_built_artifacts() {
+    fn browser_uninstall_removes_only_the_native_host_manifest() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("manifest.json"), "{}").unwrap();
-        fs::write(dir.path().join("popup.html"), "<!doctype html>").unwrap();
-        fs::write(dir.path().join("prompt.html"), "<!doctype html>").unwrap();
-        fs::create_dir_all(dir.path().join("dist")).unwrap();
-        fs::write(
-            dir.path().join("dist").join("background.js"),
-            "console.log('ok');",
-        )
-        .unwrap();
-
-        assert!(is_extension_bundle_dir(dir.path()));
-    }
-
-    #[test]
-    fn sync_directory_replaces_previous_contents() {
-        let source = TempDir::new().unwrap();
-        let destination = TempDir::new().unwrap();
-
-        fs::write(source.path().join("manifest.json"), "{}").unwrap();
-        fs::write(source.path().join("popup.html"), "<!doctype html>").unwrap();
-        fs::write(source.path().join("prompt.html"), "<!doctype html>").unwrap();
-        fs::create_dir_all(source.path().join("dist")).unwrap();
-        fs::write(
-            source.path().join("dist").join("background.js"),
-            "console.log('ok');",
-        )
-        .unwrap();
-        fs::write(destination.path().join("old.txt"), "stale").unwrap();
-
-        let target = destination.path().join("chrome-extension");
-        sync_directory(source.path(), &target).unwrap();
-
-        assert!(target.join("manifest.json").exists());
-        assert!(target.join("dist").join("background.js").exists());
-        assert!(!target.join("old.txt").exists());
-    }
-
-    #[test]
-    fn browser_uninstall_removes_managed_files() {
-        let dir = TempDir::new().unwrap();
-        let extension_dir = dir.path().join("TermKey Browser Extension");
         let manifest_path = dir.path().join("native-host.json");
-        fs::create_dir_all(&extension_dir).unwrap();
-        fs::write(extension_dir.join("manifest.json"), "{}").unwrap();
         fs::write(&manifest_path, "{}").unwrap();
 
-        let report = remove_browser_support_at(&extension_dir, &manifest_path).unwrap();
+        let report = remove_browser_support_at(&manifest_path).unwrap();
 
-        assert!(report.removed_extension);
         assert!(report.removed_native_host_manifest);
-        assert!(!extension_dir.exists());
         assert!(!manifest_path.exists());
+    }
+
+    #[test]
+    fn store_identity_is_used_for_the_listing_and_native_origin() {
+        assert_eq!(CHROME_EXTENSION_ID, "dancadidkgcdlfdlfpbmmiokkeedpini");
+        assert_eq!(
+            CHROME_WEB_STORE_URL,
+            format!("https://chromewebstore.google.com/detail/{CHROME_EXTENSION_ID}")
+        );
     }
 
     #[test]

@@ -96,17 +96,6 @@ jobs:
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install JS dependencies
-        run: npm ci
-
-      - name: Build browser extension
-        run: npm run build:extension
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
@@ -117,18 +106,6 @@ jobs:
         env:
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: cargo build --release --target aarch64-apple-darwin --locked
-
-      - name: Stage browser extension
-        shell: bash
-        run: |
-          extension_dir="$RUNNER_TEMP/termkey-browser-extension/chrome"
-          mkdir -p "$extension_dir"
-          ditto --norsrc apps/extension/manifest.json "$extension_dir/manifest.json"
-          ditto --norsrc apps/extension/popup.html "$extension_dir/popup.html"
-          ditto --norsrc apps/extension/prompt.html "$extension_dir/prompt.html"
-          ditto --norsrc apps/extension/dist "$extension_dir/dist"
-          ditto --norsrc apps/extension/public "$extension_dir/public"
-          echo "TERMKEY_EXTENSION_DIR=$extension_dir" >> "$GITHUB_ENV"
 
       - name: Summarize release mode
         shell: bash
@@ -389,7 +366,6 @@ jobs:
           mkdir -p "$staging_dir"
           ditto --norsrc "$release_dir/termkey" "$staging_dir/termkey"
           ditto --norsrc "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
-          ditto --norsrc "$RUNNER_TEMP/termkey-browser-extension" "$staging_dir/browser-extension"
 
           ditto -c -k --norsrc "$staging_dir" "$zip_path"
 
@@ -436,7 +412,7 @@ jobs:
           zip_roots=$(unzip -Z1 "$GITHUB_WORKSPACE/termkey-macos-aarch64.zip" \
             | awk -F/ 'NF && $1 != "" { print $1 }' \
             | LC_ALL=C sort -u)
-          expected_zip_roots=$'browser-extension\ntermkey\ntermkey-native-host'
+          expected_zip_roots=$'termkey\ntermkey-native-host'
           test "$zip_roots" = "$expected_zip_roots"
           pkgutil --payload-files "$GITHUB_WORKSPACE/termkey-macos-aarch64-installer.pkg" \
             | grep -Fqx './usr/local/bin/termkey'

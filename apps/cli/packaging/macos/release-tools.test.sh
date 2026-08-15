@@ -149,10 +149,9 @@ set -euo pipefail
 printf "ditto %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
 if [[ "$1" == "-x" && "$2" == "-k" && "$3" == "$TERMKEY_TEST_ZIP_PATH" && $# -eq 4 ]]; then
   destination=${4:?}
-  mkdir -p "$destination/browser-extension"
+  mkdir -p "$destination"
   : > "$destination/termkey"
   : > "$destination/termkey-native-host"
-  : > "$destination/browser-extension/manifest.json"
 else
   exit 64
 fi'
@@ -254,7 +253,7 @@ export TERMKEY_TEST_PKG_PATH="$artifacts_dir/TermKey.pkg"
 export TERMKEY_TEST_DMG_PATH="$artifacts_dir/TermKey.dmg"
 export TERMKEY_TEST_ZIP_PATH="$artifacts_dir/TermKey.zip"
 export APPLE_NOTARY_KEY_BASE64=encoded-notary-key
-export TERMKEY_TEST_ZIP_ENTRIES=$'termkey\ntermkey-native-host\nbrowser-extension/\nbrowser-extension/manifest.json'
+export TERMKEY_TEST_ZIP_ENTRIES=$'termkey\ntermkey-native-host'
 
 run_case accepted pkg
 assert_log_contains 'notarytool submit'
@@ -374,11 +373,11 @@ if bash "$verify_script" \
 fi
 
 for malformed_entries in \
-  $'/termkey\ntermkey-native-host\nbrowser-extension/' \
-  $'termkey/../escape\ntermkey-native-host\nbrowser-extension/' \
-  $'termkey//extra\ntermkey-native-host\nbrowser-extension/' \
-  $'termkey\\backslash\ntermkey-native-host\nbrowser-extension/' \
-  $'./termkey\ntermkey-native-host\nbrowser-extension/'; do
+  $'/termkey\ntermkey-native-host' \
+  $'termkey/../escape\ntermkey-native-host' \
+  $'termkey//extra\ntermkey-native-host' \
+  $'termkey\\backslash\ntermkey-native-host' \
+  $'./termkey\ntermkey-native-host'; do
   : > "$TERMKEY_TEST_LOG"
   if TERMKEY_TEST_ZIP_ENTRIES="$malformed_entries" bash "$verify_script" \
     "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \

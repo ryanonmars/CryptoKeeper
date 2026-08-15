@@ -35,9 +35,10 @@ pub fn run(skip_confirmation: bool) -> Result<()> {
     print_success("TermKey data and browser integration removed.");
     println!("  Removed {removed_data_files} TermKey data file(s).");
     println!("  Encrypted backups were not touched.");
-    if browser_report.removed_extension || browser_report.removed_native_host_manifest {
-        println!("  Removed managed Chrome integration files.");
+    if browser_report.removed_native_host_manifest {
+        println!("  Removed the Chrome native messaging manifest.");
     }
+    println!("  The Chrome Web Store extension remains Chrome-managed; remove it from chrome://extensions if desired.");
     println!("  The TermKey app or CLI binary remains installed; remove it with your package manager if desired.");
     Ok(())
 }
