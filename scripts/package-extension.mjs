@@ -549,22 +549,99 @@ function javascriptReferences(snapshot) {
   host.readFile = (fileName) => fileName === snapshot.relativePath ? sourceText : undefined;
   const checker = ts.createProgram([snapshot.relativePath], compilerOptions, host).getTypeChecker();
   const constants = new Map();
+  const globalObjectAliases = new Set();
+  const importScriptsAliases = new Set();
+  const declarations = [];
+  const symbolAt = (node) => ts.isIdentifier(node) ? checker.getSymbolAtLocation(node) : undefined;
+  const isLocalIdentifier = (node) => symbolAt(node)?.declarations?.some((declaration) => declaration.getSourceFile() === source) ?? false;
+  const constant = (node) => constantString(node, constants, symbolAt);
+  const isGlobalObject = (rawNode) => {
+    const node = unwrapJsExpression(rawNode);
+    if (!node) return false;
+    if (!ts.isIdentifier(node)) return false;
+    const symbol = symbolAt(node);
+    return (["globalThis", "self", "window"].includes(node.text) && !isLocalIdentifier(node)) || (symbol && globalObjectAliases.has(symbol));
+  };
+  const isGlobalImportScripts = (rawNode) => {
+    const node = unwrapJsExpression(rawNode);
+    if (!node) return false;
+    if (ts.isIdentifier(node)) {
+      const symbol = symbolAt(node);
+      return (
+        (node.text === "importScripts" && isReferenceIdentifier(node) && !isLocalIdentifier(node)) ||
+        (symbol && importScriptsAliases.has(symbol) && isReferenceIdentifier(node))
+      );
+    }
+    return (
+      (ts.isPropertyAccessExpression(node) && isGlobalObject(node.expression) && node.name.text === "importScripts") ||
+      (ts.isElementAccessExpression(node) && isGlobalObject(node.expression) && constant(node.argumentExpression) === "importScripts")
+    );
+  };
+  const collectDeclarations = (node) => {
+    if (ts.isVariableDeclaration(node)) declarations.push(node);
+    ts.forEachChild(node, collectDeclarations);
+  };
+  collectDeclarations(source);
+  let changed;
+  do {
+    changed = false;
+    for (const declaration of declarations) {
+      if (!isConstDeclaration(declaration)) continue;
+      if (ts.isIdentifier(declaration.name)) {
+        const symbol = symbolAt(declaration.name);
+        if (!symbol) continue;
+        const value = constant(declaration.initializer);
+        if (value !== undefined && !constants.has(symbol)) {
+          constants.set(symbol, value);
+          changed = true;
+        }
+        if (isGlobalObject(declaration.initializer) && !globalObjectAliases.has(symbol)) {
+          globalObjectAliases.add(symbol);
+          changed = true;
+        }
+        if (isGlobalImportScripts(declaration.initializer) && !importScriptsAliases.has(symbol)) {
+          importScriptsAliases.add(symbol);
+          changed = true;
+        }
+      } else if (ts.isObjectBindingPattern(declaration.name) && isGlobalObject(declaration.initializer)) {
+        for (const element of declaration.name.elements) {
+          if (bindingPropertyName(element, constant) !== "importScripts") continue;
+          if (!ts.isIdentifier(element.name)) fail(`Unsupported importScripts alias in ${snapshot.relativePath}`);
+          const symbol = symbolAt(element.name);
+          if (symbol && !importScriptsAliases.has(symbol)) {
+            importScriptsAliases.add(symbol);
+            changed = true;
+          }
+        }
+      }
+    }
+  } while (changed);
   const staticValue = (node, purpose) => {
-    const value = constantString(node, constants);
+    const value = constant(node);
     if (value === undefined) fail(`${purpose} must use a constant string in ${snapshot.relativePath}`);
     return value;
   };
-  const isLocalIdentifier = (node) => ts.isIdentifier(node) && checker.getSymbolAtLocation(node)?.declarations?.some((declaration) => declaration.getSourceFile() === source);
-  const isGlobalObject = (node) => ts.isIdentifier(node) && ["globalThis", "self", "window"].includes(node.text) && !isLocalIdentifier(node);
-  const isGlobalImportScripts = (node) =>
-    (ts.isIdentifier(node) && node.text === "importScripts" && isReferenceIdentifier(node) && !isLocalIdentifier(node)) ||
-    (ts.isPropertyAccessExpression(node) && isGlobalObject(node.expression) && node.name.text === "importScripts") ||
-    (ts.isElementAccessExpression(node) && isGlobalObject(node.expression) && constantString(node.argumentExpression, constants) === "importScripts");
   const visit = (node) => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
-      const value = constantString(node.initializer, constants);
-      if (value !== undefined) constants.set(node.name.text, value);
-      if (node.initializer && isGlobalImportScripts(node.initializer)) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
+    if (ts.isVariableDeclaration(node) && !isConstDeclaration(node)) {
+      if (isGlobalObject(node.initializer) || isGlobalImportScripts(node.initializer)) {
+        fail(`Mutable global importScripts alias is not permitted in ${snapshot.relativePath}`);
+      }
+      if (ts.isObjectBindingPattern(node.name) && isGlobalObject(node.initializer)) {
+        for (const element of node.name.elements) {
+          if (bindingPropertyName(element, constant) === "importScripts") fail(`Mutable importScripts alias is not permitted in ${snapshot.relativePath}`);
+        }
+      }
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+      if (assignedSymbols(node.left, symbolAt).some((symbol) => globalObjectAliases.has(symbol) || importScriptsAliases.has(symbol))) {
+        fail(`Reassignment of a tracked importScripts alias is not permitted in ${snapshot.relativePath}`);
+      }
+      if (isGlobalObject(node.right) || isGlobalImportScripts(node.right)) fail(`Mutable global importScripts alias is not permitted in ${snapshot.relativePath}`);
+    }
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) {
+      if (assignedSymbols(node.operand, symbolAt).some((symbol) => globalObjectAliases.has(symbol) || importScriptsAliases.has(symbol))) {
+        fail(`Mutation of a tracked importScripts alias is not permitted in ${snapshot.relativePath}`);
+      }
     }
     if (isGlobalImportScripts(node)) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) references.push({ value: staticValue(node.moduleSpecifier, "module specifier"), purpose: "JavaScript import" });
@@ -577,13 +654,54 @@ function javascriptReferences(snapshot) {
   return references;
 }
 
-function constantString(node, constants) {
+function unwrapJsExpression(node) {
+  while (node && (
+    ts.isParenthesizedExpression(node) || ts.isAsExpression(node) ||
+    ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node)
+  )) node = node.expression;
+  return node;
+}
+
+function isConstDeclaration(node) {
+  return ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const) !== 0;
+}
+
+function bindingPropertyName(element, constant) {
+  if (element.dotDotDotToken) return undefined;
+  if (!element.propertyName) return ts.isIdentifier(element.name) ? element.name.text : undefined;
+  if (ts.isComputedPropertyName(element.propertyName)) return constant(element.propertyName.expression);
+  return element.propertyName.text;
+}
+
+function assignedSymbols(node, symbolAt) {
+  const symbols = [];
+  const collect = (target) => {
+    target = unwrapJsExpression(target);
+    if (ts.isIdentifier(target)) {
+      const symbol = symbolAt(target);
+      if (symbol) symbols.push(symbol);
+    } else if (ts.isArrayLiteralExpression(target)) {
+      for (const element of target.elements) collect(element);
+    } else if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) collect(property.name);
+        else if (ts.isPropertyAssignment(property)) collect(property.initializer);
+        else if (ts.isSpreadAssignment(property)) collect(property.expression);
+      }
+    }
+  };
+  collect(node);
+  return symbols;
+}
+
+function constantString(node, constants, symbolAt) {
   if (!node) return undefined;
+  node = unwrapJsExpression(node);
   if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
-  if (ts.isIdentifier(node)) return constants.get(node.text);
+  if (ts.isIdentifier(node)) return constants.get(symbolAt(node));
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = constantString(node.left, constants);
-    const right = constantString(node.right, constants);
+    const left = constantString(node.left, constants, symbolAt);
+    const right = constantString(node.right, constants, symbolAt);
     return left === undefined || right === undefined ? undefined : `${left}${right}`;
   }
   return undefined;
@@ -595,13 +713,16 @@ function isReferenceIdentifier(node) {
     (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
     (ts.isPropertyAssignment(parent) && parent.name === node) ||
     (ts.isMethodDeclaration(parent) && parent.name === node) ||
-    (ts.isVariableDeclaration(parent) && parent.name === node)
+    (ts.isVariableDeclaration(parent) && parent.name === node) ||
+    (ts.isBindingElement(parent) && parent.name === node) ||
+    (ts.isParameter(parent) && parent.name === node) ||
+    ((ts.isFunctionDeclaration(parent) || ts.isFunctionExpression(parent) || ts.isClassDeclaration(parent) || ts.isClassExpression(parent)) && parent.name === node)
   );
 }
 
 function cssReferences(snapshot) {
   const text = textContents(snapshot.bytes, `stylesheet ${snapshot.relativePath}`);
-  const references = new Set();
+  const references = [];
   let index = 0;
   while (index < text.length) {
     if (text.startsWith("/*", index)) {
@@ -614,34 +735,43 @@ function cssReferences(snapshot) {
       index = consumeCssString(text, index).next;
       continue;
     }
-    if (text.startsWith("@import", index) && !/[\w-]/.test(text[index + 7] ?? "")) {
-      index = skipCssSpaceAndComments(text, index + 7);
-      if (text.slice(index, index + 3).toLowerCase() === "url" && text[index + 3] === "(") {
-        const url = consumeCssUrl(text, index + 3);
-        references.add(url.value);
+    if (text[index] === "@") {
+      const atRule = consumeCssIdentifier(text, index + 1);
+      if (!atRule || atRule.value.toLowerCase() !== "import") {
+        index = atRule?.next ?? index + 1;
+        continue;
+      }
+      index = skipCssSpaceAndComments(text, atRule.next);
+      const functionName = consumeCssIdentifier(text, index);
+      if (functionName?.value.toLowerCase() === "url" && text[functionName.next] === "(") {
+        const url = consumeCssUrl(text, functionName.next);
+        references.push({ value: url.value, purpose: "stylesheet import", executable: true });
         index = url.next;
       } else if (text[index] === "'" || text[index] === '"') {
         const value = consumeCssString(text, index);
-        references.add(value.value);
+        references.push({ value: value.value, purpose: "stylesheet import", executable: true });
         index = value.next;
       } else fail(`stylesheet ${snapshot.relativePath} has a malformed @import`);
       continue;
     }
-    if (text.slice(index, index + 3).toLowerCase() === "url" && text[index + 3] === "(") {
-      const url = consumeCssUrl(text, index + 3);
-      references.add(url.value);
-      index = url.next;
+    const identifier = consumeCssIdentifier(text, index);
+    if (identifier) {
+      if (identifier.value.toLowerCase() === "url" && text[identifier.next] === "(") {
+        const url = consumeCssUrl(text, identifier.next);
+        references.push({ value: url.value, purpose: "stylesheet URL", executable: false });
+        index = url.next;
+      } else index = identifier.next;
       continue;
     }
     index += 1;
   }
-  return [...references];
+  return references;
 }
 
 function skipCssSpaceAndComments(text, start) {
   let index = start;
   while (index < text.length) {
-    if (/\s/.test(text[index])) index += 1;
+    if (isCssWhitespace(text[index])) index += 1;
     else if (text.startsWith("/*", index)) {
       const end = text.indexOf("*/", index + 2);
       if (end < 0) fail("stylesheet has an unterminated comment");
@@ -658,10 +788,11 @@ function consumeCssString(text, start) {
   while (index < text.length) {
     if (text[index] === quote) return { value, next: index + 1 };
     if (text[index] === "\\") {
-      const escaped = consumeCssEscape(text, index);
+      const escaped = consumeCssEscape(text, index, true);
       value += escaped.value;
       index = escaped.next;
     } else {
+      if (isCssNewline(text[index])) fail("stylesheet has an unescaped newline in a string");
       value += text[index];
       index += 1;
     }
@@ -669,16 +800,70 @@ function consumeCssString(text, start) {
   fail("stylesheet has an unterminated string");
 }
 
-function consumeCssEscape(text, start) {
+function isCssWhitespace(character) {
+  return character === " " || character === "\t" || isCssNewline(character);
+}
+
+function isCssNewline(character) {
+  return character === "\n" || character === "\r" || character === "\f";
+}
+
+function consumeCssEscape(text, start, allowLineContinuation = false) {
   let index = start + 1;
   if (index >= text.length) fail("stylesheet has an incomplete escape");
+  if (isCssNewline(text[index])) {
+    if (!allowLineContinuation) fail("stylesheet identifier has an escaped newline");
+    if (text[index] === "\r" && text[index + 1] === "\n") index += 2;
+    else index += 1;
+    return { value: "", next: index };
+  }
   const hex = text.slice(index).match(/^[0-9a-f]{1,6}/i)?.[0];
   if (hex) {
     index += hex.length;
-    if (/\s/.test(text[index] ?? "")) index += 1;
-    return { value: String.fromCodePoint(Number.parseInt(hex, 16)), next: index };
+    if (isCssWhitespace(text[index])) {
+      if (text[index] === "\r" && text[index + 1] === "\n") index += 2;
+      else index += 1;
+    }
+    const codePoint = Number.parseInt(hex, 16);
+    const value = codePoint === 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ? "\ufffd"
+      : String.fromCodePoint(codePoint);
+    return { value, next: index };
   }
-  return { value: text[index], next: index + 1 };
+  const codePoint = text.codePointAt(index);
+  const value = String.fromCodePoint(codePoint);
+  return { value, next: index + value.length };
+}
+
+function isCssNameStart(character) {
+  return character === "_" || /[A-Za-z]/.test(character ?? "") || (character?.codePointAt(0) ?? 0) >= 0x80;
+}
+
+function isCssNameCharacter(character) {
+  return isCssNameStart(character) || /[0-9-]/.test(character ?? "");
+}
+
+function consumeCssIdentifier(text, start) {
+  const first = text[start];
+  const second = text[start + 1];
+  if (first === "-") {
+    if (!(isCssNameStart(second) || second === "-" || second === "\\")) return undefined;
+  } else if (!(isCssNameStart(first) || first === "\\")) return undefined;
+  let value = "";
+  let index = start;
+  while (index < text.length) {
+    if (isCssNameCharacter(text[index])) {
+      const codePoint = text.codePointAt(index);
+      const character = String.fromCodePoint(codePoint);
+      value += character;
+      index += character.length;
+    } else if (text[index] === "\\") {
+      const escaped = consumeCssEscape(text, index);
+      value += escaped.value;
+      index = escaped.next;
+    } else break;
+  }
+  return { value, next: index };
 }
 
 function consumeCssUrl(text, openParen) {
@@ -691,7 +876,7 @@ function consumeCssUrl(text, openParen) {
   } else {
     value = "";
     while (index < text.length && text[index] !== ")") {
-      if (/\s/.test(text[index])) fail("stylesheet URL must quote whitespace");
+      if (isCssWhitespace(text[index])) fail("stylesheet URL must quote whitespace");
       if (text[index] === "\\") {
         const escaped = consumeCssEscape(text, index);
         value += escaped.value;
@@ -736,8 +921,8 @@ function collectRuntimeFiles(extensionRoot, manifestSnapshot, hooks) {
       }
     } else if (extension === ".css") {
       for (const reference of cssReferences(snapshot)) {
-        const path = resolvedUrlPath(snapshot.relativePath, reference, "stylesheet runtime reference", false);
-        if (path) add(path, "stylesheet runtime reference");
+        const path = resolvedUrlPath(snapshot.relativePath, reference.value, reference.purpose, reference.executable);
+        if (path) add(path, reference.purpose);
       }
     }
   }

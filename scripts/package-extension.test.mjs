@@ -518,6 +518,45 @@ test("allows unrelated importScripts properties but rejects constant global refe
   }
 });
 
+test("rejects importScripts calls through global object and destructured aliases", (t) => {
+  const cases = [
+    'const g = globalThis; g.importScripts("https://example.test/remote.js");',
+    'const { importScripts: load } = self; load("https://example.test/remote.js");',
+    'const g = window; const load = g.importScripts; load("https://example.test/remote.js");',
+  ];
+  for (const source of cases) {
+    const { root, extension } = createFixture(t);
+    writeFixtureFile(extension, "dist/background.js", source);
+
+    const rejected = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+
+    assert.notEqual(rejected.status, 0);
+    assert.match(failure(rejected), /importScripts/i);
+  }
+});
+
+test("keeps importScripts alias analysis lexical and fails closed on mutable aliases", (t) => {
+  const { root, extension } = createFixture(t);
+  writeFixtureFile(
+    extension,
+    "dist/background.js",
+    'const helper = { importScripts() {} }; { const globalThis = helper; const g = globalThis; const { importScripts: load } = g; load("./local.js"); }',
+  );
+
+  const allowed = runPackager(extension, resolve(root, "shadowed-alias.zip"));
+
+  assert.equal(allowed.status, 0, failure(allowed));
+  for (const source of [
+    'let g = globalThis; g.importScripts("https://example.test/remote.js");',
+    'const g = globalThis; g = {};',
+  ]) {
+    writeFixtureFile(extension, "dist/background.js", source);
+    const rejected = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+    assert.notEqual(rejected.status, 0);
+    assert.match(failure(rejected), /alias|importScripts/i);
+  }
+});
+
 test("rejects unrecognized nested manifest fields and Phase 1 localization", (t) => {
   const { root, extension } = createFixture(t);
   const manifest = readManifest(extension);
@@ -594,4 +633,60 @@ test("tokenizes CSS URLs with comments, strings, spaces, parentheses, and escape
   assert.equal(entries.includes("dist/nested (one).css"), true);
   assert.equal(entries.includes("public/image space.png"), true);
   assert.equal(entries.includes("dist/ignored.css"), false);
+});
+
+test("decodes escaped CSS url and import identifiers", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.content_scripts[0].css = ["dist/styles.css"];
+  writeManifest(extension, manifest);
+  writeFixtureFile(
+    extension,
+    "dist/styles.css",
+    '@\\69mport "nested\\' + '\n.css"; .hero { background: u\\72l("../public/image.png"); }',
+  );
+  writeFixtureFile(extension, "dist/nested.css", ".nested {}\n");
+  writeFixtureFile(extension, "public/image.png", validPng);
+  const output = resolve(root, "escaped-css.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.equal(result.status, 0, failure(result));
+  const entries = run("unzip", ["-Z1", output]).stdout.split("\n");
+  assert.equal(entries.includes("dist/nested.css"), true);
+  assert.equal(entries.includes("public/image.png"), true);
+});
+
+test("rejects remote CSS imports with escaped identifiers", (t) => {
+  const cases = [
+    '@\\69mport "https://example.test/remote.css";',
+    '@import u\\72l("https://example.test/remote.css");',
+  ];
+  for (const source of cases) {
+    const { root, extension } = createFixture(t);
+    const manifest = readManifest(extension);
+    manifest.content_scripts[0].css = ["dist/styles.css"];
+    writeManifest(extension, manifest);
+    writeFixtureFile(extension, "dist/styles.css", source);
+
+    const rejected = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+
+    assert.notEqual(rejected.status, 0);
+    assert.match(failure(rejected), /remote URL/i);
+  }
+});
+
+test("rejects malformed CSS identifier escapes", (t) => {
+  for (const source of ["@\\", 'u\\' + '\nl("../public/image.png")']) {
+    const { root, extension } = createFixture(t);
+    const manifest = readManifest(extension);
+    manifest.content_scripts[0].css = ["dist/styles.css"];
+    writeManifest(extension, manifest);
+    writeFixtureFile(extension, "dist/styles.css", source);
+
+    const rejected = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+
+    assert.notEqual(rejected.status, 0);
+    assert.match(failure(rejected), /escape|identifier/i);
+  }
 });
