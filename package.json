@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "test": "vitest --exclude 'scripts/*.test.mjs'",
+    "test:release-tools": "node --test scripts/*.test.mjs && bash apps/cli/packaging/macos/release-tools.test.sh",
     "validate": "npm run build:extension && npm test -- --run && cargo fmt --all -- --check && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings && cargo check --workspace --all-targets --no-default-features --locked && cargo test --workspace --all-targets --all-features --locked",
     "build:core": "node ./node_modules/typescript/bin/tsc --project packages/core/tsconfig.json",
     "build:types": "node ./node_modules/typescript/bin/tsc --project packages/types/tsconfig.json",
