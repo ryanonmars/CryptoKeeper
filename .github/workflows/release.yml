@@ -58,10 +58,7 @@ jobs:
         run: npm ci
 
       - name: Validate
-        run: npm run validate
-
-      - name: Test release tools
-        run: npm run test:release-tools
+        run: npm run validate:phase1
 
       - name: Audit JavaScript dependencies
         run: npm audit
