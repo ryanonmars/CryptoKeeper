@@ -288,3 +288,107 @@ test("refuses to overwrite an existing output archive", (t) => {
   assert.match(failure(result), /already exists|overwrite/i);
   assert.equal(readFileSync(output, "utf8"), "keep me\n");
 });
+
+test("rejects remote and inline executable HTML and JavaScript", (t) => {
+  const cases = [
+    ["unquoted script", (extension) => writeFixtureFile(extension, "popup.html", '<script src=https://example.test/popup.js></script>')],
+    ["module preload", (extension) => writeFixtureFile(extension, "popup.html", '<link rel=modulepreload href=https://example.test/popup.js>')],
+    ["inline module", (extension) => writeFixtureFile(extension, "popup.html", '<script type=module>import "https://example.test/popup.js"</script>')],
+    ["dynamic import", (extension) => writeFixtureFile(extension, "dist/popup.js", 'import("https://example.test/popup.js");')],
+    ["importScripts", (extension) => writeFixtureFile(extension, "dist/background.js", 'importScripts("https://example.test/background.js");')],
+  ];
+
+  for (const [name, arrange] of cases) {
+    const { root, extension } = createFixture(t);
+    arrange(extension);
+    const result = runPackager(extension, resolve(root, `${name}.zip`));
+
+    assert.notEqual(result.status, 0, name);
+    assert.match(failure(result), /remote|inline|URL/i, name);
+  }
+});
+
+test("includes declarative net request rule resources and rejects wrong path types", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.declarative_net_request = {
+    rule_resources: [{ id: "rules", enabled: true, path: "dist/rules.json" }],
+  };
+  writeManifest(extension, manifest);
+  writeFixtureFile(extension, "dist/rules.json", "[]\n");
+  const output = resolve(root, "rules.zip");
+
+  const included = runPackager(extension, output);
+
+  assert.equal(included.status, 0, failure(included));
+  assert.equal(run("unzip", ["-Z1", output]).stdout.split("\n").includes("dist/rules.json"), true);
+
+  const invalid = readManifest(extension);
+  invalid.declarative_net_request.rule_resources[0].path = 42;
+  writeManifest(extension, invalid);
+  const rejected = runPackager(extension, resolve(root, "invalid-rules.zip"));
+
+  assert.notEqual(rejected.status, 0);
+  assert.match(failure(rejected), /rule resource.*path|non-empty local path/i);
+});
+
+test("rejects sensitive, source, and archive files even when manifest-referenced", (t) => {
+  const paths = [
+    "dist/source.jsx",
+    "dist/credentials.json",
+    "dist/private-key.txt",
+    "dist/object.o",
+    "dist/archive.zip",
+    "dist/installer.pkg",
+  ];
+  for (const path of paths) {
+    const { root, extension } = createFixture(t);
+    const manifest = readManifest(extension);
+    manifest.web_accessible_resources = [{ resources: [path], matches: ["https://example.test/*"] }];
+    writeManifest(extension, manifest);
+    writeFixtureFile(extension, path, "not for the store\n");
+
+    const result = runPackager(extension, resolve(root, `${path.replaceAll("/", "-")}.zip`));
+
+    assert.notEqual(result.status, 0, path);
+    assert.match(failure(result), /permitted|sensitive|source|archive|native/i, path);
+  }
+});
+
+test("resolves HTML URLs with sibling, parent, root, query, and fragment semantics", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.web_accessible_resources = [
+    { resources: ["public/pages/runtime.html"], matches: ["https://example.test/*"] },
+  ];
+  writeManifest(extension, manifest);
+  writeFixtureFile(
+    extension,
+    "public/pages/runtime.html",
+    '<script src=sibling.js?cache=1#main></script><script src=../shared.js></script><script src=/dist/root.js#main></script>',
+  );
+  writeFixtureFile(extension, "public/pages/sibling.js", "export {};\n");
+  writeFixtureFile(extension, "public/shared.js", "export {};\n");
+  writeFixtureFile(extension, "dist/root.js", "export {};\n");
+  const output = resolve(root, "urls.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.equal(result.status, 0, failure(result));
+  const entries = run("unzip", ["-Z1", output]).stdout.split("\n");
+  for (const path of ["public/pages/sibling.js", "public/shared.js", "dist/root.js"]) {
+    assert.equal(entries.includes(path), true, path);
+  }
+});
+
+test("rejects control characters in runtime paths before ZIP creation", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.action.default_popup = "popup\n.html";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "control.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /control character/i);
+});
