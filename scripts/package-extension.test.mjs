@@ -40,7 +40,7 @@ function createFixture(t) {
     JSON.stringify({
       manifest_version: 3,
       name: "Fixture extension",
-      version: "1.0.0",
+      version: "1.0.1",
       background: { service_worker: "dist/background.js", type: "module" },
       content_scripts: [{ matches: ["https://example.test/*"], js: ["dist/content.js"] }],
       icons: { 128: "public/icon128.png" },
@@ -280,7 +280,7 @@ test("rejects a manifest symlink that escapes the extension", (t) => {
 test("rejects extension versions that do not exactly match Cargo's Chrome version", (t) => {
   const { root, extension } = createFixture(t);
   const manifest = readManifest(extension);
-  manifest.version = "1.0.1";
+  manifest.version = "1.0.2";
   writeManifest(extension, manifest);
 
   const result = runPackager(extension, resolve(root, "archive.zip"));

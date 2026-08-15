@@ -1,6 +1,6 @@
 [package]
 name = "termkey"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "CLI encrypted storage manager for cryptocurrency private keys and seed phrases"
 
