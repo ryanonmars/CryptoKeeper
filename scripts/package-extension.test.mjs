@@ -1,0 +1,290 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
+const packagerPath = resolve(scriptsDirectory, "package-extension.mjs");
+
+function writeFixtureFile(root, relativePath, contents = "") {
+  const path = resolve(root, relativePath);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents);
+  return path;
+}
+
+function createFixture(t) {
+  const root = mkdtempSync(resolve(tmpdir(), "termkey-extension-package-"));
+  const extension = resolve(root, "extension");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  writeFixtureFile(
+    extension,
+    "manifest.json",
+    JSON.stringify({
+      manifest_version: 3,
+      name: "Fixture extension",
+      version: "1.0.0",
+      background: { service_worker: "dist/background.js", type: "module" },
+      content_scripts: [{ matches: ["https://example.test/*"], js: ["dist/content.js"] }],
+      icons: { 128: "public/icon128.png" },
+      action: { default_popup: "popup.html" },
+      web_accessible_resources: [
+        { resources: ["prompt.html"], matches: ["https://example.test/*"] },
+      ],
+    }),
+  );
+  writeFixtureFile(
+    extension,
+    "popup.html",
+    '<!doctype html><script type="module" src="dist/popup.js"></script>',
+  );
+  writeFixtureFile(
+    extension,
+    "prompt.html",
+    '<!doctype html><script type="module" src="dist/prompt.js"></script>',
+  );
+  writeFixtureFile(extension, "dist/background.js", "export const background = true;\n");
+  writeFixtureFile(extension, "dist/content.js", "export const content = true;\n");
+  writeFixtureFile(extension, "dist/popup.js", "export const popup = true;\n");
+  writeFixtureFile(extension, "dist/prompt.js", "export const prompt = true;\n");
+  writeFixtureFile(extension, "public/icon128.png", "fixture icon\n");
+
+  return { root, extension };
+}
+
+function readManifest(extension) {
+  return JSON.parse(readFileSync(resolve(extension, "manifest.json"), "utf8"));
+}
+
+function writeManifest(extension, manifest) {
+  writeFixtureFile(extension, "manifest.json", JSON.stringify(manifest));
+}
+
+function runPackager(extension, output) {
+  return spawnSync(process.execPath, [packagerPath, extension, output], {
+    encoding: "utf8",
+  });
+}
+
+function run(command, args) {
+  return spawnSync(command, args, { encoding: "utf8" });
+}
+
+function digest(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function failure(result) {
+  return `${result.stdout}\n${result.stderr}`;
+}
+
+test("packages only manifest runtime files into a reproducible normalized archive", (t) => {
+  const { root, extension } = createFixture(t);
+  writeFixtureFile(extension, "source.ts", "export const source = true;\n");
+  writeFixtureFile(extension, ".env", "SECRET=not-for-store\n");
+  writeFixtureFile(extension, "dist/debug.map", "{}\n");
+  writeFixtureFile(extension, "notes.md", "do not ship\n");
+  const firstArchive = resolve(root, "first.zip");
+  const secondArchive = resolve(root, "second.zip");
+
+  const first = runPackager(extension, firstArchive);
+  const second = runPackager(extension, secondArchive);
+
+  assert.equal(first.status, 0, failure(first));
+  assert.equal(second.status, 0, failure(second));
+  assert.equal(digest(firstArchive), digest(secondArchive));
+
+  const entriesResult = run("unzip", ["-Z1", firstArchive]);
+  assert.equal(entriesResult.status, 0, failure(entriesResult));
+  const entries = entriesResult.stdout.trim().split("\n").filter(Boolean);
+  assert.deepEqual(entries, [
+    "dist/background.js",
+    "dist/content.js",
+    "dist/popup.js",
+    "dist/prompt.js",
+    "manifest.json",
+    "popup.html",
+    "prompt.html",
+    "public/icon128.png",
+  ].sort());
+  assert.equal(entries.some((entry) => /\.env|\.map$|\.ts$|\.md$/i.test(entry)), false);
+  assert.deepEqual(entries, [...entries].sort());
+
+  const integrity = run("unzip", ["-t", firstArchive]);
+  assert.equal(integrity.status, 0, failure(integrity));
+  const extracted = resolve(root, "extracted");
+  const extraction = run("unzip", ["-q", firstArchive, "-d", extracted]);
+  assert.equal(extraction.status, 0, failure(extraction));
+  for (const entry of entries) {
+    assert.equal(statSync(resolve(extracted, entry)).mode & 0o777, 0o644, entry);
+  }
+  const metadata = run("zipinfo", ["-v", firstArchive]);
+  assert.equal(metadata.status, 0, failure(metadata));
+  assert.match(metadata.stdout, /file last modified on \(DOS date\/time\):\s+2000 Jan 1 00:00:00/);
+});
+
+test("rejects a missing manifest before creating the output", (t) => {
+  const { root, extension } = createFixture(t);
+  rmSync(resolve(extension, "manifest.json"));
+  const output = resolve(root, "archive.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /manifest\.json/i);
+  assert.equal(lstatSync(output, { throwIfNoEntry: false }), undefined);
+});
+
+test("rejects Manifest V2", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.manifest_version = 2;
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /Manifest V3/i);
+});
+
+test("rejects a manifest runtime reference that is missing", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.background.service_worker = "dist/missing.js";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /missing\.js/i);
+});
+
+test("rejects remote executable URLs", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.background.service_worker = "https://example.test/background.js";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /remote|URL/i);
+});
+
+test("rejects paths that traverse out of the extension", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.action.default_popup = "../outside.html";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /travers|outside/i);
+});
+
+test("rejects manifest runtime files outside the allowed roots", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.background.service_worker = "scripts/background.js";
+  writeManifest(extension, manifest);
+  writeFixtureFile(extension, "scripts/background.js", "export {};\n");
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /allowed roots|not allowed/i);
+});
+
+test("resolves web-accessible-resource patterns to concrete runtime files", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.web_accessible_resources = [
+    { resources: ["public/images/*.png"], matches: ["https://example.test/*"] },
+  ];
+  writeManifest(extension, manifest);
+  writeFixtureFile(extension, "public/images/logo.png", "logo\n");
+  const output = resolve(root, "archive.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.equal(result.status, 0, failure(result));
+  const entries = run("unzip", ["-Z1", output]).stdout.trim().split("\n");
+  assert.equal(entries.includes("public/images/logo.png"), true);
+});
+
+test("rejects a native executable even without a filename extension", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.web_accessible_resources = [
+    { resources: ["dist/native"], matches: ["https://example.test/*"] },
+  ];
+  writeManifest(extension, manifest);
+  writeFixtureFile(extension, "dist/native", Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /native binary/i);
+});
+
+test("rejects symlinked runtime files that escape the extension", (t) => {
+  const { root, extension } = createFixture(t);
+  const outside = writeFixtureFile(root, "outside.js", "export {};\n");
+  rmSync(resolve(extension, "dist/background.js"));
+  symlinkSync(outside, resolve(extension, "dist/background.js"));
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /symlink|escape/i);
+});
+
+test("rejects a manifest symlink that escapes the extension", (t) => {
+  const { root, extension } = createFixture(t);
+  const outside = writeFixtureFile(root, "outside-manifest.json", readFileSync(resolve(extension, "manifest.json")));
+  rmSync(resolve(extension, "manifest.json"));
+  symlinkSync(outside, resolve(extension, "manifest.json"));
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /manifest.*symlink|symlink.*manifest/i);
+});
+
+test("rejects extension versions that do not exactly match Cargo's Chrome version", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.version = "1.0.1";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /version/i);
+});
+
+test("refuses to overwrite an existing output archive", (t) => {
+  const { root, extension } = createFixture(t);
+  const output = writeFixtureFile(root, "archive.zip", "keep me\n");
+
+  const result = runPackager(extension, output);
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /already exists|overwrite/i);
+  assert.equal(readFileSync(output, "utf8"), "keep me\n");
+});
