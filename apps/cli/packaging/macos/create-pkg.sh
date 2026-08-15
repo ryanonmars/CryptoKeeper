@@ -34,21 +34,33 @@ uninstaller_source="$script_dir/Uninstaller.swift"
 swift_cache_dir="$staging_dir/swift-cache"
 native_host_binary_path=${TERMKEY_NATIVE_HOST_BINARY:-"$(cd "$(dirname "$binary_path")" && pwd)/termkey-native-host"}
 extension_source_dir=${TERMKEY_EXTENSION_DIR:-"$repo_root/apps/extension"}
-apple_signing_enabled=${APPLE_SIGNING_ENABLED:-false}
-: "${TERMKEY_MACOS_ARCH:?TERMKEY_MACOS_ARCH must be x86_64 or arm64}"
-: "${MACOSX_DEPLOYMENT_TARGET:?MACOSX_DEPLOYMENT_TARGET is required}"
+TERMKEY_MACOS_ARCH=${TERMKEY_MACOS_ARCH:-arm64}
+termkey_release_signing=${TERMKEY_RELEASE_SIGNING:-disabled}
 
 case "$TERMKEY_MACOS_ARCH" in
-  x86_64 | arm64) ;;
+  arm64) ;;
   *)
     echo "unsupported macOS architecture: $TERMKEY_MACOS_ARCH" >&2
     exit 1
     ;;
 esac
 
-if [[ ! "$MACOSX_DEPLOYMENT_TARGET" =~ ^[0-9]+([.][0-9]+){1,2}$ ]]; then
-  echo "invalid macOS deployment target: $MACOSX_DEPLOYMENT_TARGET" >&2
+if [[ "${MACOSX_DEPLOYMENT_TARGET:-}" != "11.0" ]]; then
+  echo "MACOSX_DEPLOYMENT_TARGET must be 11.0" >&2
   exit 1
+fi
+
+case "$termkey_release_signing" in
+  required | disabled) ;;
+  *)
+    echo "invalid TERMKEY_RELEASE_SIGNING value: $termkey_release_signing" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$termkey_release_signing" == "required" ]]; then
+  : "${APPLE_APPLICATION_SIGNING_IDENTITY:?APPLE_APPLICATION_SIGNING_IDENTITY is required when TERMKEY_RELEASE_SIGNING is required}"
+  : "${APPLE_INSTALLER_SIGNING_IDENTITY:?APPLE_INSTALLER_SIGNING_IDENTITY is required when TERMKEY_RELEASE_SIGNING is required}"
 fi
 
 if [[ ! -f "$native_host_binary_path" ]]; then
@@ -162,14 +174,10 @@ verify_macho_target "$termkey_app_bundle_dir/Contents/Resources/bin/termkey-nati
 verify_macho_target "$termkey_app_bundle_dir/Contents/MacOS/TermKey"
 verify_macho_target "$uninstall_app_bundle_dir/Contents/MacOS/UninstallTermKey"
 
-xattr -cr "$payload_root" 2>/dev/null || true
 find "$payload_root" -name '._*' -delete 2>/dev/null || true
 dot_clean -m "$payload_root" 2>/dev/null || true
 
-if [[ "$apple_signing_enabled" == "true" ]]; then
-  : "${APPLE_APPLICATION_SIGNING_IDENTITY:?APPLE_APPLICATION_SIGNING_IDENTITY is required when Apple signing is enabled}"
-  : "${APPLE_INSTALLER_SIGNING_IDENTITY:?APPLE_INSTALLER_SIGNING_IDENTITY is required when Apple signing is enabled}"
-
+if [[ "$termkey_release_signing" == "required" ]]; then
   sign_application_item() {
     local item_path=$1
     codesign --force --options runtime --timestamp \
@@ -190,7 +198,7 @@ fi
 
 package_output="$output_dir/${package_name}.pkg"
 package_build_output=$package_output
-if [[ "$apple_signing_enabled" == "true" ]]; then
+if [[ "$termkey_release_signing" == "required" ]]; then
   package_build_output="$staging_dir/${package_name}-unsigned.pkg"
 fi
 
@@ -203,7 +211,7 @@ COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 pkgbuild \
   "$package_build_output" \
   >/dev/null
 
-if [[ "$apple_signing_enabled" == "true" ]]; then
+if [[ "$termkey_release_signing" == "required" ]]; then
   productsign --sign "$APPLE_INSTALLER_SIGNING_IDENTITY" --timestamp \
     "$package_build_output" \
     "$package_output" \

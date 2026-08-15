@@ -16,6 +16,13 @@ async function createFixture() {
   return { artifacts, output };
 }
 
+async function createMacPackageFixture() {
+  const root = await mkdtemp(path.join(tmpdir(), 'termkey-macos-package-'));
+  const binaryPath = path.join(root, 'termkey');
+  await writeFile(binaryPath, 'fixture binary');
+  return binaryPath;
+}
+
 function runChecksumScript(input, output, expectedArtifacts) {
   return spawnSync(process.execPath, [
     scriptPath.pathname,
@@ -24,6 +31,22 @@ function runChecksumScript(input, output, expectedArtifacts) {
     ...expectedArtifacts,
   ], {
     encoding: 'utf8',
+  });
+}
+
+function runMacPackageScript(binaryPath, environment) {
+  return spawnSync('bash', [
+    path.join(repositoryRoot, 'apps/cli/packaging/macos/create-pkg.sh'),
+    binaryPath,
+    '1.0.0',
+    'termkey-macos-aarch64-installer',
+    path.join(path.dirname(binaryPath), 'output'),
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      ...environment,
+    },
   });
 }
 
@@ -122,35 +145,32 @@ test('fails closed when an unexpected release artifact is present', async () => 
   assert.match(result.stderr, /unexpected artifacts.*unreviewed-installer\.exe/i);
 });
 
-test('release workflow fixes macOS runner architecture and deployment target', async () => {
-  const releaseWorkflow = await readFile(
-    path.join(repositoryRoot, '.github/workflows/release.yml'),
-    'utf8',
-  );
-  const packageScript = await readFile(
-    path.join(repositoryRoot, 'apps/cli/packaging/macos/create-pkg.sh'),
-    'utf8',
-  );
+test('macOS packaging accepts only arm64 and validates its release contract', async () => {
+  const binaryPath = await createMacPackageFixture();
 
-  assert.match(
-    releaseWorkflow,
-    /os: macos-15-intel\s+platform: macos\s+target: x86_64-apple-darwin\s+macos_arch: x86_64\s+macos_deployment_target: '11\.0'/,
-  );
-  assert.match(
-    releaseWorkflow,
-    /os: macos-15\s+platform: macos\s+target: aarch64-apple-darwin\s+macos_arch: arm64\s+macos_deployment_target: '11\.0'/,
-  );
-  assert.match(releaseWorkflow, /TERMKEY_MACOS_ARCH: \$\{\{ matrix\.macos_arch \}\}/);
-  assert.match(
-    releaseWorkflow,
-    /MACOSX_DEPLOYMENT_TARGET: \$\{\{ matrix\.macos_deployment_target \}\}/,
-  );
-  assert.match(
-    packageScript,
-    /swiftc -O -target "\$\{TERMKEY_MACOS_ARCH\}-apple-macosx\$\{MACOSX_DEPLOYMENT_TARGET\}"/,
-  );
-  assert.match(packageScript, /lipo -archs/);
-  assert.match(packageScript, /otool -l/);
+  const unsupportedArchitecture = runMacPackageScript(binaryPath, {
+    TERMKEY_MACOS_ARCH: 'x86_64',
+    MACOSX_DEPLOYMENT_TARGET: '11.0',
+    TERMKEY_RELEASE_SIGNING: 'disabled',
+  });
+  assert.notEqual(unsupportedArchitecture.status, 0);
+  assert.match(unsupportedArchitecture.stderr, /unsupported macOS architecture: x86_64/);
+
+  const unsupportedDeploymentTarget = runMacPackageScript(binaryPath, {
+    TERMKEY_MACOS_ARCH: 'arm64',
+    MACOSX_DEPLOYMENT_TARGET: '12.0',
+    TERMKEY_RELEASE_SIGNING: 'disabled',
+  });
+  assert.notEqual(unsupportedDeploymentTarget.status, 0);
+  assert.match(unsupportedDeploymentTarget.stderr, /MACOSX_DEPLOYMENT_TARGET must be 11\.0/);
+
+  const invalidSigningMode = runMacPackageScript(binaryPath, {
+    TERMKEY_MACOS_ARCH: 'arm64',
+    MACOSX_DEPLOYMENT_TARGET: '11.0',
+    TERMKEY_RELEASE_SIGNING: 'unexpected',
+  });
+  assert.notEqual(invalidSigningMode.status, 0);
+  assert.match(invalidSigningMode.stderr, /invalid TERMKEY_RELEASE_SIGNING value: unexpected/);
 });
 
 test('release workflow requires the exact artifact manifest', async () => {

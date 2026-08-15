@@ -35,7 +35,6 @@ cp "$script_dir/README.txt" "$staging_dir/README.txt"
 
 chmod 644 "$staging_dir/Install TermKey.pkg"
 chmod 644 "$staging_dir/README.txt"
-xattr -cr "$staging_dir" 2>/dev/null || true
 
 run_with_retries() {
   local attempts=$1
