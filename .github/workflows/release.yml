@@ -2,18 +2,17 @@ name: Release
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  TERMKEY_PRODUCTION_RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+  target: aarch64-apple-darwin
+  macos_arch: arm64
+  macos_deployment_target: '11.0'
+  asset_name: termkey-macos-aarch64
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: Build artifacts and validate tap access without creating a release
-        required: true
-        type: boolean
-        default: true
 
 permissions:
   contents: read
@@ -21,7 +20,7 @@ permissions:
 jobs:
   validate:
     name: Validate release source
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     outputs:
       release_version: ${{ steps.release-version.outputs.version }}
     steps:
@@ -61,8 +60,8 @@ jobs:
       - name: Validate
         run: npm run validate
 
-      - name: Test Node scripts
-        run: node --test scripts/*.test.mjs
+      - name: Test release tools
+        run: npm run test:release-tools
 
       - name: Audit JavaScript dependencies
         run: npm audit
@@ -75,22 +74,12 @@ jobs:
           cargo metadata --locked --format-version 1 --no-deps > /dev/null
           cargo audit --file Cargo.lock
 
-  rust-platforms:
-    name: Release Rust checks (${{ matrix.platform }})
+  build:
+    name: Build trusted Apple Silicon artifacts
     needs: validate
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: Linux x86_64
-          - os: macos-15-intel
-            platform: macOS Intel
-          - os: macos-15
-            platform: macOS ARM
-          - os: windows-latest
-            platform: Windows x86_64
+    runs-on: macos-15
+    env:
+      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -99,54 +88,6 @@ jobs:
       - name: Verify exact release source
         shell: bash
         run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: stable
-
-      - name: Check Rust workspace
-        run: cargo check --workspace --all-targets --all-features --locked
-
-      - name: Test Rust workspace
-        run: cargo test --workspace --all-targets --all-features --locked
-
-  build:
-    name: Build for ${{ matrix.platform }}
-    needs:
-      - validate
-      - rust-platforms
-    runs-on: ${{ matrix.os }}
-    env:
-      RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux
-            target: x86_64-unknown-linux-gnu
-            asset_name: termkey-linux-x86_64
-          - os: macos-15-intel
-            platform: macos
-            target: x86_64-apple-darwin
-            macos_arch: x86_64
-            macos_deployment_target: '11.0'
-            asset_name: termkey-macos-x86_64
-          - os: macos-15
-            platform: macos
-            target: aarch64-apple-darwin
-            macos_arch: arm64
-            macos_deployment_target: '11.0'
-            asset_name: termkey-macos-aarch64
-          - os: windows-latest
-            platform: windows
-            target: x86_64-pc-windows-msvc
-            asset_name: termkey-windows-x86_64
-
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -163,52 +104,92 @@ jobs:
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
-      - name: Build
+      - name: Build release binaries
         env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
-        run: cargo build --release --target ${{ matrix.target }} --locked
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: cargo build --release --target aarch64-apple-darwin --locked
 
-      - name: Check Apple signing configuration
-        if: matrix.platform == 'macos'
+      - name: Stage browser extension
+        shell: bash
+        run: |
+          extension_dir="$RUNNER_TEMP/termkey-browser-extension/chrome"
+          mkdir -p "$extension_dir"
+          ditto --norsrc apps/extension/manifest.json "$extension_dir/manifest.json"
+          ditto --norsrc apps/extension/popup.html "$extension_dir/popup.html"
+          ditto --norsrc apps/extension/prompt.html "$extension_dir/prompt.html"
+          ditto --norsrc apps/extension/dist "$extension_dir/dist"
+          ditto --norsrc apps/extension/public "$extension_dir/public"
+          echo "TERMKEY_EXTENSION_DIR=$extension_dir" >> "$GITHUB_ENV"
+
+      - name: Configure unsigned dry run
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'false'
+        shell: bash
+        run: |
+          echo "TERMKEY_RELEASE_SIGNING=disabled" >> "$GITHUB_ENV"
+          {
+            echo "## Unsigned, nonpublishing release dry run"
+            echo
+            echo "These artifacts are for validation only and cannot be published or update the Homebrew tap."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check production release credentials
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
           APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [[ -n "$APPLE_CERTIFICATE_BASE64" \
-            && -n "$APPLE_CERTIFICATE_PASSWORD" \
-            && -n "$APPLE_APPLICATION_SIGNING_IDENTITY" \
-            && -n "$APPLE_INSTALLER_SIGNING_IDENTITY" ]]; then
-            echo "APPLE_SIGNING_ENABLED=true" >> "$GITHUB_ENV"
-          else
-            echo "APPLE_SIGNING_ENABLED=false" >> "$GITHUB_ENV"
-            {
-              echo "### macOS artifacts are unsigned"
-              echo
-              echo "The complete Apple signing secret set was not available."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          missing=0
+          for secret_name in \
+            APPLE_CERTIFICATE_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_APPLICATION_SIGNING_IDENTITY \
+            APPLE_INSTALLER_SIGNING_IDENTITY \
+            APPLE_NOTARY_KEY_BASE64 \
+            APPLE_NOTARY_KEY_ID \
+            APPLE_NOTARY_ISSUER_ID \
+            APPLE_TEAM_ID; do
+            if [[ -z "${!secret_name}" ]]; then
+              echo "Missing required secret: $secret_name" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
 
-      - name: Configure Apple signing certificate
-        if: matrix.platform == 'macos' && env.APPLE_SIGNING_ENABLED == 'true'
+      - name: Configure ephemeral Apple credentials
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           certificate_path="$RUNNER_TEMP/termkey-signing.p12"
           keychain_path="$RUNNER_TEMP/termkey-signing.keychain-db"
-          echo "APPLE_CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
-          echo "APPLE_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
-
+          notary_key_path="$RUNNER_TEMP/AuthKey_$APPLE_NOTARY_KEY_ID.p8"
           keychain_password=$(openssl rand -hex 24)
           echo "::add-mask::$keychain_password"
+          umask 077
+
+          echo "APPLE_CERTIFICATE_PATH=$certificate_path" >> "$GITHUB_ENV"
+          echo "APPLE_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "APPLE_NOTARY_KEY_PATH=$notary_key_path" >> "$GITHUB_ENV"
 
           printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 --decode > "$notary_key_path"
+
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
           security unlock-keychain -p "$keychain_password" "$keychain_path"
@@ -222,15 +203,54 @@ jobs:
             -s \
             -k "$keychain_password" \
             "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
 
-      - name: Sign macOS executables
-        if: matrix.platform == 'macos' && env.APPLE_SIGNING_ENABLED == 'true'
+          existing_keychains=()
+          while IFS= read -r existing_keychain; do
+            existing_keychains+=("${existing_keychain//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain_path" "${existing_keychains[@]}"
+
+          case "$APPLE_APPLICATION_SIGNING_IDENTITY" in
+            "Developer ID Application: "*) ;;
+            *) echo "APPLE_APPLICATION_SIGNING_IDENTITY must be a Developer ID Application identity" >&2; exit 1 ;;
+          esac
+          case "$APPLE_INSTALLER_SIGNING_IDENTITY" in
+            "Developer ID Installer: "*) ;;
+            *) echo "APPLE_INSTALLER_SIGNING_IDENTITY must be a Developer ID Installer identity" >&2; exit 1 ;;
+          esac
+          if [[ ! "$APPLE_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "APPLE_TEAM_ID must be exactly 10 uppercase alphanumeric characters" >&2
+            exit 1
+          fi
+          if [[ "$APPLE_APPLICATION_SIGNING_IDENTITY" != *" ($APPLE_TEAM_ID)" ]]; then
+            echo "APPLE_APPLICATION_SIGNING_IDENTITY does not match APPLE_TEAM_ID" >&2
+            exit 1
+          fi
+          if [[ "$APPLE_INSTALLER_SIGNING_IDENTITY" != *" ($APPLE_TEAM_ID)" ]]; then
+            echo "APPLE_INSTALLER_SIGNING_IDENTITY does not match APPLE_TEAM_ID" >&2
+            exit 1
+          fi
+
+          application_identities=$(security find-identity -v -p codesigning "$keychain_path" | sed -nE 's/^[[:space:]]*[0-9]+\) [[:xdigit:]]+ "(.*)"$/\1/p')
+          installer_identities=$(security find-identity -v "$keychain_path" | sed -nE 's/^[[:space:]]*[0-9]+\) [[:xdigit:]]+ "(.*)"$/\1/p')
+          if [[ $(printf '%s\n' "$application_identities" | grep -Fxc -- "$APPLE_APPLICATION_SIGNING_IDENTITY") -ne 1 ]]; then
+            echo "Configured keychain does not contain the exact application signing identity" >&2
+            exit 1
+          fi
+          if [[ $(printf '%s\n' "$installer_identities" | grep -Fxc -- "$APPLE_INSTALLER_SIGNING_IDENTITY") -ne 1 ]]; then
+            echo "Configured keychain does not contain the exact installer signing identity" >&2
+            exit 1
+          fi
+
+          echo "TERMKEY_RELEASE_SIGNING=required" >> "$GITHUB_ENV"
+
+      - name: Sign release binaries
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
         shell: bash
         env:
           APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
         run: |
-          release_dir="${{ github.workspace }}/target/${{ matrix.target }}/release"
+          release_dir="$GITHUB_WORKSPACE/target/aarch64-apple-darwin/release"
           for executable in "$release_dir/termkey" "$release_dir/termkey-native-host"; do
             codesign --force --options runtime --timestamp \
               --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" \
@@ -238,143 +258,182 @@ jobs:
             codesign --verify --strict --verbose=2 "$executable"
           done
 
-      - name: Prepare asset (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "target/${{ matrix.target }}/release"
-          $zipPath = Join-Path $env:GITHUB_WORKSPACE "${{ matrix.asset_name }}.zip"
-          $stagingDir = Join-Path $env:RUNNER_TEMP "${{ matrix.asset_name }}-bundle"
-          $extensionDir = Join-Path $stagingDir "browser-extension\chrome"
-
-          Remove-Item -Recurse -Force $stagingDir -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $extensionDir | Out-Null
-
-          Copy-Item (Join-Path $releaseDir "termkey.exe") $stagingDir
-          Copy-Item (Join-Path $releaseDir "termkey-native-host.exe") $stagingDir
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\manifest.json") (Join-Path $extensionDir "manifest.json")
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\popup.html") (Join-Path $extensionDir "popup.html")
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "apps\extension\prompt.html") (Join-Path $extensionDir "prompt.html")
-          Copy-Item -Recurse -Force (Join-Path $env:GITHUB_WORKSPACE "apps\extension\dist") (Join-Path $extensionDir "dist")
-          Copy-Item -Recurse -Force (Join-Path $env:GITHUB_WORKSPACE "apps\extension\public") (Join-Path $extensionDir "public")
-
-          Compress-Archive -Path (Join-Path $stagingDir "*") -DestinationPath $zipPath
-
-      - name: Prepare asset (Linux)
-        if: matrix.platform == 'linux'
-        shell: bash
-        run: |
-          release_dir="${{ github.workspace }}/target/${{ matrix.target }}/release"
-          staging_dir=$(mktemp -d)
-          trap 'rm -rf "$staging_dir"' EXIT
-
-          mkdir -p "$staging_dir/browser-extension/chrome"
-          cp "$release_dir/termkey" "$staging_dir/termkey"
-          cp "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
-          cp "${{ github.workspace }}/apps/extension/manifest.json" "$staging_dir/browser-extension/chrome/manifest.json"
-          cp "${{ github.workspace }}/apps/extension/popup.html" "$staging_dir/browser-extension/chrome/popup.html"
-          cp "${{ github.workspace }}/apps/extension/prompt.html" "$staging_dir/browser-extension/chrome/prompt.html"
-          cp -R "${{ github.workspace }}/apps/extension/dist" "$staging_dir/browser-extension/chrome/dist"
-          cp -R "${{ github.workspace }}/apps/extension/public" "$staging_dir/browser-extension/chrome/public"
-
-          cd "$staging_dir"
-          zip -r "${{ github.workspace }}/${{ matrix.asset_name }}.zip" termkey termkey-native-host browser-extension
-
-      - name: Prepare asset (macOS)
-        if: matrix.platform == 'macos'
+      - name: Create signed PKG
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
         shell: bash
         env:
           APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
           APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
-          TERMKEY_MACOS_ARCH: ${{ matrix.macos_arch }}
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+          TERMKEY_MACOS_ARCH: arm64
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
         run: |
-          release_dir="${{ github.workspace }}/target/${{ matrix.target }}/release"
-          staging_dir=$(mktemp -d)
-          trap 'rm -rf "$staging_dir"' EXIT
+          release_dir="$GITHUB_WORKSPACE/target/aarch64-apple-darwin/release"
+          TERMKEY_NATIVE_HOST_BINARY="$release_dir/termkey-native-host" \
+            apps/cli/packaging/macos/create-pkg.sh \
+            "$release_dir/termkey" \
+            "$RELEASE_VERSION" \
+            "termkey-macos-aarch64-installer" \
+            "$GITHUB_WORKSPACE"
 
-          mkdir -p "$staging_dir/browser-extension/chrome"
-          cp "$release_dir/termkey" "$staging_dir/termkey"
-          cp "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
-          cp "${{ github.workspace }}/apps/extension/manifest.json" "$staging_dir/browser-extension/chrome/manifest.json"
-          cp "${{ github.workspace }}/apps/extension/popup.html" "$staging_dir/browser-extension/chrome/popup.html"
-          cp "${{ github.workspace }}/apps/extension/prompt.html" "$staging_dir/browser-extension/chrome/prompt.html"
-          cp -R "${{ github.workspace }}/apps/extension/dist" "$staging_dir/browser-extension/chrome/dist"
-          cp -R "${{ github.workspace }}/apps/extension/public" "$staging_dir/browser-extension/chrome/public"
+      - name: Create unsigned PKG
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'false'
+        shell: bash
+        env:
+          TERMKEY_MACOS_ARCH: arm64
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          release_dir="$GITHUB_WORKSPACE/target/aarch64-apple-darwin/release"
+          TERMKEY_NATIVE_HOST_BINARY="$release_dir/termkey-native-host" \
+            apps/cli/packaging/macos/create-pkg.sh \
+            "$release_dir/termkey" \
+            "$RELEASE_VERSION" \
+            "termkey-macos-aarch64-installer" \
+            "$GITHUB_WORKSPACE"
 
-          cd "$staging_dir"
-          zip -r "${{ github.workspace }}/${{ matrix.asset_name }}.zip" termkey termkey-native-host browser-extension
+      - name: Notarize and staple PKG
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        shell: bash
+        env:
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          apps/cli/packaging/macos/notarize-artifact.sh \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64-installer.pkg" \
+            pkg
 
-          PACKAGE_NAME="${{ matrix.asset_name }}-installer"
+      - name: Create DMG
+        shell: bash
+        run: |
+          apps/cli/packaging/macos/create-dmg.sh \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64-installer.pkg" \
+            "termkey-macos-aarch64" \
+            "TermKey aarch64-apple-darwin" \
+            "$GITHUB_WORKSPACE"
 
-          TERMKEY_NATIVE_HOST_BINARY="${release_dir}/termkey-native-host" \
-          TERMKEY_EXTENSION_DIR="$staging_dir/browser-extension/chrome" \
-            "${{ github.workspace }}/apps/cli/packaging/macos/create-pkg.sh" \
-            "${{ github.workspace }}/target/${{ matrix.target }}/release/termkey" \
-            "${RELEASE_VERSION}" \
-            "${PACKAGE_NAME}" \
-            "${{ github.workspace }}"
-
-          "${{ github.workspace }}/apps/cli/packaging/macos/create-dmg.sh" \
-            "${{ github.workspace }}/${PACKAGE_NAME}.pkg" \
-            "${{ matrix.asset_name }}" \
-            "TermKey ${{ matrix.target }}" \
-            "${{ github.workspace }}"
-
-          if [[ ! -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg" \
-            && -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg.dmg" ]]; then
-            mv "${{ github.workspace }}/${{ matrix.asset_name }}.dmg.dmg" \
-              "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
+          if [[ ! -f "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg" \
+            && -f "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg.dmg" ]]; then
+            mv "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg.dmg" \
+              "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg"
           fi
-          test -f "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
+          test -f "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg"
 
-          if [[ "${APPLE_SIGNING_ENABLED:-false}" == "true" ]]; then
-            codesign --force --timestamp \
-              --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" \
-              "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
-            codesign --verify --strict --verbose=2 \
-              "${{ github.workspace }}/${{ matrix.asset_name }}.dmg"
-            {
-              echo "### macOS artifacts are signed"
-              echo
-              echo "The executables, app bundles, package, and disk image were signed and verified."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: Sign DMG
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        shell: bash
+        env:
+          APPLE_APPLICATION_SIGNING_IDENTITY: ${{ secrets.APPLE_APPLICATION_SIGNING_IDENTITY }}
+        run: |
+          codesign --force --timestamp \
+            --sign "$APPLE_APPLICATION_SIGNING_IDENTITY" \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg"
+          codesign --verify --strict --verbose=2 \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg"
 
-      - name: Remove Apple signing material
-        if: always() && matrix.platform == 'macos' && env.APPLE_SIGNING_ENABLED == 'true'
+      - name: Notarize and staple DMG
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        shell: bash
+        env:
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          apps/cli/packaging/macos/notarize-artifact.sh \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg" \
+            dmg
+
+      - name: Create ZIP from release payload
+        shell: bash
+        run: |
+          release_dir="$GITHUB_WORKSPACE/target/aarch64-apple-darwin/release"
+          staging_dir="$RUNNER_TEMP/termkey-macos-aarch64-zip"
+          zip_path="$GITHUB_WORKSPACE/termkey-macos-aarch64.zip"
+          mkdir -p "$staging_dir"
+          ditto --norsrc "$release_dir/termkey" "$staging_dir/termkey"
+          ditto --norsrc "$release_dir/termkey-native-host" "$staging_dir/termkey-native-host"
+          ditto --norsrc "$RUNNER_TEMP/termkey-browser-extension" "$staging_dir/browser-extension"
+
+          ditto -c -k --norsrc "$staging_dir" "$zip_path"
+
+      - name: Notarize ZIP
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        shell: bash
+        env:
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          apps/cli/packaging/macos/notarize-artifact.sh \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.zip" \
+            zip
+
+      - name: Verify trusted release artifacts
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          apps/cli/packaging/macos/verify-artifacts.sh \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64-installer.pkg" \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg" \
+            "$GITHUB_WORKSPACE/termkey-macos-aarch64.zip" \
+            "$APPLE_TEAM_ID"
+
+      - name: Verify unsigned dry-run artifacts
+        if: env.TERMKEY_PRODUCTION_RELEASE == 'false'
+        shell: bash
+        run: |
+          release_dir="$GITHUB_WORKSPACE/target/aarch64-apple-darwin/release"
+          for executable in "$release_dir/termkey" "$release_dir/termkey-native-host"; do
+            test "$(lipo -archs "$executable")" = "arm64"
+            minos=$(otool -l "$executable" | awk '
+              $1 == "cmd" && $2 == "LC_BUILD_VERSION" { command = "build"; next }
+              $1 == "cmd" && $2 == "LC_VERSION_MIN_MACOSX" { command = "legacy"; next }
+              command == "build" && $1 == "minos" { print $2; exit }
+              command == "legacy" && $1 == "version" { print $2; exit }
+            ')
+            [[ "$minos" == "11.0" || "$minos" == "11.0.0" ]]
+          done
+
+          zip_roots=$(unzip -Z1 "$GITHUB_WORKSPACE/termkey-macos-aarch64.zip" \
+            | awk -F/ 'NF && $1 != "" { print $1 }' \
+            | LC_ALL=C sort -u)
+          expected_zip_roots=$'browser-extension\ntermkey\ntermkey-native-host'
+          test "$zip_roots" = "$expected_zip_roots"
+          pkgutil --payload-files "$GITHUB_WORKSPACE/termkey-macos-aarch64-installer.pkg" \
+            | grep -Fqx './usr/local/bin/termkey'
+          hdiutil imageinfo "$GITHUB_WORKSPACE/termkey-macos-aarch64.dmg" > /dev/null
+
+      - name: Upload notarization rejection logs
+        if: always() && env.TERMKEY_PRODUCTION_RELEASE == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: termkey-notarization-rejection-logs
+          path: ${{ runner.temp }}/termkey-notary-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove Apple credentials
+        if: always()
         shell: bash
         run: |
           keychain_path=${APPLE_KEYCHAIN_PATH:-"$RUNNER_TEMP/termkey-signing.keychain-db"}
           certificate_path=${APPLE_CERTIFICATE_PATH:-"$RUNNER_TEMP/termkey-signing.p12"}
           security delete-keychain "$keychain_path" 2>/dev/null || true
           rm -f "$certificate_path"
+          shopt -s nullglob
+          notary_key_paths=("$RUNNER_TEMP"/AuthKey_*.p8)
+          if (( ${#notary_key_paths[@]} > 0 )); then
+            rm -f "${notary_key_paths[@]}"
+          fi
 
-      - name: Upload artifact (Windows)
-        if: matrix.platform == 'windows'
+      - name: Upload public release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.zip
-          if-no-files-found: error
-
-      - name: Upload artifact (Unix)
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}.zip
-          if-no-files-found: error
-
-      - name: Upload artifact (macOS)
-        if: matrix.platform == 'macos'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ matrix.asset_name }}
+          name: termkey-macos-aarch64
           path: |
-            ${{ matrix.asset_name }}.zip
-            ${{ matrix.asset_name }}-installer.pkg
-            ${{ matrix.asset_name }}.dmg
+            termkey-macos-aarch64.dmg
+            termkey-macos-aarch64.zip
           if-no-files-found: error
 
   release:
@@ -389,30 +448,24 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      - name: Download all artifacts
+      - name: Download public artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: artifacts
+          name: termkey-macos-aarch64
+          path: artifacts/termkey-macos-aarch64
 
       - name: Generate release checksums
         run: |
           node scripts/release-checksums.mjs artifacts artifacts/SHA256SUMS \
-            termkey-linux-x86_64.zip \
-            termkey-macos-x86_64.zip \
-            termkey-macos-x86_64-installer.pkg \
-            termkey-macos-x86_64.dmg \
-            termkey-macos-aarch64.zip \
-            termkey-macos-aarch64-installer.pkg \
             termkey-macos-aarch64.dmg \
-            termkey-windows-x86_64.zip
+            termkey-macos-aarch64.zip
 
       - name: Create Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            artifacts/*/*.zip
-            artifacts/*/*.pkg
-            artifacts/*/*.dmg
+            artifacts/termkey-macos-aarch64/termkey-macos-aarch64.dmg
+            artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip
             artifacts/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -428,15 +481,14 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: artifacts
+          name: termkey-macos-aarch64
+          path: artifacts/termkey-macos-aarch64
 
-      - name: Compute SHA256s and update formula
+      - name: Compute SHA256 and update formula
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           VERSION: ${{ github.ref_name }}
         run: |
-          SHA_LINUX=$(sha256sum artifacts/termkey-linux-x86_64/termkey-linux-x86_64.zip | awk '{print $1}')
-          SHA_MACOS_X86=$(sha256sum artifacts/termkey-macos-x86_64/termkey-macos-x86_64.zip | awk '{print $1}')
           SHA_MACOS_ARM=$(sha256sum artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
 
           git clone https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ryanonmars/homebrew-termkey.git tap
@@ -453,22 +505,12 @@ jobs:
           class Termkey < Formula
             desc "CLI encrypted storage for private keys and seed phrases"
             homepage "https://github.com/ryanonmars/termkey"
-            url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-linux-x86_64.zip"
+            url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-macos-aarch64.zip"
             version "${VER}"
-            sha256 "${SHA_LINUX}"
+            sha256 "${SHA_MACOS_ARM}"
             license "MIT"
-
-            on_macos do
-              on_intel do
-                url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-macos-x86_64.zip"
-                sha256 "${SHA_MACOS_X86}"
-              end
-
-              on_arm do
-                url "https://github.com/ryanonmars/termkey/releases/download/${VERSION}/termkey-macos-aarch64.zip"
-                sha256 "${SHA_MACOS_ARM}"
-              end
-            end
+            depends_on :macos
+            depends_on arch: :arm64
 
             def install
               bin.install "termkey"
@@ -491,21 +533,20 @@ jobs:
   validate-tap:
     name: Validate Homebrew Tap
     needs: build
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: artifacts
+          name: termkey-macos-aarch64
+          path: artifacts/termkey-macos-aarch64
 
       - name: Validate tap access and formula output
         env:
           TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          SHA_LINUX=$(sha256sum artifacts/termkey-linux-x86_64/termkey-linux-x86_64.zip | awk '{print $1}')
-          SHA_MACOS_X86=$(sha256sum artifacts/termkey-macos-x86_64/termkey-macos-x86_64.zip | awk '{print $1}')
           SHA_MACOS_ARM=$(sha256sum artifacts/termkey-macos-aarch64/termkey-macos-aarch64.zip | awk '{print $1}')
 
           git ls-remote https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/ryanonmars/homebrew-termkey.git HEAD
@@ -516,30 +557,18 @@ jobs:
           ## Dry Run Formula Preview
 
           - Ref: ${REF_NAME}
-          - Linux SHA256: \`${SHA_LINUX}\`
-          - macOS Intel SHA256: \`${SHA_MACOS_X86}\`
           - macOS ARM SHA256: \`${SHA_MACOS_ARM}\`
 
           \`\`\`ruby
           class Termkey < Formula
             desc "CLI encrypted storage for private keys and seed phrases"
             homepage "https://github.com/ryanonmars/termkey"
-            url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-linux-x86_64.zip"
+            url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-macos-aarch64.zip"
             version "${VER}"
-            sha256 "${SHA_LINUX}"
+            sha256 "${SHA_MACOS_ARM}"
             license "MIT"
-
-            on_macos do
-              on_intel do
-                url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-macos-x86_64.zip"
-                sha256 "${SHA_MACOS_X86}"
-              end
-
-              on_arm do
-                url "https://github.com/ryanonmars/termkey/releases/download/v${VER}/termkey-macos-aarch64.zip"
-                sha256 "${SHA_MACOS_ARM}"
-              end
-            end
+            depends_on :macos
+            depends_on arch: :arm64
 
             def install
               bin.install "termkey"

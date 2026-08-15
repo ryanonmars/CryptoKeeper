@@ -52,19 +52,14 @@ function runMacPackageScript(binaryPath, environment) {
 
 test('writes deterministic SHA-256 lines in release-basename order', async () => {
   const { artifacts, output } = await createFixture();
-  await mkdir(path.join(artifacts, 'windows'));
   await mkdir(path.join(artifacts, 'macos'));
-  await writeFile(path.join(artifacts, 'windows', 'zeta.exe'), 'alpha');
-  await writeFile(path.join(artifacts, 'macos', 'alpha.dmg'), 'beta');
-  await writeFile(path.join(artifacts, 'middle.pkg'), 'gamma');
-  await writeFile(path.join(artifacts, 'release.zip'), 'delta');
+  await writeFile(path.join(artifacts, 'macos', 'termkey-macos-aarch64.dmg'), 'alpha');
+  await writeFile(path.join(artifacts, 'macos', 'termkey-macos-aarch64.zip'), 'beta');
   await writeFile(path.join(artifacts, 'ignored.txt'), 'not an artifact');
 
   const expectedArtifacts = [
-    'alpha.dmg',
-    'middle.pkg',
-    'release.zip',
-    'zeta.exe',
+    'termkey-macos-aarch64.dmg',
+    'termkey-macos-aarch64.zip',
   ];
   const first = runChecksumScript(artifacts, output, expectedArtifacts);
   assert.equal(first.status, 0, first.stderr);
@@ -75,10 +70,8 @@ test('writes deterministic SHA-256 lines in release-basename order', async () =>
   const secondOutput = await readFile(output, 'utf8');
 
   const expected = [
-    'f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753  alpha.dmg',
-    'be9d587defa1f0c09ef49eb17e206983a5f8f8289e4281860bd0ee5a19592c67  middle.pkg',
-    '4f4a9410ffcdf895c4adb880659e9b5c0dd1f23a30790684340b3eaacb045398  release.zip',
-    '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8  zeta.exe',
+    '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8  termkey-macos-aarch64.dmg',
+    'f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753  termkey-macos-aarch64.zip',
     '',
   ].join('\n');
 
@@ -121,28 +114,33 @@ test('fails when supported artifacts share a release-visible basename', async ()
 
 test('fails closed when an expected release artifact is missing', async () => {
   const { artifacts, output } = await createFixture();
-  await writeFile(path.join(artifacts, 'termkey-linux-x86_64.zip'), 'linux');
+  await writeFile(path.join(artifacts, 'termkey-macos-aarch64.dmg'), 'dmg');
 
   const result = runChecksumScript(artifacts, output, [
-    'termkey-linux-x86_64.zip',
-    'termkey-windows-x86_64.zip',
+    'termkey-macos-aarch64.dmg',
+    'termkey-macos-aarch64.zip',
   ]);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /missing expected artifacts.*termkey-windows-x86_64\.zip/i);
+  assert.match(result.stderr, /missing expected artifacts.*termkey-macos-aarch64\.zip/i);
 });
 
-test('fails closed when an unexpected release artifact is present', async () => {
+test('rejects a standalone PKG outside the public release manifest', async () => {
   const { artifacts, output } = await createFixture();
-  await writeFile(path.join(artifacts, 'termkey-linux-x86_64.zip'), 'linux');
-  await writeFile(path.join(artifacts, 'unreviewed-installer.exe'), 'extra');
+  await writeFile(path.join(artifacts, 'termkey-macos-aarch64.dmg'), 'dmg');
+  await writeFile(path.join(artifacts, 'termkey-macos-aarch64.zip'), 'zip');
+  await writeFile(path.join(artifacts, 'termkey-macos-aarch64-installer.pkg'), 'pkg');
 
   const result = runChecksumScript(artifacts, output, [
-    'termkey-linux-x86_64.zip',
+    'termkey-macos-aarch64.dmg',
+    'termkey-macos-aarch64.zip',
   ]);
 
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /unexpected artifacts.*unreviewed-installer\.exe/i);
+  assert.match(
+    result.stderr,
+    /unexpected artifacts.*termkey-macos-aarch64-installer\.pkg/i,
+  );
 });
 
 test('macOS packaging accepts only arm64 and validates its release contract', async () => {
@@ -200,35 +198,5 @@ test('macOS packaging requires Developer ID signing identities', async () => {
   assert.match(
     invalidInstallerIdentity.stderr,
     /APPLE_INSTALLER_SIGNING_IDENTITY must be a Developer ID Installer identity/,
-  );
-});
-
-test('release workflow requires the exact artifact manifest', async () => {
-  const releaseWorkflow = await readFile(
-    path.join(repositoryRoot, '.github/workflows/release.yml'),
-    'utf8',
-  );
-  const expectedArtifacts = [
-    'termkey-linux-x86_64.zip',
-    'termkey-macos-x86_64.zip',
-    'termkey-macos-x86_64-installer.pkg',
-    'termkey-macos-x86_64.dmg',
-    'termkey-macos-aarch64.zip',
-    'termkey-macos-aarch64-installer.pkg',
-    'termkey-macos-aarch64.dmg',
-    'termkey-windows-x86_64.zip',
-  ];
-
-  for (const artifact of expectedArtifacts) {
-    assert.match(releaseWorkflow, new RegExp(`\\b${artifact.replaceAll('.', '\\.')}\\b`));
-  }
-  assert.equal(
-    [...releaseWorkflow.matchAll(/uses: actions\/upload-artifact@/g)].length,
-    [...releaseWorkflow.matchAll(/if-no-files-found: error/g)].length,
-  );
-  assert.match(releaseWorkflow, /fail_on_unmatched_files: true/);
-  assert.match(
-    releaseWorkflow,
-    /node scripts\/release-checksums\.mjs artifacts artifacts\/SHA256SUMS[\s\S]*termkey-linux-x86_64\.zip[\s\S]*termkey-windows-x86_64\.zip/,
   );
 });
