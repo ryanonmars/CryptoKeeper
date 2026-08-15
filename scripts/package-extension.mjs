@@ -28,14 +28,22 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDirectory, "..");
 const normalizedDate = new Date("2000-01-01T00:00:00.000Z");
 const executableExtensions = new Set([".js", ".mjs", ".cjs"]);
-const prohibitedExtensions = new Set([
-  ".env", ".map", ".md", ".markdown", ".mdx", ".rst", ".adoc", ".txt",
-  ".ts", ".tsx", ".cts", ".mts", ".jsx", ".coffee",
-  ".pem", ".key", ".crt", ".cer", ".der", ".p12", ".pfx", ".mobileprovision",
-  ".zip", ".tar", ".tgz", ".gz", ".bz2", ".xz", ".7z", ".rar", ".cab", ".dmg",
-  ".pkg", ".msi", ".apk", ".exe", ".dll", ".dylib", ".so", ".node", ".o", ".obj", ".a", ".lib",
+const runtimeExtensions = new Set([
+  ".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".json", ".svg",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".avif",
+  ".woff", ".woff2", ".ttf", ".otf",
 ]);
-const sensitiveBasenames = /(?:^|[-_.])(credential|credentials|secret|secrets|private|private-key|id_rsa|id_ecdsa|id_ed25519)(?:[-_.]|$)/i;
+const textExtensions = new Set([".html", ".htm", ".js", ".mjs", ".cjs", ".css", ".json", ".svg"]);
+const sensitiveSegment = /(?:^|[-_.])(credential|credentials|secret|secrets|token|auth|private|private-key|id_rsa|id_ecdsa|id_ed25519)(?:$|[-_.])/i;
+const supportedManifestFields = new Set([
+  "manifest_version", "name", "version", "version_name", "description", "short_name", "key", "default_locale",
+  "author", "homepage_url", "minimum_chrome_version", "update_url", "offline_enabled", "incognito",
+  "permissions", "optional_permissions", "host_permissions", "optional_host_permissions", "content_scripts",
+  "web_accessible_resources", "background", "icons", "action", "options_page", "options_ui", "devtools_page",
+  "side_panel", "chrome_url_overrides", "sandbox", "declarative_net_request", "storage", "commands",
+  "content_security_policy", "cross_origin_embedder_policy", "cross_origin_opener_policy", "externally_connectable",
+  "oauth2", "webview", "protocol_handlers", "file_handlers", "chrome_settings_overrides", "tts_engine",
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -84,8 +92,54 @@ function isNativeBinary(bytes) {
   );
 }
 
+function textContents(bytes, purpose) {
+  if (bytes.includes(0)) fail(`${purpose} has an invalid binary payload`);
+  try {
+    return new TextDecoder("utf8", { fatal: true }).decode(bytes);
+  } catch {
+    fail(`${purpose} must be valid UTF-8 text`);
+  }
+}
+
+function hasPrefix(bytes, values) {
+  return values.every((value, index) => bytes[index] === value);
+}
+
+function validateRuntimeContents(relativePath, bytes, purpose) {
+  const extension = posix.extname(relativePath).toLowerCase();
+  if (textExtensions.has(extension)) {
+    const text = textContents(bytes, purpose);
+    if (extension === ".json") {
+      try {
+        JSON.parse(text);
+      } catch {
+        fail(`${purpose} must contain valid JSON: ${relativePath}`);
+      }
+    }
+    return;
+  }
+  const signatures = {
+    ".png": () => hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ".jpg": () => hasPrefix(bytes, [0xff, 0xd8, 0xff]),
+    ".jpeg": () => hasPrefix(bytes, [0xff, 0xd8, 0xff]),
+    ".gif": () => bytes.subarray(0, 6).equals(Buffer.from("GIF87a")) || bytes.subarray(0, 6).equals(Buffer.from("GIF89a")),
+    ".webp": () => bytes.subarray(0, 4).equals(Buffer.from("RIFF")) && bytes.subarray(8, 12).equals(Buffer.from("WEBP")),
+    ".ico": () => hasPrefix(bytes, [0, 0, 1, 0]),
+    ".avif": () => bytes.subarray(4, 8).equals(Buffer.from("ftyp")),
+    ".woff": () => bytes.subarray(0, 4).equals(Buffer.from("wOFF")),
+    ".woff2": () => bytes.subarray(0, 4).equals(Buffer.from("wOF2")),
+    ".ttf": () => hasPrefix(bytes, [0, 1, 0, 0]),
+    ".otf": () => bytes.subarray(0, 4).equals(Buffer.from("OTTO")),
+  };
+  if (!signatures[extension]?.()) fail(`${purpose} does not match its allowed ${extension} runtime format`);
+}
+
 function fileIdentity(stat) {
   return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+}
+
+function sameFile(stat, descriptorStat) {
+  return stat.isFile() && descriptorStat.isFile() && stat.dev === descriptorStat.dev && stat.ino === descriptorStat.ino;
 }
 
 function localPath(referencedPath, purpose) {
@@ -103,16 +157,24 @@ function localPath(referencedPath, purpose) {
     !relativePath.startsWith("dist/") && !relativePath.startsWith("public/")
   ) fail(`${purpose} is not in the allowed roots: ${referencedPath}`);
   if (relativePath.split("/").some((segment) => segment.startsWith("."))) fail(`${purpose} must not include hidden files: ${referencedPath}`);
-  const filename = posix.basename(relativePath).toLowerCase();
-  if (prohibitedExtensions.has(posix.extname(relativePath).toLowerCase()) || sensitiveBasenames.test(filename)) {
+  const extension = posix.extname(relativePath).toLowerCase();
+  if (!runtimeExtensions.has(extension)) {
     fail(`${purpose} is not a permitted Store runtime file: ${referencedPath}`);
   }
+  if (relativePath.split("/").some((segment) => sensitiveSegment.test(segment))) fail(`${purpose} has a sensitive path segment: ${referencedPath}`);
   return relativePath;
 }
 
 function snapshotFile(extensionRoot, relativePath, purpose) {
   const path = resolve(extensionRoot, relativePath);
   if (!path.startsWith(`${extensionRoot}${sep}`)) fail(`${purpose} is outside the extension: ${relativePath}`);
+  let canonicalPath;
+  try {
+    canonicalPath = realpathSync(path);
+  } catch {
+    fail(`${purpose} is missing: ${relativePath}`);
+  }
+  if (!canonicalPath.startsWith(`${extensionRoot}${sep}`)) fail(`${purpose} is outside the canonical extension root: ${relativePath}`);
   let current = extensionRoot;
   for (const segment of relativePath.split("/")) {
     current = resolve(current, segment);
@@ -122,13 +184,16 @@ function snapshotFile(extensionRoot, relativePath, purpose) {
   }
   let descriptor;
   try {
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const observed = lstatSync(canonicalPath);
+    if (observed.isSymbolicLink() || !observed.isFile()) fail(`${purpose} must be a regular non-symlink file: ${relativePath}`);
+    descriptor = openSync(canonicalPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = fstatSync(descriptor);
-    if (!before.isFile()) fail(`${purpose} must be a regular file: ${relativePath}`);
+    if (!sameFile(observed, before)) fail(`${purpose} changed before it could be opened: ${relativePath}`);
     const bytes = readFileSync(descriptor);
     const after = fstatSync(descriptor);
     if (fileIdentity(before) !== fileIdentity(after)) fail(`${purpose} changed while being read: ${relativePath}`);
     if (isNativeBinary(bytes)) fail(`${purpose} must not be a native binary: ${relativePath}`);
+    validateRuntimeContents(relativePath, bytes, purpose);
     return { relativePath, bytes };
   } catch (error) {
     if (error?.code === "ELOOP") fail(`${purpose} must not be a symlink: ${relativePath}`);
@@ -186,6 +251,33 @@ function optionalPath(add, value, purpose) {
   if (value !== undefined) add(value, purpose);
 }
 
+function validateKeys(value, keys, purpose) {
+  for (const key of Object.keys(value)) {
+    if (!keys.has(key)) fail(`Unrecognized ${purpose} field: ${key}`);
+  }
+}
+
+function validateStringArray(value, purpose) {
+  for (const item of array(value, purpose)) {
+    if (typeof item !== "string") fail(`${purpose} must contain strings`);
+  }
+}
+
+function validateManifestSchema(manifest) {
+  object(manifest, "manifest");
+  validateKeys(manifest, supportedManifestFields, "manifest");
+  for (const field of ["permissions", "optional_permissions", "host_permissions", "optional_host_permissions"]) {
+    if (manifest[field] !== undefined) validateStringArray(manifest[field], field);
+  }
+  if (manifest.background !== undefined) validateKeys(object(manifest.background, "background"), new Set(["service_worker", "type"]), "background");
+  if (manifest.action !== undefined) validateKeys(object(manifest.action, "action"), new Set(["default_icon", "default_popup", "default_title", "default_badge_text", "default_badge_color", "default_popup_height", "default_popup_width"]), "action");
+  if (manifest.options_ui !== undefined) validateKeys(object(manifest.options_ui, "options UI"), new Set(["page", "open_in_tab"]), "options UI");
+  if (manifest.side_panel !== undefined) validateKeys(object(manifest.side_panel, "side panel"), new Set(["default_path"]), "side panel");
+  if (manifest.sandbox !== undefined) validateKeys(object(manifest.sandbox, "sandbox"), new Set(["pages", "content_security_policy"]), "sandbox");
+  if (manifest.storage !== undefined) validateKeys(object(manifest.storage, "storage"), new Set(["managed_schema"]), "storage");
+  if (manifest.declarative_net_request !== undefined) validateKeys(object(manifest.declarative_net_request, "declarative net request"), new Set(["rule_resources"]), "declarative net request");
+}
+
 function manifestPaths(extensionRoot, manifest, add) {
   add("popup.html", "required popup HTML");
   add("prompt.html", "required prompt HTML");
@@ -232,6 +324,7 @@ function manifestPaths(extensionRoot, manifest, add) {
       }
     }
   }
+  if (manifest.storage !== undefined) optionalPath(add, object(manifest.storage, "storage").managed_schema, "managed storage schema");
 }
 
 function resolvedUrlPath(parent, reference, purpose, executable) {
@@ -278,16 +371,27 @@ function javascriptReferences(snapshot) {
     return node.text;
   };
   const visit = (node) => {
+    const importScriptsReference =
+      (ts.isIdentifier(node) && node.text === "importScripts") ||
+      (ts.isPropertyAccessExpression(node) && node.name.text === "importScripts") ||
+      (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression) && node.argumentExpression.text === "importScripts");
+    if (importScriptsReference) fail(`importScripts is not permitted in ${snapshot.relativePath}`);
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier) references.push({ value: staticValue(node.moduleSpecifier, "module specifier"), purpose: "JavaScript import" });
     if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) references.push({ value: staticValue(node.arguments[0], "dynamic import"), purpose: "dynamic import" });
-      const called = ts.isIdentifier(node.expression) ? node.expression.text : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : "";
-      if (called === "importScripts") for (const argument of node.arguments) references.push({ value: staticValue(argument, "importScripts"), purpose: "importScripts" });
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
   return references;
+}
+
+function cssReferences(snapshot) {
+  const text = textContents(snapshot.bytes, `stylesheet ${snapshot.relativePath}`);
+  const references = new Set();
+  for (const match of text.matchAll(/@import\s+(?:url\(\s*)?["']?([^"'()\s;]+)["']?\s*\)?/gi)) references.add(match[1]);
+  for (const match of text.matchAll(/url\(\s*["']?([^"'()\s]+)["']?\s*\)/gi)) references.add(match[1]);
+  return [...references];
 }
 
 function collectRuntimeFiles(extensionRoot, manifestSnapshot) {
@@ -316,6 +420,11 @@ function collectRuntimeFiles(extensionRoot, manifestSnapshot) {
         if (isRemoteUrl(reference.value)) fail(`${reference.purpose} must not use a remote URL: ${reference.value}`);
         if (!reference.value.startsWith(".") && !reference.value.startsWith("/")) fail(`${reference.purpose} must use a relative extension path: ${reference.value}`);
         add(resolvedUrlPath(snapshot.relativePath, reference.value, reference.purpose, true), reference.purpose);
+      }
+    } else if (extension === ".css") {
+      for (const reference of cssReferences(snapshot)) {
+        const path = resolvedUrlPath(snapshot.relativePath, reference, "stylesheet runtime reference", false);
+        if (path) add(path, "stylesheet runtime reference");
       }
     }
   }
@@ -351,6 +460,7 @@ export function packageExtension(extensionDirectory, outputArchive) {
   if (!lstatSync(extensionRoot).isDirectory()) fail(`Extension directory is not a directory: ${extensionDirectory}`);
   const manifestSnapshot = snapshotFile(extensionRoot, "manifest.json", "Extension manifest.json");
   const manifest = JSON.parse(manifestSnapshot.bytes.toString("utf8"));
+  validateManifestSchema(manifest);
   if (manifest.manifest_version !== 3) fail("Extension manifest must be Manifest V3");
   const expectedVersion = cargoChromeVersion();
   if (chromeVersion(manifest.version, "manifest version") !== expectedVersion) fail(`Extension manifest version ${manifest.version} does not match Cargo version ${expectedVersion}`);

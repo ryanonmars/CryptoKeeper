@@ -61,7 +61,11 @@ function createFixture(t) {
   writeFixtureFile(extension, "dist/content.js", "export const content = true;\n");
   writeFixtureFile(extension, "dist/popup.js", "export const popup = true;\n");
   writeFixtureFile(extension, "dist/prompt.js", "export const prompt = true;\n");
-  writeFixtureFile(extension, "public/icon128.png", "fixture icon\n");
+  writeFixtureFile(
+    extension,
+    "public/icon128.png",
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
 
   return { root, extension };
 }
@@ -217,7 +221,11 @@ test("resolves web-accessible-resource patterns to concrete runtime files", (t) 
     { resources: ["public/images/*.png"], matches: ["https://example.test/*"] },
   ];
   writeManifest(extension, manifest);
-  writeFixtureFile(extension, "public/images/logo.png", "logo\n");
+  writeFixtureFile(
+    extension,
+    "public/images/logo.png",
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  );
   const output = resolve(root, "archive.zip");
 
   const result = runPackager(extension, output);
@@ -239,7 +247,7 @@ test("rejects a native executable even without a filename extension", (t) => {
   const result = runPackager(extension, resolve(root, "archive.zip"));
 
   assert.notEqual(result.status, 0);
-  assert.match(failure(result), /native binary/i);
+  assert.match(failure(result), /permitted|native binary/i);
 });
 
 test("rejects symlinked runtime files that escape the extension", (t) => {
@@ -251,7 +259,7 @@ test("rejects symlinked runtime files that escape the extension", (t) => {
   const result = runPackager(extension, resolve(root, "archive.zip"));
 
   assert.notEqual(result.status, 0);
-  assert.match(failure(result), /symlink|escape/i);
+  assert.match(failure(result), /symlink|escape|outside/i);
 });
 
 test("rejects a manifest symlink that escapes the extension", (t) => {
@@ -263,7 +271,7 @@ test("rejects a manifest symlink that escapes the extension", (t) => {
   const result = runPackager(extension, resolve(root, "archive.zip"));
 
   assert.notEqual(result.status, 0);
-  assert.match(failure(result), /manifest.*symlink|symlink.*manifest/i);
+  assert.match(failure(result), /manifest.*symlink|symlink.*manifest|outside/i);
 });
 
 test("rejects extension versions that do not exactly match Cargo's Chrome version", (t) => {
@@ -304,7 +312,7 @@ test("rejects remote and inline executable HTML and JavaScript", (t) => {
     const result = runPackager(extension, resolve(root, `${name}.zip`));
 
     assert.notEqual(result.status, 0, name);
-    assert.match(failure(result), /remote|inline|URL/i, name);
+    assert.match(failure(result), /remote|inline|URL|importScripts/i, name);
   }
 });
 
@@ -391,4 +399,100 @@ test("rejects control characters in runtime paths before ZIP creation", (t) => {
 
   assert.notEqual(result.status, 0);
   assert.match(failure(result), /control character/i);
+});
+
+test("rejects aliases and computed references to importScripts", (t) => {
+  const cases = [
+    'const load = importScripts; load("https://example.test/remote.js");',
+    'self["importScripts"]("https://example.test/remote.js");',
+  ];
+  for (const source of cases) {
+    const { root, extension } = createFixture(t);
+    writeFixtureFile(extension, "dist/background.js", source);
+
+    const result = runPackager(extension, resolve(root, `${createHash("sha256").update(source).digest("hex")}.zip`));
+
+    assert.notEqual(result.status, 0);
+    assert.match(failure(result), /importScripts/i);
+  }
+});
+
+test("includes managed storage schema and rejects unknown manifest fields", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.storage = { managed_schema: "public/schema.json" };
+  writeManifest(extension, manifest);
+  writeFixtureFile(extension, "public/schema.json", "{}\n");
+  const output = resolve(root, "schema.zip");
+
+  const included = runPackager(extension, output);
+
+  assert.equal(included.status, 0, failure(included));
+  assert.equal(run("unzip", ["-Z1", output]).stdout.split("\n").includes("public/schema.json"), true);
+
+  manifest.future_runtime_asset = "public/schema.json";
+  writeManifest(extension, manifest);
+  const rejected = runPackager(extension, resolve(root, "unknown.zip"));
+
+  assert.notEqual(rejected.status, 0);
+  assert.match(failure(rejected), /unrecognized manifest field/i);
+});
+
+test("uses a strict runtime type allowlist and validates claimed file formats", (t) => {
+  const cases = [
+    ["dist/source.py", "print('not runtime')\n"],
+    ["dist/auth-token.json", "{}\n"],
+    ["public/renamed.png", Buffer.from("PK\x03\x04")],
+    ["dist/renamed.js", Buffer.from([0xcf, 0xfa, 0xed, 0xfe])],
+  ];
+  for (const [path, contents] of cases) {
+    const { root, extension } = createFixture(t);
+    const manifest = readManifest(extension);
+    manifest.web_accessible_resources = [{ resources: [path], matches: ["https://example.test/*"] }];
+    writeManifest(extension, manifest);
+    writeFixtureFile(extension, path, contents);
+
+    const result = runPackager(extension, resolve(root, `${path.replaceAll("/", "-")}.zip`));
+
+    assert.notEqual(result.status, 0, path);
+    assert.match(failure(result), /permitted|sensitive|format|native/i, path);
+  }
+});
+
+test("rejects an ancestor symlink that resolves outside the canonical extension root", (t) => {
+  const { root, extension } = createFixture(t);
+  const outside = resolve(root, "outside");
+  mkdirSync(outside, { recursive: true });
+  writeFixtureFile(outside, "background.js", "export {};\n");
+  rmSync(resolve(extension, "dist"), { recursive: true, force: true });
+  symlinkSync(outside, resolve(extension, "dist"));
+
+  const result = runPackager(extension, resolve(root, "ancestor.zip"));
+
+  assert.notEqual(result.status, 0);
+  assert.match(failure(result), /outside|symlink/i);
+});
+
+test("recursively resolves local CSS imports, images, and fonts", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.content_scripts[0].css = ["dist/styles.css"];
+  writeManifest(extension, manifest);
+  writeFixtureFile(
+    extension,
+    "dist/styles.css",
+    '@import url("nested.css"); .hero { background: url("../public/image.png?cache=1"); }',
+  );
+  writeFixtureFile(extension, "dist/nested.css", '@font-face { src: url("../public/font.woff2"); }');
+  writeFixtureFile(extension, "public/image.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  writeFixtureFile(extension, "public/font.woff2", Buffer.from("wOF2"));
+  const output = resolve(root, "css.zip");
+
+  const result = runPackager(extension, output);
+
+  assert.equal(result.status, 0, failure(result));
+  const entries = run("unzip", ["-Z1", output]).stdout.split("\n");
+  for (const path of ["dist/styles.css", "dist/nested.css", "public/image.png", "public/font.woff2"]) {
+    assert.equal(entries.includes(path), true, path);
+  }
 });
