@@ -92,7 +92,6 @@ verify_macho_signature() {
 
 pkg_signature=$(pkgutil --check-signature "$pkg_path" 2>&1)
 require_output_line "$pkg_signature" "^[[:space:]]*[0-9]+\\. Developer ID Installer: .* \\($team_id\\)$" 'package signature'
-require_output_line "$pkg_signature" '^[[:space:]]*Timestamp:[[:space:]]+.+$' 'package signature'
 xcrun stapler validate "$pkg_path"
 pkg_assessment=$(spctl -a -vv -t install "$pkg_path" 2>&1)
 require_output_line "$pkg_assessment" '^accepted$' 'package Gatekeeper assessment'

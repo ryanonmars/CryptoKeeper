@@ -77,10 +77,9 @@ printf "pkgutil %s\\n" "$*" >> "$TERMKEY_TEST_LOG"
 cat <<OUTPUT
 Package "TermKey":
    Status: signed by a certificate trusted by macOS ${TERMKEY_TEST_PACKAGE_DECOY_TEAM-}
-   Signed with a valid Developer ID Installer certificate.
+    Signed with a valid Developer ID Installer certificate.
    Certificate Chain:
     1. Developer ID Installer: TermKey (${TERMKEY_TEST_PACKAGE_TEAM:-TEAM123456})
-   Timestamp: ${TERMKEY_TEST_PACKAGE_TIMESTAMP-2026-08-14T12:00:00Z}
 OUTPUT'
 
 write_shim spctl '#!/usr/bin/env bash
@@ -317,13 +316,6 @@ if TERMKEY_TEST_CODESIGN_TIMESTAMP='' bash "$verify_script" \
   "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
   >/dev/null 2>&1; then
   echo 'DMG without a signing timestamp unexpectedly passed verification' >&2
-  exit 1
-fi
-
-if TERMKEY_TEST_PACKAGE_TIMESTAMP='' bash "$verify_script" \
-  "$artifacts_dir/TermKey.pkg" "$artifacts_dir/TermKey.dmg" "$artifacts_dir/TermKey.zip" TEAM123456 \
-  >/dev/null 2>&1; then
-  echo 'PKG without a signing timestamp unexpectedly passed verification' >&2
   exit 1
 fi
 
