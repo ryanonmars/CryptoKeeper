@@ -184,7 +184,7 @@ export PATH="$bin_dir:$PATH"
 
 assert_log_contains() {
   local expected=$1
-  if ! rg -F --quiet -- "$expected" "$TERMKEY_TEST_LOG"; then
+  if ! grep -Fq -- "$expected" "$TERMKEY_TEST_LOG"; then
     echo "expected command log to contain: $expected" >&2
     cat "$TERMKEY_TEST_LOG" >&2
     exit 1
@@ -193,7 +193,7 @@ assert_log_contains() {
 
 assert_log_not_contains() {
   local unexpected=$1
-  if rg -F --quiet -- "$unexpected" "$TERMKEY_TEST_LOG"; then
+  if grep -Fq -- "$unexpected" "$TERMKEY_TEST_LOG"; then
     echo "command log unexpectedly contained: $unexpected" >&2
     cat "$TERMKEY_TEST_LOG" >&2
     exit 1
@@ -204,7 +204,7 @@ assert_log_count() {
   local expected=$1
   local count=$2
   local actual
-  actual=$(rg -F --count-matches -- "$expected" "$TERMKEY_TEST_LOG" || true)
+  actual=$(grep -Fc -- "$expected" "$TERMKEY_TEST_LOG" || true)
   if [[ "$actual" != "$count" ]]; then
     echo "expected $count occurrences of: $expected (found $actual)" >&2
     cat "$TERMKEY_TEST_LOG" >&2
@@ -216,7 +216,7 @@ assert_log_regex_count() {
   local pattern=$1
   local count=$2
   local actual
-  actual=$(rg --count -- "$pattern" "$TERMKEY_TEST_LOG" || true)
+  actual=$(grep -Ec -- "$pattern" "$TERMKEY_TEST_LOG" || true)
   if [[ "$actual" != "$count" ]]; then
     echo "expected $count matching commands: $pattern (found $actual)" >&2
     cat "$TERMKEY_TEST_LOG" >&2
@@ -434,11 +434,11 @@ if TERMKEY_TEST_HDIUTIL_FAIL=create bash "$create_dmg_script" \
   echo 'exhausted hdiutil create failures unexpectedly succeeded' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
-if [[ $(rg -F --count-matches -- 'hdiutil create ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+if [[ $(grep -Fc -- 'hdiutil create ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
   echo 'hdiutil create was not attempted exactly three times' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
-if rg -F --quiet -- 'hdiutil convert ' "$TERMKEY_TEST_LOG"; then
+if grep -Fq -- 'hdiutil convert ' "$TERMKEY_TEST_LOG"; then
   echo 'DMG conversion ran after exhausted hdiutil create failures' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
@@ -451,7 +451,7 @@ if TERMKEY_TEST_HDIUTIL_FAIL=convert bash "$create_dmg_script" \
   echo 'exhausted hdiutil convert failures unexpectedly succeeded' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
-if [[ $(rg -F --count-matches -- 'hdiutil convert ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+if [[ $(grep -Fc -- 'hdiutil convert ' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
   echo 'hdiutil convert was not attempted exactly three times' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
@@ -461,11 +461,11 @@ detach_failure_output="$test_root/dmg-detach-failure"
 mkdir -p "$detach_failure_output"
 TERMKEY_TEST_HDIUTIL_FAIL=detach bash "$create_dmg_script" \
   "$artifacts_dir/TermKey.pkg" termkey-detach-failure 'TermKey Test' "$detach_failure_output"
-if [[ $(rg -F --count-matches -- 'hdiutil detach /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
+if [[ $(grep -Fc -- 'hdiutil detach /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 3 ]]; then
   echo 'hdiutil detach was not attempted exactly three times before forcing' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
-if [[ $(rg -F --count-matches -- 'hdiutil detach -force /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 1 ]]; then
+if [[ $(grep -Fc -- 'hdiutil detach -force /dev/disk99' "$TERMKEY_TEST_LOG" || true) != 1 ]]; then
   echo 'hdiutil detach did not force-detach after exhausted normal attempts' >&2
   dmg_test_failures=$((dmg_test_failures + 1))
 fi
