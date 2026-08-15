@@ -61,6 +61,22 @@ esac
 if [[ "$termkey_release_signing" == "required" ]]; then
   : "${APPLE_APPLICATION_SIGNING_IDENTITY:?APPLE_APPLICATION_SIGNING_IDENTITY is required when TERMKEY_RELEASE_SIGNING is required}"
   : "${APPLE_INSTALLER_SIGNING_IDENTITY:?APPLE_INSTALLER_SIGNING_IDENTITY is required when TERMKEY_RELEASE_SIGNING is required}"
+
+  case "$APPLE_APPLICATION_SIGNING_IDENTITY" in
+    "Developer ID Application: "?*) ;;
+    *)
+      echo "APPLE_APPLICATION_SIGNING_IDENTITY must be a Developer ID Application identity" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$APPLE_INSTALLER_SIGNING_IDENTITY" in
+    "Developer ID Installer: "?*) ;;
+    *)
+      echo "APPLE_INSTALLER_SIGNING_IDENTITY must be a Developer ID Installer identity" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [[ ! -f "$native_host_binary_path" ]]; then

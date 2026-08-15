@@ -173,6 +173,36 @@ test('macOS packaging accepts only arm64 and validates its release contract', as
   assert.match(invalidSigningMode.stderr, /invalid TERMKEY_RELEASE_SIGNING value: unexpected/);
 });
 
+test('macOS packaging requires Developer ID signing identities', async () => {
+  const binaryPath = await createMacPackageFixture();
+
+  const invalidApplicationIdentity = runMacPackageScript(binaryPath, {
+    TERMKEY_MACOS_ARCH: 'arm64',
+    MACOSX_DEPLOYMENT_TARGET: '11.0',
+    TERMKEY_RELEASE_SIGNING: 'required',
+    APPLE_APPLICATION_SIGNING_IDENTITY: 'Apple Development: TermKey (ABCDE12345)',
+    APPLE_INSTALLER_SIGNING_IDENTITY: 'Developer ID Installer: TermKey (ABCDE12345)',
+  });
+  assert.notEqual(invalidApplicationIdentity.status, 0);
+  assert.match(
+    invalidApplicationIdentity.stderr,
+    /APPLE_APPLICATION_SIGNING_IDENTITY must be a Developer ID Application identity/,
+  );
+
+  const invalidInstallerIdentity = runMacPackageScript(binaryPath, {
+    TERMKEY_MACOS_ARCH: 'arm64',
+    MACOSX_DEPLOYMENT_TARGET: '11.0',
+    TERMKEY_RELEASE_SIGNING: 'required',
+    APPLE_APPLICATION_SIGNING_IDENTITY: 'Developer ID Application: TermKey (ABCDE12345)',
+    APPLE_INSTALLER_SIGNING_IDENTITY: 'Mac Developer Installer: TermKey (ABCDE12345)',
+  });
+  assert.notEqual(invalidInstallerIdentity.status, 0);
+  assert.match(
+    invalidInstallerIdentity.stderr,
+    /APPLE_INSTALLER_SIGNING_IDENTITY must be a Developer ID Installer identity/,
+  );
+});
+
 test('release workflow requires the exact artifact manifest', async () => {
   const releaseWorkflow = await readFile(
     path.join(repositoryRoot, '.github/workflows/release.yml'),
