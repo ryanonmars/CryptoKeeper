@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "TermKey Extension",
-  "version": "1.0.2",
+  "version": "1.0.2.1",
+  "version_name": "1.0.2",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAucBgnmzr2+lcO+8JIo4mBZX+HD5V6JLq0gVuX3jbQ5fSYaUED1CCBPn5hf92ry3VIHS67zCMNwU7O7jFiFYS2GAXBs7KhrKHoj7Xl9/3ua2bcT9Fumac0vtz/Qc0uoXGSs/a/Ep9yv9plflAvmRcSFg56hme71mTb2Xp+HkgDtzExF6CNt5vHlAGOQNP6zzKbARVx9UjI5nI/Wmp1CETrAXW0ilS+ZEaGz0R7p3ZnHk7PQW9LdiJdwInzSYRqWk7n+DIl+fDaN+PZnwblxFYb51AOSKFg3/A3yqJw3tXvJS5xZtI61sWEanPtyDTq37jURE+XYxIvLWo9LEvdMpnwwIDAQAB",
   "description": "Autofill and credential manager",
-  "permissions": ["storage", "activeTab", "scripting", "nativeMessaging"],
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {

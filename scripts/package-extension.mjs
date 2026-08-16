@@ -72,6 +72,19 @@ function cargoChromeVersion() {
   return chromeVersion(cargoVersion, "apps/cli/Cargo.toml version");
 }
 
+function isChromeStoreVersion(manifestVersion, releaseVersion) {
+  const validatedManifestVersion = chromeVersion(manifestVersion, "manifest version");
+  if (validatedManifestVersion === releaseVersion) return true;
+  const manifestParts = validatedManifestVersion.split(".");
+  const releaseParts = releaseVersion.split(".");
+  return (
+    releaseParts.length === 3 &&
+    manifestParts.length === 4 &&
+    manifestParts.slice(0, 3).every((part, index) => part === releaseParts[index]) &&
+    Number(manifestParts[3]) > 0
+  );
+}
+
 function isNativeBinary(bytes) {
   const header = bytes.subarray(0, 4);
   return (
@@ -971,7 +984,9 @@ export function packageExtension(extensionDirectory, outputArchive, hooks = {}) 
   validateManifestSchema(manifest);
   if (manifest.manifest_version !== 3) fail("Extension manifest must be Manifest V3");
   const expectedVersion = cargoChromeVersion();
-  if (chromeVersion(manifest.version, "manifest version") !== expectedVersion) fail(`Extension manifest version ${manifest.version} does not match Cargo version ${expectedVersion}`);
+  if (!isChromeStoreVersion(manifest.version, expectedVersion)) {
+    fail(`Extension manifest version ${manifest.version} does not match Cargo version ${expectedVersion} or a Chrome Store revision of it`);
+  }
   const snapshots = collectRuntimeFiles(extensionRoot, storeManifestSnapshot(manifestSnapshot, manifest), hooks);
   const outputDirectory = dirname(output);
   mkdirSync(outputDirectory, { recursive: true });

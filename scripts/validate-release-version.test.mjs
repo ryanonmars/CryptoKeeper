@@ -146,6 +146,25 @@ test("accepts matching workspace, lockfile, dependency, and manifest versions", 
   assert.match(result.stdout, /Release versions match 0\.2\.26\./);
 });
 
+test("accepts a fourth-component Chrome Store manifest revision", (t) => {
+  const root = createFixture(t);
+  writeFixtureFile(
+    root,
+    "apps/extension/manifest.json",
+    JSON.stringify({ version: "0.2.26.1", version_name: "0.2.26" }),
+  );
+  writeFixtureFile(
+    root,
+    "apps/extension/public/manifest.json",
+    JSON.stringify({ version: "0.2.26.1", version_name: "0.2.26" }),
+  );
+
+  const result = runValidator(root);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Release versions match 0\.2\.26\./);
+});
+
 test("rejects an npm workspace package version mismatch", (t) => {
   const root = createFixture(t);
   writeFixtureFile(

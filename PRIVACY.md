@@ -12,7 +12,7 @@ When you choose to save a login, the extension reads the visible username and pa
 
 ## Extension data and retention
 
-The current extension does not call `chrome.storage.local`, `chrome.storage.sync`, or `chrome.storage.session`; it stores no data in Chrome storage. The manifest declares the `storage` permission, but the current extension does not use that API.
+The current extension does not call `chrome.storage.local`, `chrome.storage.sync`, or `chrome.storage.session`; it stores no data in Chrome storage.
 
 While the extension service worker is running, it keeps limited working state in memory: short-lived match grants (up to 30 seconds) and a pending login selected for a save or update (up to 120 seconds). That pending login can include the submitted username and password. This state is cleared when its operation finishes or expires, and it is not written through the Chrome storage API.
 
@@ -26,9 +26,10 @@ The desktop application separately checks GitHub's latest-release API when it pe
 
 TermKey does not sell personal information. It does not use analytics or advertising SDKs. Vault secrets, master passwords, secondary passwords, generated passwords, and page login credentials are not transmitted to the developer or to third parties.
 
+TermKey's use of information received from Google APIs will adhere to the Chrome Web Store User Data Policy, including the Limited Use requirements.
+
 ## Chrome permission purposes
 
-- `storage` is declared in the manifest but is not used by the current extension.
 - `activeTab` identifies the active page for an action you initiate from the extension.
 - `scripting` can restore the TermKey content script on that active page when Chrome has not already loaded it.
 - `nativeMessaging` connects Chrome to the local TermKey native host.

@@ -159,6 +159,23 @@ function addVersionMismatch(errors, path, expected, actual) {
   }
 }
 
+function addChromeManifestVersionMismatch(errors, path, expected, actual) {
+  const expectedParts = expected.split(".");
+  const actualParts = typeof actual === "string" ? actual.split(".") : [];
+  const isStoreRevision =
+    expectedParts.length === 3 &&
+    actualParts.length === 4 &&
+    actualParts.slice(0, 3).every((part, index) => part === expectedParts[index]) &&
+    /^(?:0|[1-9]\d*)$/.test(actualParts[3] ?? "") &&
+    Number(actualParts[3]) > 0 &&
+    Number(actualParts[3]) <= 65535;
+  if (actual !== expected && !isStoreRevision) {
+    errors.push(
+      `${path}: expected ${expected} or a Chrome Store revision of it, found ${displayVersion(actual)}`,
+    );
+  }
+}
+
 export function validateReleaseVersion(root, tag) {
   const errors = [];
   const canonicalPackage = readCargoPackage(root, "apps/cli/Cargo.toml");
@@ -251,7 +268,7 @@ export function validateReleaseVersion(root, tag) {
     "apps/extension/manifest.json",
     "apps/extension/public/manifest.json",
   ]) {
-    addVersionMismatch(
+    addChromeManifestVersionMismatch(
       errors,
       manifestPath,
       canonicalVersion,

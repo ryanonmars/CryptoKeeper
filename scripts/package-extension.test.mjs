@@ -294,7 +294,19 @@ test("rejects a manifest symlink that escapes the extension", (t) => {
   assert.match(failure(result), /manifest.*symlink|symlink.*manifest|outside/i);
 });
 
-test("rejects extension versions that do not exactly match Cargo's Chrome version", (t) => {
+test("accepts a fourth-component Chrome Store revision of Cargo's Chrome version", (t) => {
+  const { root, extension } = createFixture(t);
+  const manifest = readManifest(extension);
+  manifest.version = "1.0.2.1";
+  manifest.version_name = "1.0.2";
+  writeManifest(extension, manifest);
+
+  const result = runPackager(extension, resolve(root, "archive.zip"));
+
+  assert.equal(result.status, 0, failure(result));
+});
+
+test("rejects extension versions outside Cargo's Chrome release line", (t) => {
   const { root, extension } = createFixture(t);
   const manifest = readManifest(extension);
   manifest.version = "1.0.3";
