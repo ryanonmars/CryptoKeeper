@@ -67,8 +67,6 @@ Read the [Privacy Policy](https://github.com/ryanonmars/termkey/blob/master/PRIV
 
 Run `termkey` with no subcommand to open the TUI.
 
-When terminal graphics are supported, TermKey shows a short pre-TUI splash icon before entering the fullscreen app. The current best-effort auto-detected targets are Kitty and Ghostty via the Kitty graphics protocol, plus iTerm2 via its OSC 1337 inline-image protocol. iTerm2 may prompt for permission before displaying inline images. `tmux` is disabled by default because redraws can wipe terminal images. Override detection with `TERMKEY_GRAPHICS=kitty` or `TERMKEY_GRAPHICS=iterm2`, disable it with `TERMKEY_GRAPHICS=off`, and adjust the delay with `TERMKEY_SPLASH_MS=<milliseconds>`.
-
 On first launch, TermKey opens a setup wizard where you:
 
 1. Create your master password
