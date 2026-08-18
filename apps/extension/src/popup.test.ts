@@ -86,7 +86,11 @@ function nativeRecoveryChrome(
 it("offers downloads, Homebrew instructions, and retry when the native host is missing", async () => {
   const create = vi.fn();
   const writeText = vi.fn().mockResolvedValue(undefined);
-  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  vi.stubGlobal("navigator", {
+    clipboard: { writeText },
+    platform: "MacIntel",
+    userAgent: "Mozilla/5.0 (Macintosh)",
+  });
   nativeRecoveryChrome(
     [{ ok: false, error: "Specified native messaging host not found." }],
     create
@@ -114,6 +118,37 @@ it("offers downloads, Homebrew instructions, and retry when the native host is m
   expect(create).toHaveBeenCalledWith({
     url: "https://github.com/ryanonmars/termkey#apple-silicon-macos-11-or-later",
   });
+});
+
+it("does not offer the macOS installer on Windows", async () => {
+  const create = vi.fn();
+  vi.stubGlobal("navigator", {
+    platform: "Win32",
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  });
+  nativeRecoveryChrome(
+    [{ ok: false, error: "Specified native messaging host not found." }],
+    create
+  );
+
+  await import("./popup");
+
+  expect(document.querySelector("#native-recovery-title")?.textContent).toBe(
+    "TermKey is not available for Windows yet"
+  );
+  expect(document.querySelector("#native-recovery-description")?.textContent).toContain(
+    "Apple Silicon macOS only"
+  );
+  expect(
+    document.querySelector("#download-termkey")?.hasAttribute("hidden")
+  ).toBe(true);
+  expect(
+    document.querySelector("#install-homebrew")?.hasAttribute("hidden")
+  ).toBe(true);
+
+  document.querySelector<HTMLButtonElement>("#download-termkey")?.click();
+  document.querySelector<HTMLButtonElement>("#install-homebrew")?.click();
+  expect(create).not.toHaveBeenCalled();
 });
 
 it("identifies stale native integration separately", async () => {

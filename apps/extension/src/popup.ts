@@ -806,6 +806,24 @@ const TERMKEY_README_INSTALL_URL =
   "https://github.com/ryanonmars/termkey#apple-silicon-macos-11-or-later";
 const TERMKEY_HOMEBREW_COMMAND = "brew install ryanonmars/termkey/termkey";
 
+type InstallPlatform = "macos" | "windows" | "other";
+
+function detectInstallPlatform(): InstallPlatform {
+  const platform = navigator.platform?.toLowerCase() ?? "";
+  const userAgent = navigator.userAgent?.toLowerCase() ?? "";
+  const platformHint = `${platform} ${userAgent}`;
+
+  if (platformHint.includes("win")) {
+    return "windows";
+  }
+  if (platformHint.includes("mac")) {
+    return "macos";
+  }
+  return "other";
+}
+
+const installPlatform = detectInstallPlatform();
+
 let currentSiteMatches: PopupSiteMatch[] = [];
 let pendingFillMatch: PopupSiteMatch | null = null;
 let pendingSaveCandidate: SaveCandidate | null = null;
@@ -921,7 +939,24 @@ function showNativeRecovery(error: string) {
 
   nativeRecovery.hidden = false;
   retryNativeHostButton.disabled = false;
+  const supportsCurrentInstaller = installPlatform === "macos";
+  downloadTermKeyButton.hidden = !supportsCurrentInstaller;
+  installHomebrewButton.hidden = !supportsCurrentInstaller;
+
   if (hostMissing) {
+    if (installPlatform === "windows") {
+      nativeRecoveryTitle.textContent = "TermKey is not available for Windows yet";
+      nativeRecoveryDescription.textContent =
+        "The current TermKey desktop release and Chrome integration support Apple Silicon macOS only.";
+      return;
+    }
+    if (installPlatform === "other") {
+      nativeRecoveryTitle.textContent = "TermKey is not available for this platform yet";
+      nativeRecoveryDescription.textContent =
+        "The current TermKey desktop release and Chrome integration support Apple Silicon macOS only.";
+      return;
+    }
+
     nativeRecoveryTitle.textContent = "TermKey is not installed or connected";
     nativeRecoveryDescription.textContent =
       "Install TermKey, then make sure its Chrome integration is registered.";
@@ -2115,9 +2150,14 @@ function launchTermKey() {
 generatePasswordButton.addEventListener("click", beginGeneratedPasswordFlow);
 openTermKeyButton.addEventListener("click", launchTermKey);
 downloadTermKeyButton.addEventListener("click", () => {
-  chrome.tabs.create({ url: TERMKEY_DMG_URL });
+  if (installPlatform === "macos") {
+    chrome.tabs.create({ url: TERMKEY_DMG_URL });
+  }
 });
 installHomebrewButton.addEventListener("click", async () => {
+  if (installPlatform !== "macos") {
+    return;
+  }
   const copied = await copyHomebrewCommand();
   renderMessage(
     copied

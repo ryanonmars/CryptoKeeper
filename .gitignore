@@ -14,3 +14,7 @@ node_modules/
 !README.md
 !PRIVACY.md
 .worktrees/
+
+# Generated and review screenshots
+screenshots/*.png
+screenshots/**/*.png
