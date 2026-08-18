@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TermKey — Encrypted Vault for Private Keys</title>
-  <meta name="description" content="TermKey is a local-only, encrypted TUI vault for private keys and seed phrases. XChaCha20-Poly1305 + Argon2id. Zero cloud. Zero trust.">
+  <meta name="description" content="TermKey is a local-only, encrypted TUI vault for private keys, seed phrases, and passwords. XChaCha20-Poly1305 + Argon2id. Zero cloud. Zero trust.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -636,7 +636,7 @@
           <div class="feat-content">
             <span class="f-key">~/.termkey/</span>
             <span class="f-val">local-only storage</span>
-            <span class="f-desc">no network access, no cloud sync</span>
+            <span class="f-desc">no cloud sync, no remote vault service</span>
           </div>
         </div>
       </div>
@@ -681,7 +681,7 @@
       </div>
       <div class="sub-panel" id="subpanel-macos-chrome">
         <div class="install-card">
-          <p class="install-intro">Install the Store extension, then register the local native-messaging host.</p>
+          <p class="install-intro">Run the browser installer to register the local native-messaging host and open the Chrome Web Store listing.</p>
           <div class="dl-grid">
             <a class="dl-btn" href="https://chromewebstore.google.com/detail/dancadidkgcdlfdlfpbmmiokkeedpini" target="_blank" rel="noopener">
               TermKey Extension <span class="arch">Chrome Web Store</span>
@@ -742,7 +742,7 @@
         <div class="step">
           <div class="step-num">3</div>
           <div>
-            <div class="step-title">Add a private key or seed phrase</div>
+            <div class="step-title">Add a private key, seed phrase, or password</div>
             <div class="step-desc">Press <code>Shift+A</code> from the dashboard. Fill in the form — the secret field is hidden and never touches shell history.</div>
             <div class="step-code">
               <span class="out">  Shift+A    open add-entry form</span><br>
@@ -757,7 +757,7 @@
           <div class="step-num">4</div>
           <div>
             <div class="step-title">View or copy a secret</div>
-            <div class="step-desc">Select an entry with arrow keys. Press <code>Shift+V</code> to reveal, or <code>Shift+C</code> to copy to clipboard — it auto-clears after 10 seconds.</div>
+            <div class="step-desc">Select an entry with arrow keys. Press <code>Shift+V</code> to reveal, or <code>Shift+C</code> to copy to clipboard — it auto-clears after the configured timeout, 10 seconds by default.</div>
             <div class="step-code">
               <span class="out">  Shift+V    view secret (revealed in TUI)</span><br>
               <span class="out">  Shift+C    copy to clipboard</span><br>
@@ -819,9 +819,9 @@
         <div class="h-row"><span class="h-name">Shift+F</span><span class="h-desc">Find / filter entries</span></div>
 
         <div class="h-label">entry operations</div>
-        <div class="h-row"><span class="h-name">Shift+A</span><span class="h-desc">Add a new private key or seed phrase</span></div>
+        <div class="h-row"><span class="h-name">Shift+A</span><span class="h-desc">Add a new private key, seed phrase, or password</span></div>
         <div class="h-row"><span class="h-name">Shift+V</span><span class="h-desc">View selected entry (secret revealed in TUI)</span></div>
-        <div class="h-row"><span class="h-name">Shift+C</span><span class="h-desc">Copy secret to clipboard — auto-clears after 10s</span></div>
+        <div class="h-row"><span class="h-name">Shift+C</span><span class="h-desc">Copy secret to clipboard — auto-clears after the configured timeout</span></div>
         <div class="h-row"><span class="h-name">Shift+E</span><span class="h-desc">Edit selected entry</span></div>
         <div class="h-row"><span class="h-name">Shift+D</span><span class="h-desc">Delete entry (confirmation required)</span></div>
 
